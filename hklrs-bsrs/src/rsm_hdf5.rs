@@ -15,7 +15,13 @@ use std::path::PathBuf;
 use bsrs::event_model::StreamResource;
 use hklrs::normalise::RawFrame;
 use rust_hdf5::format::FormatError;
-use rust_hdf5::{DatatypeMessage, H5File, Hdf5Error};
+use rust_hdf5::format::messages::filter::{
+    BSHUF_COMPRESS_LZ4, FILTER_BITGROOM, FILTER_BITROUND, FILTER_BLOSC, FILTER_BLOSC2,
+    FILTER_BSHUF, FILTER_BZIP2, FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_JPEG, FILTER_LZ4,
+    FILTER_LZF, FILTER_NBIT, FILTER_SCALEOFFSET, FILTER_SHUFFLE, FILTER_SZIP, FILTER_ZFP,
+    FILTER_ZSTD,
+};
+use rust_hdf5::{DatatypeMessage, Filter, H5File, Hdf5Error};
 
 use crate::rsm::{FrameReader, ReadError};
 
@@ -53,6 +59,15 @@ pub enum Hdf5FrameError {
     NotFrames { shape: Vec<usize> },
     #[error("pixel {pixel}, {value}, has no exact f64")]
     Inexact { pixel: usize, value: i128 },
+    /// A filter of the dataset's pipeline this reader does not decode, such
+    /// as NDFileHDF5's JPEG.
+    #[error("HDF5 filter {id} ({name}) is not one this reader decodes")]
+    UnsupportedFilter { id: u16, name: String },
+    /// A pixel type rust-hdf5 does not convert, such as the reduced-precision
+    /// integer NDFileHDF5 sets for its N-bit compression (`H5Tset_precision`,
+    /// `NDFileHDF5.cpp:3362`).
+    #[error("pixel type not readable: {0}")]
+    UnsupportedType(String),
     /// Metadata whose checksum does not match: read while the writer was
     /// rewriting it, or corrupt. libhdf5's SWMR reader reads such metadata
     /// again (`H5Pset_metadata_read_attempts`); rust-hdf5's `H5File` reads
@@ -65,21 +80,53 @@ pub enum Hdf5FrameError {
 
 impl From<Hdf5Error> for Hdf5FrameError {
     fn from(e: Hdf5Error) -> Self {
-        // rust-hdf5's I/O-layer error type is private (`pub(crate) mod io`),
-        // so a mismatch it raises is known by its text.
-        let checksum = match &e {
-            Hdf5Error::Format(FormatError::ChecksumMismatch { .. }) => true,
-            Hdf5Error::IoLayer(io) => io
-                .to_string()
-                .starts_with("format error: checksum mismatch"),
-            _ => false,
-        };
-        if checksum {
-            Self::ChecksumMismatch(e.to_string())
-        } else {
-            Self::Hdf5(e.to_string())
+        match e {
+            Hdf5Error::TypeMismatch(datatype) => Self::UnsupportedType(datatype),
+            Hdf5Error::Format(FormatError::ChecksumMismatch { .. }) => {
+                Self::ChecksumMismatch(e.to_string())
+            }
+            // rust-hdf5's I/O-layer error type is private (`pub(crate) mod
+            // io`), so a mismatch it raises is known by its text.
+            Hdf5Error::IoLayer(ref io)
+                if io
+                    .to_string()
+                    .starts_with("format error: checksum mismatch") =>
+            {
+                Self::ChecksumMismatch(e.to_string())
+            }
+            e => Self::Hdf5(e.to_string()),
         }
     }
+}
+
+/// The first filter of `pipeline` this reader does not decode. The others
+/// are those rust-hdf5 0.7.13 decodes with the workspace's features
+/// (deflate, lz4, blosc, zstd), each read from a file in
+/// `golden/ndfilehdf5_filters.h5`.
+fn undecodable(pipeline: &[Filter]) -> Option<Hdf5FrameError> {
+    pipeline.iter().find_map(|filter| {
+        let name = match filter.id {
+            FILTER_DEFLATE | FILTER_SHUFFLE | FILTER_FLETCHER32 | FILTER_SZIP | FILTER_NBIT
+            | FILTER_SCALEOFFSET | FILTER_LZF | FILTER_BLOSC | FILTER_LZ4 | FILTER_ZSTD
+            | FILTER_BITGROOM | FILTER_BITROUND => return None,
+            // cd_values[4] is the compression after the bit transpose, none
+            // when absent, as rust-hdf5 reads it.
+            FILTER_BSHUF => match filter.cd_values.get(4).copied().unwrap_or(0) {
+                0 | BSHUF_COMPRESS_LZ4 => return None,
+                3 => "bitshuffle with zstd".into(),
+                other => format!("bitshuffle with compression {other}"),
+            },
+            FILTER_BZIP2 => "bzip2".into(),
+            FILTER_ZFP => "zfp".into(),
+            FILTER_JPEG => "jpeg".into(),
+            FILTER_BLOSC2 => "blosc2".into(),
+            _ => "unknown".into(),
+        };
+        Some(Hdf5FrameError::UnsupportedFilter {
+            id: filter.id,
+            name,
+        })
+    })
 }
 
 impl Hdf5FrameReader {
@@ -110,6 +157,9 @@ impl Hdf5FrameReader {
             _ => e.into(),
         })?;
         let ds = file.dataset(dataset)?;
+        if let Some(e) = undecodable(&ds.filters()?) {
+            return Err(e);
+        }
         let shape = ds.shape();
         let &[frames, slow, fast] = shape.as_slice() else {
             return Err(Hdf5FrameError::NotFrames { shape });
@@ -154,6 +204,8 @@ impl FrameReader for Hdf5FrameReader {
             | Hdf5FrameError::NotLocal { .. }
             | Hdf5FrameError::NotFrames { .. }
             | Hdf5FrameError::Inexact { .. }
+            | Hdf5FrameError::UnsupportedFilter { .. }
+            | Hdf5FrameError::UnsupportedType(_)
             | Hdf5FrameError::Hdf5(_) => ReadError::Permanent(e.into()),
         })
     }

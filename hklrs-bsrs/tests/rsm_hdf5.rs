@@ -604,3 +604,142 @@ fn a_file_that_is_not_hdf5_fails_in_hdf5() {
     assert!(matches!(e, Hdf5FrameError::Hdf5(_)), "{e:?}");
     assert!(!not_yet(&image_resource(&dir), 0));
 }
+
+// -- the compressions NDFileHDF5 writes ---------------------------------------
+
+/// Dataset `/{name}/data` of golden/ndfilehdf5_filters.h5, which
+/// golden/ndfilehdf5_filters.py writes: two frames of 64 x 48, a chunk each.
+fn compressed(name: &str) -> StreamResource {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../golden/ndfilehdf5_filters.h5")
+        .canonicalize()
+        .unwrap();
+    ad_resource(
+        format!("file://localhost{}", path.display()),
+        &format!("/{name}/data"),
+        &[1, 64, 48],
+    )
+}
+
+/// Frame `f` of every dataset there: pixel (r, c) is
+/// (101 f + 37 (r / 4) + 11 (c / 3)) % 4096.
+fn compressed_pixels(f: usize) -> Vec<f64> {
+    (0..64)
+        .flat_map(|r| (0..48).map(move |c| ((101 * f + 37 * (r / 4) + 11 * (c / 3)) % 4096) as f64))
+        .collect()
+}
+
+/// Both frames of each dataset read as written.
+fn reads_as_written(names: &[&str]) {
+    for name in names {
+        for f in 0..2 {
+            let frame = Hdf5FrameReader
+                .frame(&compressed(name), f as u64)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(frame.shape(), (64, 48), "{name}");
+            assert_eq!(frame.data(), compressed_pixels(f), "{name} frame {f}");
+        }
+    }
+}
+
+/// NDFileHDF5's N-bit at the type's full 16 bits, which the filter passes
+/// through.
+#[test]
+fn nbit_at_full_precision_is_read() {
+    reads_as_written(&["nbit_full"]);
+}
+
+/// NDFileHDF5's szip (nearest neighbour), and szip with entropy coding.
+#[test]
+fn szip_is_read() {
+    reads_as_written(&["szip", "szip_ec"]);
+}
+
+#[test]
+fn deflate_is_read() {
+    reads_as_written(&["deflate"]);
+}
+
+/// Each of blosc's six compressors with byte shuffle, and lz4 without
+/// shuffle and with bit shuffle.
+#[test]
+fn blosc_is_read_with_each_compressor() {
+    reads_as_written(&[
+        "blosc_blosclz",
+        "blosc_lz4",
+        "blosc_lz4hc",
+        "blosc_snappy",
+        "blosc_zlib",
+        "blosc_zstd",
+        "blosc_lz4_noshuffle",
+        "blosc_lz4_bitshuffle",
+    ]);
+}
+
+#[test]
+fn bitshuffle_lz4_is_read() {
+    reads_as_written(&["bshuf_lz4"]);
+}
+
+#[test]
+fn lz4_is_read() {
+    reads_as_written(&["lz4"]);
+}
+
+/// The filters rust-hdf5 decodes that NDFileHDF5 does not write, read
+/// as before.
+#[test]
+fn the_other_filters_rust_hdf5_decodes_are_read() {
+    reads_as_written(&[
+        "shuffle_deflate",
+        "fletcher32",
+        "scaleoffset",
+        "lzf",
+        "zstd",
+        "bshuf_none",
+        "bitgroom",
+        "bitround",
+    ]);
+}
+
+/// NDFileHDF5's JPEG, and bitshuffle with zstd and bzip2, which it does
+/// not write: refused by name, for good.
+#[test]
+fn a_filter_not_decoded_is_named() {
+    for (name, id, filter) in [
+        ("jpeg", 32019, "jpeg"),
+        ("bshuf_zstd", 32008, "bitshuffle with zstd"),
+        ("bzip2", 307, "bzip2"),
+    ] {
+        let e = Hdf5FrameReader.frame(&compressed(name), 0).unwrap_err();
+        assert_eq!(
+            e,
+            Hdf5FrameError::UnsupportedFilter {
+                id,
+                name: filter.into()
+            }
+        );
+        assert_eq!(
+            e.to_string(),
+            format!("HDF5 filter {id} ({filter}) is not one this reader decodes")
+        );
+        assert!(!not_yet(&compressed(name), 0));
+    }
+}
+
+/// NDFileHDF5's N-bit, on a 12-bit integer type at bit offset 0 and at 4:
+/// rust-hdf5 has the filter's decoder but converts integers only of full
+/// width.
+#[test]
+fn an_nbit_type_of_reduced_precision_is_not_readable() {
+    for (name, offset) in [("nbit", 0), ("nbit_offset4", 4)] {
+        assert_eq!(
+            Hdf5FrameReader.frame(&compressed(name), 0).unwrap_err(),
+            Hdf5FrameError::UnsupportedType(format!(
+                "fixed-point datatype (size 2, bit offset {offset}, precision 12) \
+                 is not a standard-width integer"
+            ))
+        );
+        assert!(!not_yet(&compressed(name), 0));
+    }
+}
