@@ -8,13 +8,13 @@ use bsrs::core::msg::{MovableObj, NamedObj, ReadableObj};
 use bsrs::core::{Msg, Plan, plan_box};
 use bsrs::plans::list_scan_nd;
 use bsrs::plans::preprocessors::msg_mutator;
-use bsrs::plans::stubs::mv_many;
-use futures::{StreamExt, stream, try_join};
+use bsrs::plans::stubs::mv;
+use futures::{StreamExt, stream};
 use hklrs::nalgebra::{Unit, UnitQuaternion, Vector3};
 use hklrs::{Lattice, ModeSpec, PARALLEL_SIN};
 use serde_json::{Map, Value, json};
 
-use crate::diffractometer::{Snapshot, configuration};
+use crate::diffractometer::{Snapshot, configuration, psi_mode};
 use crate::error::Fault;
 use crate::{DiffError, Diffractometer};
 
@@ -66,11 +66,12 @@ pub fn zone_scan(
 }
 
 /// Holds `hkl` while ψ, the azimuth about it of `reference`, steps through
-/// `num` values over `psi` (degrees), in psi mode `mode`. The device's own
-/// mode is left unchanged.
+/// `num` values over `psi` (degrees), in psi mode `mode`, or without one in
+/// the geometry's psi mode if it has exactly one. The device's own mode is
+/// left unchanged.
 pub fn psi_scan(
     dx: Arc<Diffractometer>,
-    mode: &str,
+    mode: Option<&str>,
     hkl: [f64; 3],
     reference: [f64; 3],
     psi: [f64; 2],
@@ -82,7 +83,7 @@ pub fn psi_scan(
         "psi_start": psi[0], "psi_stop": psi[1], "num": num,
     });
     let trajectory = Trajectory::Psi {
-        mode: mode.to_owned(),
+        mode: mode.map(str::to_owned),
         hkl,
         reference,
         psi: (0..num)
@@ -95,13 +96,7 @@ pub fn psi_scan(
 /// Moves the reals to `hkl` in the device's mode, closest to their
 /// readbacks, and makes `hkl` the pseudo axes' setpoint. Opens no run.
 pub fn mv_hkl(dx: Arc<Diffractometer>, hkl: [f64; 3]) -> Plan {
-    once("mv_hkl", async move {
-        let (current, wavelength) = try_join!(dx.positions(), dx.wavelength())?;
-        let values = dx.inverse(hkl, &current, wavelength)?;
-        dx.set_target(Some(hkl));
-        let moves = dx.reals().iter().map(|r| r.clone() as Arc<dyn MovableObj>);
-        Ok(mv_many(moves.zip(values).collect()))
-    })
+    mv(Arc::new(dx.hkl_move(hkl)), 0.0)
 }
 
 enum Trajectory {
@@ -114,7 +109,8 @@ enum Trajectory {
     },
     /// ψ in degrees.
     Psi {
-        mode: String,
+        /// None: the geometry's one psi mode.
+        mode: Option<String>,
         hkl: [f64; 3],
         reference: [f64; 3],
         psi: Vec<f64>,
@@ -146,6 +142,10 @@ impl Trajectory {
                 reference,
                 psi,
             } => {
+                let mode = match mode {
+                    Some(mode) => mode,
+                    None => psi_mode(&snapshot.geometry)?,
+                };
                 let at = |psi: f64| ModeSpec {
                     psi: Some((Vector3::from(reference), psi.to_radians())),
                     ..ModeSpec::new(mode.as_str())
@@ -259,7 +259,7 @@ fn scan(
             ("plan_args".to_owned(), args),
         ]);
         // the reals move outside the pseudo axes from here
-        dx.set_target(None);
+        dx.clear_target().await;
         let axes = dx.reals().iter().enumerate().map(|(i, r)| {
             let column = solved.iter().map(|values| values[i]).collect();
             (

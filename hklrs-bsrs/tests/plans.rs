@@ -226,21 +226,64 @@ async fn a_reader_given_twice_is_read_once() {
     assert_eq!(run.events().len(), 2);
 }
 
+/// Picked closest to the readbacks, the solution changes branch part way
+/// along this line (tth changes sign); the scan, each point seeded by the
+/// one before, stays on its first branch (design §8.3 step 1).
+#[tokio::test]
+async fn hkl_scan_stays_on_one_branch_across_a_branch_boundary() {
+    let dx = e4cv();
+    let (start, stop, num) = ([-1.0, 0.3, -0.3], [-0.2, 0.3, -1.0], 7);
+    let point = |i: usize| {
+        let f = i as f64 / (num - 1) as f64;
+        [0, 1, 2].map(|j| start[j] + (stop[j] - start[j]) * f)
+    };
+    let wavelength = dx.wavelength().await.unwrap();
+    let fresh: Vec<Vec<f64>> = (0..num)
+        .map(|i| dx.inverse(point(i), &AT_001, wavelength).unwrap())
+        .collect();
+    assert!(
+        fresh
+            .windows(2)
+            .any(|w| w[0][3].signum() != w[1][3].signum()),
+        "{fresh:?}"
+    );
+
+    let run = run(hkl_scan(dx.clone(), start, stop, num, [])).await;
+    run.succeeded();
+    let events = run.events();
+    let path: Vec<[f64; 4]> = events
+        .iter()
+        .map(|e| AXES.map(|a| e.data[a].as_f64().unwrap()))
+        .collect();
+    assert_eq!(path.len(), num);
+    assert_close(&path[0], &fresh[0], 1e-9);
+    for (i, step) in path.windows(2).enumerate() {
+        let largest = (0..4)
+            .map(|j| (step[1][j] - step[0][j]).abs())
+            .fold(0.0, f64::max);
+        assert!(largest < 15.0, "step {i}: {path:?}");
+    }
+    for (i, event) in events.iter().enumerate() {
+        assert_close(&hkl_of(event), &point(i), 1e-9);
+    }
+}
+
 #[tokio::test]
 async fn mv_hkl_moves_the_reals_and_sets_the_setpoint() {
     let dx = e4cv();
-    let run = run(mv_hkl(dx.clone(), [1.0, 0.0, 1.0])).await;
-    assert!(run.documents.is_empty());
-    run.result.unwrap();
+    let moved = run(mv_hkl(dx.clone(), [1.0, 0.0, 1.0])).await;
+    assert!(moved.documents.is_empty());
+    moved.result.unwrap();
     let at = dx.positions().await.unwrap();
     assert_close(&[at[0], at[3]], &[45.0, 90.0], 1e-9);
     assert_eq!(dx.target(), Some([1.0, 0.0, 1.0]));
 
+    // fails as an unreachable h set does, in its status, with nothing moved
+    let at = dx.positions().await.unwrap();
     let message = run_fail(mv_hkl(dx.clone(), [3.0, 0.0, 1.0])).await;
-    assert!(
-        message.contains("mv_hkl: hkl [3.0, 0.0, 1.0]: "),
-        "{message}"
-    );
+    assert!(message.contains("mv_hkl: "), "{message}");
+    assert!(message.contains("hkl [3.0, 0.0, 1.0]: "), "{message}");
+    assert_eq!(dx.positions().await.unwrap(), at);
     assert_eq!(dx.target(), Some([1.0, 0.0, 1.0]));
 }
 
@@ -254,7 +297,7 @@ async fn psi_scan_holds_hkl_in_its_own_mode() {
     let reference = [0.0, 0.0, 1.0];
     let plan = psi_scan(
         dx.clone(),
-        "psi_constant",
+        Some("psi_constant"),
         [1.0, 0.0, 1.0],
         reference,
         [20.0, 40.0],
@@ -280,6 +323,88 @@ async fn psi_scan_holds_hkl_in_its_own_mode() {
         json!("psi_constant")
     );
     assert_eq!(dx.mode(), Some(ModeSpec::new("bissector")));
+}
+
+#[tokio::test]
+async fn psi_scan_without_a_mode_takes_the_geometrys_only_psi_mode() {
+    let given = run(psi_scan(
+        e4cv(),
+        Some("psi_constant"),
+        [1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [20.0, 40.0],
+        3,
+        [],
+    ))
+    .await;
+    let omitted = run(psi_scan(
+        e4cv(),
+        None,
+        [1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [20.0, 40.0],
+        3,
+        [],
+    ))
+    .await;
+    omitted.succeeded();
+    let extra = &omitted.start().extra;
+    assert_eq!(
+        extra["diffractometers"]["e4cv"]["mode"],
+        json!("psi_constant")
+    );
+    assert_eq!(extra["plan_args"]["mode"], json!(null));
+    let at = |run: &Run| -> Vec<[f64; 4]> {
+        let events = run.events();
+        events
+            .iter()
+            .map(|e| AXES.map(|a| e.data[a].as_f64().unwrap()))
+            .collect()
+    };
+    assert_eq!(at(&omitted), at(&given));
+}
+
+#[tokio::test]
+async fn psi_scan_without_a_mode_refuses_naming_the_candidates() {
+    let geometry = preset("E6C").unwrap();
+    let names: Vec<String> = geometry
+        .axes()
+        .iter()
+        .map(|a| a.name().to_owned())
+        .collect();
+    let reals = names
+        .iter()
+        .map(|a| {
+            (
+                a.as_str(),
+                Arc::new(SoftMotor::new(a, Some(0.0))) as Arc<dyn RealAxis>,
+            )
+        })
+        .collect();
+    let sample = Sample::new(
+        "sample",
+        Lattice::cubic(LAMBDA).unwrap(),
+        Orientation::Manual {
+            u: UnitQuaternion::identity(),
+        },
+    );
+    let source = WavelengthSource::Fixed(Wavelength::new(LAMBDA).unwrap());
+    let dx = Diffractometer::new("e6c", geometry, reals, source, sample).unwrap();
+    let plan = psi_scan(
+        Arc::new(dx),
+        None,
+        [1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [20.0, 40.0],
+        3,
+        [],
+    );
+    let message = run_fail(plan).await;
+    assert!(message.contains("psi_scan: geometry \"E6C\" "), "{message}");
+    assert!(
+        message.contains(r#"["psi_constant_vertical", "psi_constant_horizontal"]"#),
+        "{message}"
+    );
 }
 
 /// PY2-11: hklpy2's scan_zone turns and scales with the direct-lattice

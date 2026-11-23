@@ -14,8 +14,8 @@ use futures::future::{join_all, try_join_all};
 use futures::try_join;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::{
-    AxisKind, Deg, Geometry, InverseRequest, Lattice, Mode, ModeSpec, Orientation, Picker,
-    Reflection, Sample, Target, Wavelength, forward,
+    AxisKind, Deg, Geometry, InverseRequest, Lattice, Mode, ModeParameters, ModeSpec, Orientation,
+    Picker, Reflection, Sample, Target, Wavelength, forward,
 };
 use serde_json::{Value, json};
 
@@ -74,6 +74,102 @@ struct State {
 }
 
 impl State {
+    /// Miller indices of the current sample at `positions` (degrees and
+    /// metres).
+    fn hkl(&self, positions: &[f64], wavelength: Wavelength) -> Result<Vector3<f64>, DiffError> {
+        let geometry = &self.geometry;
+        let values = geometry.values_from_degrees(positions)?;
+        let sample = &self.samples.current().sample;
+        Ok(forward(geometry, sample, &values, wavelength, &point(geometry))?.hkl)
+    }
+
+    /// Positions reaching `hkl` in `mode`, the solution closest to
+    /// `current`; degrees and metres.
+    fn inverse(
+        &self,
+        mode: &ModeSpec,
+        hkl: [f64; 3],
+        current: &[f64],
+        wavelength: Wavelength,
+    ) -> Result<Vec<f64>, DiffError> {
+        let geometry = &self.geometry;
+        let seed = geometry.values_from_degrees(current)?;
+        let ub = self.samples.current().sample.ub();
+        let values = solve(geometry, mode, ub, wavelength, hkl, &seed)?;
+        Ok(geometry.values_to_degrees(&values)?)
+    }
+
+    /// The reference and ψ (rad) of the device's mode, a psi mode.
+    fn psi(&self) -> Result<(Vector3<f64>, f64), DiffError> {
+        let mode = require_mode(&self.geometry, self.mode.as_ref())?;
+        match (ModeSpec::parameters(&mode.name), mode.psi) {
+            (Some(ModeParameters::Psi), Some(psi)) => Ok(psi),
+            _ => Err(DiffError::NoPsi {
+                mode: mode.name.clone(),
+            }),
+        }
+    }
+
+    /// Solves `setpoint` closest to `current` and, only when that succeeds,
+    /// commits it with the mode it was solved in; returns the positions.
+    fn commit(
+        &mut self,
+        setpoint: Setpoint,
+        current: &[f64],
+        wavelength: Wavelength,
+    ) -> Result<Vec<f64>, DiffError> {
+        let mut mode = require_mode(&self.geometry, self.mode.as_ref())?.clone();
+        let target = match setpoint {
+            Setpoint::Hkl(hkl) => hkl,
+            Setpoint::Component { component, value } => {
+                // before the first move, the h, k, l at the readbacks
+                let mut target = match self.target {
+                    Some(target) => target,
+                    None => self.hkl(current, wavelength)?.into(),
+                };
+                match component {
+                    Component::Hkl(index) => target[index] = value,
+                    Component::Psi => mode.psi = Some((self.psi()?.0, value.to_radians())),
+                }
+                target
+            }
+        };
+        let positions = self.inverse(&mode, target, current, wavelength)?;
+        self.target = Some(target);
+        self.mode = Some(mode);
+        Ok(positions)
+    }
+
+    /// `component` of the pseudo setpoint and at the readbacks `current`.
+    fn locate(
+        &self,
+        component: Component,
+        current: &[f64],
+        wavelength: Wavelength,
+    ) -> Result<DynLocation, DiffError> {
+        match component {
+            Component::Hkl(index) => {
+                let readback = self.hkl(current, wavelength)?[index];
+                let setpoint = self.target.map_or(readback, |t| t[index]);
+                Ok(DynLocation { setpoint, readback })
+            }
+            Component::Psi => {
+                let (reference, setpoint) = self.psi()?;
+                let values = self.geometry.values_from_degrees(current)?;
+                let ub = self.samples.current().sample.ub();
+                let readback = hklrs::inverse::psi(&self.geometry, &ub, &reference, &values)
+                    .map_err(|source| DiffError::Psi {
+                        reference: reference.into(),
+                        source,
+                    })?;
+                Ok(DynLocation {
+                    setpoint: setpoint.to_degrees(),
+                    readback: readback.to_degrees(),
+                })
+            }
+        }
+    }
+
     fn set_wavelength(&mut self, wavelength: Wavelength) -> Result<(), DiffError> {
         match &self.wavelength {
             WavelengthSource::Fixed(_) => {
@@ -165,6 +261,30 @@ pub(crate) fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
         .find(|m| m.build(geometry).is_ok())
 }
 
+/// The one psi mode of [`ModeSpec::names`] `geometry` builds.
+pub(crate) fn psi_mode(geometry: &Geometry) -> Result<String, DiffError> {
+    // a psi mode refuses a geometry by its axes, whatever the reference
+    let builds = |name: &&str| {
+        let mode = ModeSpec {
+            psi: Some((Vector3::z(), 0.0)),
+            ..ModeSpec::new(*name)
+        };
+        mode.build(geometry).is_ok()
+    };
+    let candidates: Vec<String> = ModeSpec::names()
+        .filter(|&name| ModeSpec::parameters(name) == Some(ModeParameters::Psi))
+        .filter(builds)
+        .map(str::to_owned)
+        .collect();
+    match <[String; 1]>::try_from(candidates) {
+        Ok([one]) => Ok(one),
+        Err(candidates) => Err(DiffError::PsiMode {
+            geometry: geometry.name().to_owned(),
+            candidates,
+        }),
+    }
+}
+
 /// [`Diffractometer::set_limits`] on `geometry`.
 pub(crate) fn set_limits(
     geometry: &mut Geometry,
@@ -249,13 +369,34 @@ pub(crate) fn configuration(
     CONFIG.iter().map(|c| c.0).zip(values).collect()
 }
 
+/// One component of the pseudo setpoint.
+#[derive(Clone, Copy)]
+pub(crate) enum Component {
+    /// h, k or l by index.
+    Hkl(usize),
+    /// ψ of the device's psi mode, degrees.
+    Psi,
+}
+
+/// Where a [`Diffractometer::move_to`] goes.
+pub(crate) enum Setpoint {
+    /// One component replaced, the others kept: h, k or l in the hkl
+    /// setpoint, ψ in the mode with the hkl setpoint held.
+    Component {
+        component: Component,
+        value: f64,
+    },
+    Hkl([f64; 3]),
+}
+
 pub struct Diffractometer {
     name: String,
     /// `reals[i]` drives `geometry.axes()[i]`.
     reals: Vec<Arc<dyn RealAxis>>,
     state: RwLock<State>,
-    /// Held by a pseudo-axis move from its setpoint through its last real's
-    /// set, so concurrent moves reach the reals in setpoint order.
+    /// Held by [`Diffractometer::move_to`] from its setpoint through its
+    /// last real's set, so concurrent moves reach the reals in setpoint
+    /// order.
     moving: futures::lock::Mutex<()>,
 }
 
@@ -312,7 +453,7 @@ impl Diffractometer {
         &self.reals
     }
 
-    fn key(&self, field: &str) -> String {
+    pub(crate) fn key(&self, field: &str) -> String {
         format!("{}_{field}", self.name)
     }
 
@@ -490,11 +631,7 @@ impl Diffractometer {
         positions: &[f64],
         wavelength: Wavelength,
     ) -> Result<Vector3<f64>, DiffError> {
-        let state = self.state();
-        let geometry = &state.geometry;
-        let values = geometry.values_from_degrees(positions)?;
-        let sample = &state.samples.current().sample;
-        Ok(forward(geometry, sample, &values, wavelength, &point(geometry))?.hkl)
+        self.state().hkl(positions, wavelength)
     }
 
     /// Axis values that reach `hkl` with the current sample and mode, the
@@ -508,12 +645,8 @@ impl Diffractometer {
         wavelength: Wavelength,
     ) -> Result<Vec<f64>, DiffError> {
         let state = self.state();
-        let geometry = &state.geometry;
-        let mode = require_mode(geometry, state.mode.as_ref())?;
-        let seed = geometry.values_from_degrees(current)?;
-        let ub = state.samples.current().sample.ub();
-        let values = solve(geometry, mode, ub, wavelength, hkl, &seed)?;
-        Ok(geometry.values_to_degrees(&values)?)
+        let mode = require_mode(&state.geometry, state.mode.as_ref())?;
+        state.inverse(mode, hkl, current, wavelength)
     }
 
     /// The readbacks, the wavelength, and the geometry, sample and mode from
@@ -530,40 +663,29 @@ impl Diffractometer {
         })
     }
 
-    pub(crate) fn set_target(&self, target: Option<[f64; 3]>) {
-        self.state_mut().target = target;
+    /// Drops the pseudo setpoint once any move in flight has set its reals.
+    pub(crate) async fn clear_target(&self) {
+        let _gate = self.moving.lock().await;
+        self.state_mut().target = None;
     }
 
-    /// Replaces component `index` of the pseudo setpoint (the readback h, k,
-    /// l before the first move), solves closest to the readbacks and sets
-    /// every real; the setpoint is kept only when the solve succeeds.
-    pub(crate) async fn set_component(
-        &self,
-        index: usize,
-        value: f64,
-    ) -> Result<Status, BsrsError> {
+    /// The only move that solves and commits a pseudo setpoint: solves
+    /// `setpoint` closest to the readbacks and sets every real; the
+    /// setpoint is kept only when the solve succeeds.
+    pub(crate) async fn move_to(&self, setpoint: Setpoint) -> Result<Status, BsrsError> {
         let _gate = self.moving.lock().await;
         let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
-        let saved = self.target();
-        let mut target = match saved {
-            Some(t) => t,
-            None => self.hkl(&current, wavelength)?.into(),
-        };
-        target[index] = value;
-        let values = self.inverse(target, &current, wavelength)?;
-        self.state_mut().target = Some(target);
+        // one write lock, so a set_mode meanwhile is not lost to a ψ commit
+        let values = self.state_mut().commit(setpoint, &current, wavelength)?;
         let sets = self.reals.iter().zip(values).map(|(r, v)| r.set_dyn(v));
         let statuses = join_all(sets).await;
         Ok(statuses.iter().fold(Status::done(), |all, s| all.and(s)))
     }
 
-    /// Component `index` of the pseudo setpoint and of the h, k, l at the
-    /// readbacks.
-    pub(crate) async fn locate_component(&self, index: usize) -> Result<DynLocation, BsrsError> {
+    /// `component` of the pseudo setpoint and at the readbacks.
+    pub(crate) async fn locate(&self, component: Component) -> Result<DynLocation, BsrsError> {
         let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
-        let readback = self.hkl(&current, wavelength)?[index];
-        let setpoint = self.target().map_or(readback, |t| t[index]);
-        Ok(DynLocation { setpoint, readback })
+        Ok(self.state().locate(component, &current, wavelength)?)
     }
 
     /// Delivers a pause's stop to every real.
