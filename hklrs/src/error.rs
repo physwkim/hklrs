@@ -106,4 +106,12 @@ pub enum Error {
     },
     #[error("the cube's bin count does not fit in memory")]
     CubeSize,
+    #[error("the ray meets no detector module within its pixels")]
+    RayOutside,
+    #[error("the ray meets the detector only behind its origin")]
+    RayBehind,
+    #[error("the ray is parallel to the detector")]
+    RayParallel,
+    #[error("a point detector has no extent for a ray to meet")]
+    PointDetector,
 }
