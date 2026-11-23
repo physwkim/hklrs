@@ -359,6 +359,15 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fearless_simd"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fb2907d1f08b2b316b9223ced5b0e89d87028ba8deae9764741dba8ff7f3903"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "fearless_simd"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "629c9d6b6f30b5604089e0980f4d924a013aacb1654a6cdf5d3d852224f68651"
@@ -790,6 +799,15 @@ checksum = "a86cc925d4053d0526ae7f5bc765dbd0d7a5d1a63d43974f4966cb349ca63295"
 dependencies = [
  "cc",
  "which",
+]
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13591d77a9b6d941f7e6fcade7f9dfd9e801308752bde50c0a9bb5852778c22c"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]
@@ -1348,7 +1366,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca38ae195212034cbe82f2ec702f3a348346d0e27626fbd8e7d6aa6cf3d8f66"
 dependencies = [
  "flate2",
+ "lz4_flex",
+ "rust-zstd",
+ "snap",
  "zlib-rs",
+]
+
+[[package]]
+name = "rust-zstd"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12ce4d622d648638e5d3d66f7d5657c51ce76b4be9ff94f2f061e55c259748e7"
+dependencies = [
+ "bytemuck",
+ "fearless_simd 0.3.0",
 ]
 
 [[package]]
@@ -1406,7 +1437,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f8c3a4226a1d05137fbb564cda7899f86b4a1218845389a484f2254eb9f9ce"
 dependencies = [
- "fearless_simd",
+ "fearless_simd 1.2.0",
  "poly1305",
  "subtle",
  "zeroize",
@@ -1550,6 +1581,12 @@ name = "smallvec"
 version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
+
+[[package]]
+name = "snap"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "socket2"
@@ -1790,6 +1827,12 @@ dependencies = [
  "tracing-core",
  "tracing-log",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typenum"

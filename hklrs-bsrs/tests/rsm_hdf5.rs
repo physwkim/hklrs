@@ -5,8 +5,11 @@
 #![cfg(feature = "hdf5")]
 
 use std::collections::HashMap;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use bsrs::devices::path_provider::PathInfo;
 use bsrs::event_model::{
@@ -21,7 +24,8 @@ use hklrs::presets::preset;
 use hklrs::projection::Projection;
 use hklrs::{PixelDetector, Wavelength};
 use hklrs_bsrs::{
-    FailedFrame, FrameFailure, Hdf5FrameError, Hdf5FrameReader, RsmCallback, RsmConfig, RsmValue,
+    FailedFrame, FrameFailure, FrameReader, Hdf5FrameError, Hdf5FrameReader, ReadError,
+    RsmCallback, RsmConfig, RsmValue,
 };
 use rust_hdf5::H5Type;
 use rust_hdf5::swmr::SwmrFileWriter;
@@ -287,7 +291,38 @@ fn run(resource: StreamResource, events: usize) -> Vec<Document> {
     docs
 }
 
-fn rsm() -> RsmCallback {
+/// Whether FrameReader calls the failed read not readable yet.
+fn not_yet(resource: &StreamResource, index: u64) -> bool {
+    match FrameReader::read(&Hdf5FrameReader, resource, index) {
+        Err(ReadError::NotYet(_)) => true,
+        Err(ReadError::Permanent(_)) => false,
+        Ok(_) => panic!("frame {index} was read"),
+    }
+}
+
+/// One read: the frame index, when, and whether it was not readable yet.
+type Read = (u64, Instant, bool);
+
+/// Hdf5FrameReader that reports each read that fails.
+struct Watched(Sender<Read>);
+
+impl FrameReader for Watched {
+    fn read(&self, resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError> {
+        let at = Instant::now();
+        let read = Hdf5FrameReader.read(resource, index);
+        if let Err(e) = &read {
+            let _ = self.0.send((index, at, matches!(e, ReadError::NotYet(_))));
+        }
+        read
+    }
+}
+
+/// The next failed read, waiting up to 5 s for it.
+fn next_failure(reads: &Receiver<Read>) -> Read {
+    reads.recv_timeout(Duration::from_secs(5)).unwrap()
+}
+
+fn rsm(reader: impl FrameReader + 'static, read_deadline: Duration) -> RsmCallback {
     let field = |name: &str| RsmValue::Field(name.to_owned());
     RsmCallback::new(RsmConfig {
         map: frame_map(),
@@ -305,7 +340,8 @@ fn rsm() -> RsmCallback {
         monitor: None,
         count_time: None,
         seed: None,
-        reader: Arc::new(Hdf5FrameReader),
+        reader: Arc::new(reader),
+        read_deadline,
     })
     .unwrap()
 }
@@ -318,7 +354,7 @@ fn rsm() -> RsmCallback {
 fn a_streaming_file_maps_as_frame_map_does() {
     let dir = scratch("a_streaming_file_maps_as_frame_map_does");
     let writer = images(&dir, 5);
-    let rsm = rsm();
+    let rsm = rsm(Hdf5FrameReader, RsmConfig::DEFAULT_READ_DEADLINE);
     for doc in run(image_resource(&dir), 5) {
         rsm.document(&doc);
     }
@@ -360,10 +396,98 @@ fn a_frame_appended_after_a_read_is_read_next_time() {
             frames: 2
         }
     );
+    assert!(not_yet(&resource, 2));
     writer.append(&pixels(2));
     let frame = Hdf5FrameReader.frame(&resource, 2).unwrap();
     writer.close();
     let expected: Vec<f64> = pixels(2).into_iter().map(f64::from).collect();
+    assert_eq!(frame.data(), expected);
+}
+
+/// Event 3's datum comes before the IOC has written frame 2, as when
+/// bsrs's flush before the datum failed: the worker's first read finds it
+/// past the file, the IOC then writes it, and the worker's next read maps
+/// it.
+#[test]
+fn a_frame_appended_after_its_first_read_maps() {
+    let dir = scratch("a_frame_appended_after_its_first_read_maps");
+    let mut writer = images(&dir, 2);
+    let (sender, reads) = mpsc::channel();
+    let rsm = rsm(Watched(sender), RsmConfig::DEFAULT_READ_DEADLINE);
+    for doc in run(image_resource(&dir), 3) {
+        rsm.document(&doc);
+    }
+    let (index, _, waiting) = next_failure(&reads);
+    assert_eq!((index, waiting), (2, true));
+    writer.append(&pixels(2));
+    let map = rsm.finish().unwrap();
+    writer.close();
+    assert_eq!(map.failed, []);
+    assert_eq!(map.mapped, [1, 2, 3]);
+    assert_eq!(map.cube, direct(3));
+}
+
+/// A datum past the frames in the file whose frame is never written:
+/// through RsmCallback, frame 3 is read again until the deadline after it
+/// was paired and fails as out of range of the 3 written; the others map.
+#[test]
+fn a_frame_never_written_fails_at_the_deadline() {
+    let dir = scratch("a_frame_never_written_fails_at_the_deadline");
+    let writer = images(&dir, 3);
+    let deadline = Duration::from_millis(150);
+    let (sender, reads) = mpsc::channel();
+    let rsm = rsm(Watched(sender), deadline);
+    let fed = Instant::now();
+    for doc in run(image_resource(&dir), 4) {
+        rsm.document(&doc);
+    }
+    let map = rsm.finish().unwrap();
+    writer.close();
+    assert_eq!(
+        map.failed,
+        [FailedFrame {
+            seq_num: 4,
+            reason: FrameFailure::Read(
+                "frame 3 is out of range: the dataset holds 3 frames".into()
+            )
+        }]
+    );
+    assert_eq!(map.mapped, [1, 2, 3]);
+    assert_eq!(map.cube, direct(3));
+    let failed: Vec<Read> = reads.try_iter().collect();
+    assert!(failed.len() >= 2, "{} reads", failed.len());
+    assert!(
+        failed
+            .iter()
+            .all(|&(index, _, waiting)| index == 3 && waiting)
+    );
+    assert!(failed[failed.len() - 1].1 - fed >= deadline);
+}
+
+/// The superblock read while its writer rewrites it, made here by
+/// flipping a byte of its end-of-file address (bytes 28..36 of a version
+/// 2 or 3 superblock): its checksum does not match, which is not readable
+/// yet, and the frame reads once the superblock is whole again.
+#[test]
+fn a_metadata_checksum_mismatch_is_not_readable_yet() {
+    let dir = scratch("a_metadata_checksum_mismatch_is_not_readable_yet");
+    let writer = images(&dir, 1);
+    let resource = image_resource(&dir);
+    let path = dir.join("scan.h5");
+    let flip = |byte: u8| {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(28)).unwrap();
+        file.write_all(&[byte]).unwrap();
+    };
+    let whole = std::fs::read(&path).unwrap()[28];
+    flip(!whole);
+    let e = Hdf5FrameReader.frame(&resource, 0).unwrap_err();
+    assert!(matches!(e, Hdf5FrameError::ChecksumMismatch(_)), "{e:?}");
+    assert!(not_yet(&resource, 0));
+    flip(whole);
+    let frame = Hdf5FrameReader.frame(&resource, 0).unwrap();
+    writer.close();
+    let expected: Vec<f64> = pixels(0).into_iter().map(f64::from).collect();
     assert_eq!(frame.data(), expected);
 }
 
@@ -401,6 +525,8 @@ fn a_resource_that_is_no_hdf5_image_is_unknown() {
             parameters: vec!["path".into()],
         }
     );
+    assert!(!not_yet(&soft, 0));
+    assert!(!not_yet(&sink, 0));
 }
 
 /// A directory uri of another host, as bsrs's own tests give one
@@ -411,12 +537,12 @@ fn a_uri_off_this_host_is_not_local() {
         "file://nfs-share/something/scan.h5",
         "http://files.example/scans/scan.h5",
     ] {
+        let resource = ad_resource(uri.into(), DATASET, &[1, 4, 6]);
         assert_eq!(
-            Hdf5FrameReader
-                .frame(&ad_resource(uri.into(), DATASET, &[1, 4, 6]), 0)
-                .unwrap_err(),
+            Hdf5FrameReader.frame(&resource, 0).unwrap_err(),
             Hdf5FrameError::NotLocal { uri: uri.into() }
         );
+        assert!(!not_yet(&resource, 0));
     }
 }
 
@@ -429,38 +555,7 @@ fn a_file_not_written_is_missing() {
             path: dir.join("scan.h5")
         }
     );
-}
-
-/// A datum past the frames in the file: through RsmCallback, event 4
-/// fails as a read of frame 3 of the 3 written, and the others map.
-#[test]
-fn a_frame_past_the_file_is_out_of_range() {
-    let dir = scratch("a_frame_past_the_file_is_out_of_range");
-    let writer = images(&dir, 3);
-    assert_eq!(
-        Hdf5FrameReader.frame(&image_resource(&dir), 3).unwrap_err(),
-        Hdf5FrameError::IndexOutOfRange {
-            index: 3,
-            frames: 3
-        }
-    );
-    let rsm = rsm();
-    for doc in run(image_resource(&dir), 4) {
-        rsm.document(&doc);
-    }
-    let map = rsm.finish().unwrap();
-    writer.close();
-    assert_eq!(
-        map.failed,
-        [FailedFrame {
-            seq_num: 4,
-            reason: FrameFailure::Read(
-                "frame 3 is out of range: the dataset holds 3 frames".into()
-            )
-        }]
-    );
-    assert_eq!(map.mapped, [1, 2, 3]);
-    assert_eq!(map.cube, direct(3));
+    assert!(not_yet(&image_resource(&dir), 0));
 }
 
 /// The resource AdHdfWriter emits for an NDAttribute: a 1-D dataset of one
@@ -477,6 +572,7 @@ fn an_attribute_dataset_is_not_frames() {
     );
     let resource = ad_resource(uri(&dir), "/entry/instrument/NDAttributes/I0", &[16384]);
     let e = Hdf5FrameReader.frame(&resource, 0).unwrap_err();
+    assert!(!not_yet(&resource, 0));
     writer.close();
     assert_eq!(e, Hdf5FrameError::NotFrames { shape: vec![2] });
 }
@@ -489,6 +585,7 @@ fn an_integer_pixel_past_2_pow_53_is_inexact() {
     let writer = stream(&dir, "/entry/data", "data", &[1, 2], &[vec![7u64, value]]);
     let resource = ad_resource(uri(&dir), DATASET, &[1, 1, 2]);
     let e = Hdf5FrameReader.frame(&resource, 0).unwrap_err();
+    assert!(!not_yet(&resource, 0));
     writer.close();
     assert_eq!(
         e,
@@ -506,4 +603,144 @@ fn a_file_that_is_not_hdf5_fails_in_hdf5() {
     std::fs::write(dir.join("scan.h5"), b"not an HDF5 file").unwrap();
     let e = Hdf5FrameReader.frame(&image_resource(&dir), 0).unwrap_err();
     assert!(matches!(e, Hdf5FrameError::Hdf5(_)), "{e:?}");
+    assert!(!not_yet(&image_resource(&dir), 0));
+}
+
+// -- the compressions NDFileHDF5 writes ---------------------------------------
+
+/// Dataset `/{name}/data` of golden/ndfilehdf5_filters.h5, which
+/// golden/ndfilehdf5_filters.py writes: two frames of 64 x 48, a chunk each.
+fn compressed(name: &str) -> StreamResource {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../golden/ndfilehdf5_filters.h5")
+        .canonicalize()
+        .unwrap();
+    ad_resource(
+        format!("file://localhost{}", path.display()),
+        &format!("/{name}/data"),
+        &[1, 64, 48],
+    )
+}
+
+/// Frame `f` of every dataset there: pixel (r, c) is
+/// (101 f + 37 (r / 4) + 11 (c / 3)) % 4096.
+fn compressed_pixels(f: usize) -> Vec<f64> {
+    (0..64)
+        .flat_map(|r| (0..48).map(move |c| ((101 * f + 37 * (r / 4) + 11 * (c / 3)) % 4096) as f64))
+        .collect()
+}
+
+/// Both frames of each dataset read as written.
+fn reads_as_written(names: &[&str]) {
+    for name in names {
+        for f in 0..2 {
+            let frame = Hdf5FrameReader
+                .frame(&compressed(name), f as u64)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(frame.shape(), (64, 48), "{name}");
+            assert_eq!(frame.data(), compressed_pixels(f), "{name} frame {f}");
+        }
+    }
+}
+
+/// NDFileHDF5's N-bit at the type's full 16 bits, which the filter passes
+/// through.
+#[test]
+fn nbit_at_full_precision_is_read() {
+    reads_as_written(&["nbit_full"]);
+}
+
+/// NDFileHDF5's szip (nearest neighbour), and szip with entropy coding.
+#[test]
+fn szip_is_read() {
+    reads_as_written(&["szip", "szip_ec"]);
+}
+
+#[test]
+fn deflate_is_read() {
+    reads_as_written(&["deflate"]);
+}
+
+/// Each of blosc's six compressors with byte shuffle, and lz4 without
+/// shuffle and with bit shuffle.
+#[test]
+fn blosc_is_read_with_each_compressor() {
+    reads_as_written(&[
+        "blosc_blosclz",
+        "blosc_lz4",
+        "blosc_lz4hc",
+        "blosc_snappy",
+        "blosc_zlib",
+        "blosc_zstd",
+        "blosc_lz4_noshuffle",
+        "blosc_lz4_bitshuffle",
+    ]);
+}
+
+#[test]
+fn bitshuffle_lz4_is_read() {
+    reads_as_written(&["bshuf_lz4"]);
+}
+
+#[test]
+fn lz4_is_read() {
+    reads_as_written(&["lz4"]);
+}
+
+/// The filters rust-hdf5 decodes that NDFileHDF5 does not write, read
+/// as before.
+#[test]
+fn the_other_filters_rust_hdf5_decodes_are_read() {
+    reads_as_written(&[
+        "shuffle_deflate",
+        "fletcher32",
+        "scaleoffset",
+        "lzf",
+        "zstd",
+        "bshuf_none",
+        "bitgroom",
+        "bitround",
+    ]);
+}
+
+/// NDFileHDF5's JPEG, and bitshuffle with zstd and bzip2, which it does
+/// not write: refused by name, for good.
+#[test]
+fn a_filter_not_decoded_is_named() {
+    for (name, id, filter) in [
+        ("jpeg", 32019, "jpeg"),
+        ("bshuf_zstd", 32008, "bitshuffle with zstd"),
+        ("bzip2", 307, "bzip2"),
+    ] {
+        let e = Hdf5FrameReader.frame(&compressed(name), 0).unwrap_err();
+        assert_eq!(
+            e,
+            Hdf5FrameError::UnsupportedFilter {
+                id,
+                name: filter.into()
+            }
+        );
+        assert_eq!(
+            e.to_string(),
+            format!("HDF5 filter {id} ({filter}) is not one this reader decodes")
+        );
+        assert!(!not_yet(&compressed(name), 0));
+    }
+}
+
+/// NDFileHDF5's N-bit, on a 12-bit integer type at bit offset 0 and at 4:
+/// rust-hdf5 has the filter's decoder but converts integers only of full
+/// width.
+#[test]
+fn an_nbit_type_of_reduced_precision_is_not_readable() {
+    for (name, offset) in [("nbit", 0), ("nbit_offset4", 4)] {
+        assert_eq!(
+            Hdf5FrameReader.frame(&compressed(name), 0).unwrap_err(),
+            Hdf5FrameError::UnsupportedType(format!(
+                "fixed-point datatype (size 2, bit offset {offset}, precision 12) \
+                 is not a standard-width integer"
+            ))
+        );
+        assert!(!not_yet(&compressed(name), 0));
+    }
 }
