@@ -134,6 +134,8 @@ pub enum Constraints {
     DetRefSample(Detector, Reference, Held<1>),
     DetSamples(Detector, Held<2>),
     DetBisect(Detector, Bisect),
+    RefSamples(Reference, Held<2>),
+    Samples(Held<3>),
 }
 
 impl Constraints {
@@ -192,6 +194,8 @@ impl Constraints {
         }
         match (&det[..], &refs[..], &held[..], bisect, &omega[..]) {
             (&[d], &[r], &[h], false, &[]) => Ok(Constraints::DetRefSample(d, r, Held::new([h])?)),
+            (&[], &[r], &[g, h], false, &[]) => Ok(Constraints::RefSamples(r, Held::new([g, h])?)),
+            (&[], &[], &[a, b, c], false, &[]) => Ok(Constraints::Samples(Held::new([a, b, c])?)),
             (&[d], &[], &[g, h], false, &[]) if !matches!(d, Detector::Naz(_)) => {
                 Ok(Constraints::DetSamples(d, Held::new([g, h])?))
             }
@@ -246,7 +250,9 @@ pub fn e6c(
         &(r * reference),
         &(r * surface),
     )?;
-    if let Constraints::DetRefSample(_, Reference::Psi(_), _) = constraints {
+    if let Constraints::DetRefSample(_, Reference::Psi(_), _)
+    | Constraints::RefSamples(Reference::Psi(_), _) = constraints
+    {
         if !problem.psi_defined() {
             return Err(Error::PsiUndefined);
         }
@@ -336,6 +342,8 @@ fn satisfied(constraints: &Constraints, p: &solve::Problem, a: &Angles) -> bool 
         Constraints::DetRefSample(d, r, h) => detector(d) && reference(r) && held(&h.0),
         Constraints::DetSamples(d, h) => detector(d) && held(&h.0),
         Constraints::DetBisect(d, b) => detector(d) && bisect(b),
+        Constraints::RefSamples(r, h) => reference(r) && held(&h.0),
+        Constraints::Samples(h) => held(&h.0),
     }
 }
 

@@ -77,6 +77,8 @@ impl Problem {
             Constraints::DetRefSample(d, r, h) => self.det_ref_sample(d, r, &h.known()),
             Constraints::DetSamples(d, h) => self.det_samples(d, &h.known()),
             Constraints::DetBisect(d, b) => self.det_bisect(d, b),
+            Constraints::RefSamples(r, h) => self.ref_samples(r, &h.known()),
+            Constraints::Samples(h) => self.samples(&h.known()),
         }
     }
 
@@ -177,14 +179,14 @@ impl Problem {
     fn det_ref_sample(&self, d: &Detector, r: &Reference, known: &Known) -> Vec<(Angles, Free)> {
         self.orientations(d, r)
             .into_iter()
-            .flat_map(|(z, q, f)| self.finish(d, sample::one_held(known, &z), &q, f))
+            .flat_map(|(z, q, f)| self.finish(Some(d), sample::one_held(known, &z), &q, f))
             .collect()
     }
 
     fn det_samples(&self, d: &Detector, known: &Known) -> Vec<(Angles, Free)> {
         self.detector(d)
             .iter()
-            .flat_map(|(q, f)| self.finish(d, sample::two_held(known, &self.p0, q), q, *f))
+            .flat_map(|(q, f)| self.finish(Some(d), sample::two_held(known, &self.p0, q), q, *f))
             .collect()
     }
 
@@ -197,10 +199,42 @@ impl Problem {
             for (mu, eta, f) in self.chi_axis(b, &eq) {
                 let known = [Some(mu), Some(eta), None, None];
                 let samples = sample::two_held(&known, &self.p0, &q);
-                out.extend(self.finish(d, samples, &q, fq.or(f)));
+                out.extend(self.finish(Some(d), samples, &q, fq.or(f)));
             }
         }
         out
+    }
+
+    /// With Z = L·R_x(ψ)·Uᵀ the beam in the φ frame is
+    /// Zᵀŷ = U·R_x(ψ)ᵀ·(−sin θ, cos θ, 0) whatever the detector, so each ψ
+    /// fixes it and the two free circles turn it onto ŷ.
+    fn ref_samples(&self, r: &Reference, known: &Known) -> Vec<(Angles, Free)> {
+        let v = if r.on_surface() { self.s } else { self.n };
+        let (u, cos_tau, sin_tau) = self.ref_frame(&v);
+        let beam = Vector3::new(-self.st, self.ct, 0.0);
+        let mut out = Vec::new();
+        for (psi, f) in self.psi(r, cos_tau, sin_tau).tagged("psi") {
+            let w = u * rot(&Vector3::x(), psi).transpose() * beam;
+            out.extend(self.free_detector(sample::two_held(known, &w, &Vector3::y()), f));
+        }
+        out
+    }
+
+    /// The one free circle puts Q̂ at the lab height −sin θ.
+    fn samples(&self, known: &Known) -> Vec<(Angles, Free)> {
+        let found = sample::three_held(known, &self.p0, &Vector3::y(), -self.st);
+        self.free_detector(found, None)
+    }
+
+    /// [`Self::finish`] for sample positions that fix lab Q̂ themselves.
+    fn free_detector(&self, samples: Vec<([f64; 4], Free)>, free: Free) -> Vec<(Angles, Free)> {
+        samples
+            .into_iter()
+            .flat_map(|(s, fs)| {
+                let q = you::z(&[s[0], s[1], s[2], s[3], 0.0, 0.0]) * self.p0;
+                self.finish(None, vec![(s, fs)], &q, free)
+            })
+            .collect()
     }
 
     /// (μ, η) that put the χ axis MU·ETA·ŷ in the plane of the beam and the
@@ -237,30 +271,30 @@ impl Problem {
     /// value, otherwise both arm branches.
     fn finish(
         &self,
-        d: &Detector,
+        d: Option<&Detector>,
         samples: Vec<([f64; 4], Free)>,
         q: &Vector3<f64>,
         free: Free,
     ) -> Vec<(Angles, Free)> {
         let kout = Vector3::y() + 2.0 * self.st * q;
-        let arm: Vec<(f64, f64, Free)> = match *d {
-            Detector::Delta(delta) if delta.cos().abs() >= EPS => {
+        let arm: Vec<(f64, f64, Free)> = match d.copied() {
+            Some(Detector::Delta(delta)) if delta.cos().abs() >= EPS => {
                 let c = delta.cos().signum();
                 vec![((c * kout.z).atan2(c * kout.y), delta, None)]
             }
-            Detector::Delta(delta) => Roots::Free
+            Some(Detector::Delta(delta)) => Roots::Free
                 .tagged("nu")
                 .into_iter()
                 .map(|(nu, f)| (nu, delta, f))
                 .collect(),
-            Detector::Nu(nu) => {
+            Some(Detector::Nu(nu)) => {
                 vec![(
                     nu,
                     kout.x.atan2(kout.y * nu.cos() + kout.z * nu.sin()),
                     None,
                 )]
             }
-            Detector::Qaz(_) | Detector::Naz(_) => arms(&kout, "nu"),
+            None | Some(Detector::Qaz(_) | Detector::Naz(_)) => arms(&kout, "nu"),
         };
         let mut out = Vec::new();
         for (s, fs) in samples {

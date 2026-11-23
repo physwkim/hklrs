@@ -70,6 +70,24 @@ pub(super) fn two_held(known: &Known, p: &Vector3<f64>, q: &Vector3<f64>) -> Vec
         .collect()
 }
 
+/// Every value of the one free circle with (Z·p)·y = `height`.
+pub(super) fn three_held(
+    known: &Known,
+    p: &Vector3<f64>,
+    y: &Vector3<f64>,
+    height: f64,
+) -> Vec<([f64; 4], Free)> {
+    let (free, seg) = split(known);
+    let [a] = free[..] else {
+        unreachable!("three held circles leave one free")
+    };
+    solve_component(&axis(a), &(seg[1] * p), &(seg[0].transpose() * y), height)
+        .tagged(NAMES[a])
+        .into_iter()
+        .map(|(x, f)| (fill(known, &free, &[x]), f))
+        .collect()
+}
+
 /// Every decomposition of the lab rotation `z` with one circle held.
 pub(super) fn one_held(known: &Known, z: &Matrix3<f64>) -> Vec<([f64; 4], Free)> {
     let (free, seg) = split(known);

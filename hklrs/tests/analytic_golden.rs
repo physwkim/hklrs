@@ -341,6 +341,16 @@ fn det_bisect() {
     run("det+bisect");
 }
 
+#[test]
+fn ref_2samp() {
+    run("ref+2samp");
+}
+
+#[test]
+fn samp_3() {
+    run("3samp");
+}
+
 /// The golden cases citing defect `id`, each checked; `count` of them.
 fn dc_cases(id: &str, count: usize) -> Vec<(Value, Tally)> {
     let golden = load();
