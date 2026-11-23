@@ -89,4 +89,21 @@ pub enum Error {
     },
     #[error("detector id {id} is not in the table of {count}")]
     UnknownDetector { id: u32, count: usize },
+    #[error("coordinate {value} has no bin of width {step}")]
+    NoBin { value: f64, step: f64 },
+    #[error("expected {expected} dimensions, one per projection axis, got {got}")]
+    Dimensions { expected: usize, got: usize },
+    #[error("{what} has {len} pixels, expected {expected}")]
+    PixelCount {
+        what: &'static str,
+        len: usize,
+        expected: usize,
+    },
+    #[error("cube grids differ: {left:?} vs {right:?} (name, step, anchor)")]
+    GridMismatch {
+        left: Vec<(String, f64, f64)>,
+        right: Vec<(String, f64, f64)>,
+    },
+    #[error("the cube's bin count does not fit in memory")]
+    CubeSize,
 }

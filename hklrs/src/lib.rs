@@ -10,6 +10,7 @@ mod detector_table;
 mod error;
 mod forward;
 mod geometry;
+pub mod grid;
 pub mod inverse;
 mod lattice;
 pub mod poni;
