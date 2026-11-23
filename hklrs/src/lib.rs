@@ -3,6 +3,7 @@
 //! Units are fixed: radians, Å for lattice and wavelength, metres for
 //! detector geometry and translations, keV for energy. Q includes 2π.
 
+pub mod absorption;
 mod detector;
 mod error;
 mod forward;
