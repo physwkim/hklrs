@@ -1,5 +1,5 @@
-//! Inverse invariants on E4CV and E4CH: every solution forwards back to the
-//! target and satisfies its mode, held axes never move, the search is
+//! Inverse invariants on E4CV, E4CH and K4CV: every solution forwards back
+//! to the target and satisfies its mode, held axes never move, the search is
 //! deterministic, axis limits only filter the solutions after the cut-point
 //! wrap, out-of-sphere targets and bad inputs are errors.
 
@@ -9,9 +9,10 @@ use std::f64::consts::{PI, TAU};
 
 use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, zaxis};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
-use hklrs::presets::preset;
+use hklrs::presets::{KAPPA_ALPHA_DEG, kappa_axis, preset};
 use hklrs::{
-    Equation, Geometry, InverseError, InverseRequest, Lattice, Mode, Picker, Target, Wavelength,
+    Deg, Equation, Eulerian, Geometry, InverseError, InverseRequest, Lattice, Mode, Picker, Target,
+    Wavelength,
 };
 use inverse_check::wrap;
 
@@ -275,6 +276,119 @@ fn mode_construction_errors() {
             name: "chi".into()
         }))
     );
+}
+
+/// With the whole arm written, every solution's kappa twin is one too;
+/// with kphi held, no twin is (it would move kphi) and kphi never moves.
+#[test]
+fn kappa_twin_is_admitted_unless_it_moves_a_held_axis() {
+    let geo = preset("K4CV").unwrap();
+    let current = current(&geo);
+    let hkl = Vector3::new(1.0, 2.0, 1.0);
+    let held = [
+        Eulerian::Omega(0.3),
+        Eulerian::Chi(-0.6),
+        Eulerian::Phi(-0.4),
+        Eulerian::Bisector { detector: 3 },
+    ];
+    for e in held {
+        let mode = Mode::new_kappa(
+            &geo,
+            "m",
+            [0, 1, 2],
+            &[0, 1, 2, 3],
+            vec![Equation::Kappa(e)],
+        )
+        .unwrap();
+        let arm = mode.kappa().unwrap().arm();
+        let solutions = request(&mode, hkl, &current).solve().unwrap();
+        for s in &solutions {
+            assert_solution(&mode, &hkl, &current, s);
+            let [ko, ka, kp] = arm.twin([s[0], s[1], s[2]]);
+            let twin = [ko, ka, kp, s[3]];
+            assert!(
+                solutions
+                    .iter()
+                    .any(|t| t.iter().zip(&twin).all(|(a, b)| wrap(a - b).abs() <= 1e-9)),
+                "{e:?}: twin of {s:?} missing"
+            );
+        }
+    }
+    let mode = Mode::new_kappa(&geo, "m", [0, 1, 2], &[0, 1, 3], vec![]).unwrap();
+    let solutions = request(&mode, hkl, &current).solve().unwrap();
+    for s in &solutions {
+        assert_solution(&mode, &hkl, &current, s);
+    }
+}
+
+#[test]
+fn kappa_mode_construction_errors() {
+    let geo = preset("K4CV").unwrap();
+    let all = [0, 1, 2, 3];
+    let held = |e| vec![Equation::Kappa(e)];
+    let chi = |v| held(Eulerian::Chi(v));
+    let not_arm = |names: [&str; 3]| {
+        Err(InverseError::NotKappaArm {
+            names: names.map(String::from),
+        })
+    };
+    assert_eq!(
+        Mode::new_kappa(&geo, "m", [2, 1, 0], &all, chi(0.0)),
+        not_arm(["kphi", "kappa", "komega"])
+    );
+    assert_eq!(
+        Mode::new_kappa(&geo, "m", [1, 2, 3], &all, chi(0.0)),
+        not_arm(["kappa", "kphi", "tth"])
+    );
+    assert_eq!(
+        Mode::new(&geo, "m", &all, chi(0.0)),
+        Err(InverseError::NoKappaArm)
+    );
+    let reach = 2.0 * KAPPA_ALPHA_DEG.to_radians();
+    assert!(matches!(
+        Mode::new_kappa(&geo, "m", [0, 1, 2], &all, chi(-1.8)),
+        Err(InverseError::ChiOutOfReach { chi: -1.8, reach: r }) if (r - reach).abs() < 1e-15
+    ));
+    assert_eq!(
+        Mode::new_kappa(&geo, "m", [0, 1, 2], &all, held(Eulerian::Omega(f64::NAN))),
+        Err(InverseError::NonFinite {
+            what: "eulerian angle"
+        })
+    );
+    assert_eq!(
+        Mode::new_kappa(
+            &geo,
+            "m",
+            [0, 1, 2],
+            &all,
+            held(Eulerian::Bisector { detector: 0 })
+        ),
+        Err(InverseError::NotInStack {
+            name: "komega".into(),
+            holder: "detector"
+        })
+    );
+    let arm = |komega: [f64; 3], kappa: [f64; 3]| {
+        Geometry::builder("k")
+            .sample_rotation("komega", komega)
+            .sample_rotation("kappa", kappa)
+            .sample_rotation("kphi", [0.0, -1.0, 0.0])
+            .detector_rotation("tth", [0.0, -1.0, 0.0])
+            .build()
+            .unwrap()
+    };
+    let tilted = kappa_axis(Deg(KAPPA_ALPHA_DEG).into());
+    let crossed = arm([0.0, 0.0, 1.0], tilted);
+    assert_eq!(
+        Mode::new_kappa(&crossed, "m", [0, 1, 2], &all, chi(0.0)),
+        not_arm(["komega", "kappa", "kphi"])
+    );
+    // A kappa turning the other way (XU-3) is tilted by π − α.
+    let reversed = arm([0.0, -1.0, 0.0], tilted.map(|c| -c));
+    assert!(matches!(
+        Mode::new_kappa(&reversed, "m", [0, 1, 2], &all, chi(0.0)),
+        Err(InverseError::KappaAlpha { .. })
+    ));
 }
 
 #[test]

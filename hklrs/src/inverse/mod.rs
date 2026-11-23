@@ -12,6 +12,9 @@ pub mod e6c;
 pub mod esrf_bm28_psic;
 pub mod esrf_id01_psic;
 mod jet;
+pub mod k4c;
+pub mod k6c;
+pub mod kappa;
 mod mode;
 mod solve;
 mod system;
@@ -24,7 +27,7 @@ use nalgebra::{Matrix3, Vector3};
 
 use crate::{Error, Geometry, Wavelength};
 
-pub use mode::{Equation, Mode};
+pub use mode::{Equation, Eulerian, Mode};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
@@ -76,6 +79,17 @@ pub enum InverseError {
     EquationCount { written: usize, equations: usize },
     #[error("psi is undefined: Q, k̂f × k̂i or the reference projected normal to Q is null")]
     PsiUndefined,
+    #[error("kappa arm tilt alpha = {alpha} rad is outside (0, π/2]")]
+    KappaAlpha { alpha: f64 },
+    #[error("|chi| = {} rad exceeds the kappa reach 2·alpha = {reach} rad", chi.abs())]
+    ChiOutOfReach { chi: f64, reach: f64 },
+    #[error(
+        "{names:?} are not a kappa arm: komega, kappa, kphi adjacent in the sample stack, \
+         komega and kphi about one direction"
+    )]
+    NotKappaArm { names: [String; 3] },
+    #[error("a kappa equation needs a mode made with Mode::new_kappa")]
+    NoKappaArm,
     #[error(transparent)]
     Geometry(#[from] Error),
     #[error(

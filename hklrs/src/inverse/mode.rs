@@ -1,7 +1,8 @@
 use nalgebra::Vector3;
 
+use super::kappa::{KappaAxes, restrict};
 use super::{InverseError, finite};
-use crate::{Axis, Geometry};
+use crate::{Axis, AxisKind, Geometry};
 
 /// An equation a mode adds to the three hkl equations. Angles in rad,
 /// vectors in Miller indices.
@@ -17,6 +18,33 @@ pub enum Equation {
     ZeroModPi { axis: usize },
     /// a ≡ b (mod 2π), axis indices.
     Equal { a: usize, b: usize },
+    /// The eulerians of the mode's kappa arm ([`Mode::new_kappa`]).
+    Kappa(Eulerian),
+    /// hkl's incidence of the surface normal `normal` (sample-holder frame,
+    /// the lab at every sample axis zero): angle(n, k̂i) − π/2, in
+    /// [−π/2, π/2], equals `incidence`.
+    Incidence {
+        normal: Vector3<f64>,
+        incidence: f64,
+    },
+    /// hkl's azimuth of `normal`, as [`Equation::Incidence`]: the angle from
+    /// lab y to n projected normal to k̂i, in [0, π], equals `azimuth`.
+    Azimuth { normal: Vector3<f64>, azimuth: f64 },
+}
+
+/// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
+/// sample rotation ([`super::kappa::KappaArm::to_eulerian`]). Both eulerian
+/// images are that rotation, so either one counts. Angles in rad.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Eulerian {
+    /// omega ≡ value (mod π).
+    Omega(f64),
+    /// |chi| = |value|, value taken on [−π, π].
+    Chi(f64),
+    /// phi ≡ value (mod π).
+    Phi(f64),
+    /// axis `detector` ≡ 2·omega (mod 2π).
+    Bisector { detector: usize },
 }
 
 /// Which axes the inverse writes and the equations that fix them, checked
@@ -28,20 +56,26 @@ pub struct Mode<'g> {
     name: String,
     written: Vec<usize>,
     extra: Vec<Equation>,
+    kappa: Option<KappaAxes>,
 }
 
-fn rotation(geometry: &Geometry, index: usize) -> Result<&Axis, InverseError> {
+/// The axis at `index` and its direction; rotations only.
+pub(super) fn rotation(
+    geometry: &Geometry,
+    index: usize,
+) -> Result<(&Axis, Vector3<f64>), InverseError> {
     let axes = geometry.axes();
     let axis = axes.get(index).ok_or(InverseError::NoSuchAxis {
         index,
         count: axes.len(),
     })?;
-    if axis.is_rotation() {
-        Ok(axis)
-    } else {
-        Err(InverseError::NotRotation {
+    match axis.kind() {
+        AxisKind::Rotation { axis: a } | AxisKind::RotationAbout { axis: a, .. } => {
+            Ok((axis, a.into_inner()))
+        }
+        _ => Err(InverseError::NotRotation {
             name: axis.name().to_owned(),
-        })
+        }),
     }
 }
 
@@ -51,7 +85,7 @@ fn in_stack(
     stack: &[usize],
     holder: &'static str,
 ) -> Result<(), InverseError> {
-    let axis = rotation(geometry, index)?;
+    let (axis, _) = rotation(geometry, index)?;
     if stack.contains(&index) {
         Ok(())
     } else {
@@ -72,7 +106,7 @@ fn reference(v: &Vector3<f64>, what: &'static str) -> Result<(), InverseError> {
 }
 
 impl Equation {
-    fn check(&self, geometry: &Geometry) -> Result<(), InverseError> {
+    fn check(&self, geometry: &Geometry, kappa: Option<&KappaAxes>) -> Result<(), InverseError> {
         match self {
             Self::Bisector { sample, detector } => {
                 in_stack(geometry, *sample, geometry.sample_stack(), "sample")?;
@@ -88,6 +122,34 @@ impl Equation {
                 rotation(geometry, *a)?;
                 rotation(geometry, *b).map(|_| ())
             }
+            Self::Kappa(held) => {
+                let kappa = kappa.ok_or(InverseError::NoKappaArm)?;
+                match *held {
+                    Eulerian::Omega(v) | Eulerian::Phi(v) => finite(&[v], "eulerian angle"),
+                    Eulerian::Chi(v) => {
+                        finite(&[v], "eulerian angle")?;
+                        let (chi, reach) = (restrict(v), kappa.arm().reach());
+                        if chi.abs() > reach {
+                            return Err(InverseError::ChiOutOfReach { chi, reach });
+                        }
+                        Ok(())
+                    }
+                    Eulerian::Bisector { detector } => {
+                        in_stack(geometry, detector, geometry.detector_stack(), "detector")
+                    }
+                }
+            }
+            Self::Incidence {
+                normal,
+                incidence: angle,
+            }
+            | Self::Azimuth {
+                normal,
+                azimuth: angle,
+            } => {
+                reference(normal, "surface normal")?;
+                finite(&[*angle], "surface angle")
+            }
         }
     }
 }
@@ -101,8 +163,34 @@ impl<'g> Mode<'g> {
         written: &[usize],
         extra: Vec<Equation>,
     ) -> Result<Self, InverseError> {
+        Self::build(geometry, name, written, extra, None)
+    }
+
+    /// [`Mode::new`] on a geometry whose sample axes `kappa` (komega, kappa,
+    /// kphi) are a kappa arm: adjacent in the sample stack in that order,
+    /// komega and kphi about one direction d, kappa about k with
+    /// α = acos(d·k) ∈ (0, π/2]. Its equations may hold the arm's eulerians,
+    /// and the kappa twin of each solution is a candidate solution too.
+    pub fn new_kappa(
+        geometry: &'g Geometry,
+        name: &str,
+        kappa: [usize; 3],
+        written: &[usize],
+        extra: Vec<Equation>,
+    ) -> Result<Self, InverseError> {
+        let kappa = KappaAxes::new(geometry, kappa)?;
+        Self::build(geometry, name, written, extra, Some(kappa))
+    }
+
+    fn build(
+        geometry: &'g Geometry,
+        name: &str,
+        written: &[usize],
+        extra: Vec<Equation>,
+        kappa: Option<KappaAxes>,
+    ) -> Result<Self, InverseError> {
         for (k, &i) in written.iter().enumerate() {
-            let axis = rotation(geometry, i)?;
+            let (axis, _) = rotation(geometry, i)?;
             if written[..k].contains(&i) {
                 return Err(InverseError::WrittenTwice {
                     name: axis.name().to_owned(),
@@ -116,13 +204,14 @@ impl<'g> Mode<'g> {
             });
         }
         for e in &extra {
-            e.check(geometry)?;
+            e.check(geometry, kappa.as_ref())?;
         }
         Ok(Self {
             geometry,
             name: name.to_owned(),
             written: written.to_vec(),
             extra,
+            kappa,
         })
     }
 
@@ -141,6 +230,22 @@ impl<'g> Mode<'g> {
         Self::new(geometry, name, &w, extra(&w))
     }
 
+    /// [`Mode::new_kappa`] on the arm komega, kappa, kphi, with the written
+    /// axes by name; `extra` gets their indices.
+    pub(super) fn named_kappa(
+        geometry: &'g Geometry,
+        name: &str,
+        written: &[&str],
+        extra: impl FnOnce(&[usize]) -> Vec<Equation>,
+    ) -> Result<Self, InverseError> {
+        let [komega, kappa, kphi] = ["komega", "kappa", "kphi"].map(|n| geometry.axis_index(n));
+        let w = written
+            .iter()
+            .map(|n| geometry.axis_index(n))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new_kappa(geometry, name, [komega?, kappa?, kphi?], &w, extra(&w))
+    }
+
     pub fn geometry(&self) -> &'g Geometry {
         self.geometry
     }
@@ -156,5 +261,9 @@ impl<'g> Mode<'g> {
 
     pub fn extra(&self) -> &[Equation] {
         &self.extra
+    }
+
+    pub fn kappa(&self) -> Option<&KappaAxes> {
+        self.kappa.as_ref()
     }
 }

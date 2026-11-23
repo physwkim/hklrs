@@ -1,12 +1,13 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
-//! ESRF BM28 PSIC, ZAXIS and ESRF ID01 PSIC.
+//! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV and K6C.
 //!
 //! Per case: the mode writes hkl's axes; every hkl solution within VIOLATION
 //! of hkl's own mode equations is in the hklrs set within MATCH rad, directly
 //! or after one Newton step on the independent residuals where hkl's own
 //! precision is coarser (counted); one beyond it (HKL-18: the Ewald step of
-//! hkl_mode_set_hkl_real does not re-test them) still reaches hkl, is not in
-//! the hklrs set and is counted;
+//! hkl_mode_set_hkl_real does not re-test them; HKL-16: the kappa twin hkl
+//! appends moves a held axis) still reaches hkl, is not in the hklrs set and
+//! is counted under its defect;
 //! every hklrs solution passes the independent check (extras beyond hkl's
 //! are counted); |Q| > 4π/λ is `Unreachable`; `Degenerate` holds only where
 //! the independent Jacobian is singular at every hkl solution; a case hkl
@@ -16,7 +17,7 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, zaxis};
+use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, k4c, k6c, zaxis};
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength};
@@ -44,9 +45,39 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         let i = names.iter().position(|p| p == n).unwrap();
         common::f(&case["parameters"][i])
     };
+    let rad = |n: &str| param(n).to_radians();
     let hkl2 = || Vector3::new(param("h2"), param("k2"), param("l2"));
     let psi = || param("psi").to_radians();
+    let kappa = case["geometry"] == "K4CV";
+    let k6c = case["geometry"] == "K6C";
     match case["mode"].as_str().unwrap() {
+        "bissector_vertical" if k6c => k6c::bissector_vertical(geo),
+        "constant_omega_vertical" if k6c => k6c::constant_omega_vertical(geo, rad("omega")),
+        "constant_chi_vertical" if k6c => k6c::constant_chi_vertical(geo, rad("chi")),
+        "constant_phi_vertical" if k6c => k6c::constant_phi_vertical(geo, rad("phi")),
+        "lifting_detector_kphi" if k6c => k6c::lifting_detector_kphi(geo),
+        "lifting_detector_komega" if k6c => k6c::lifting_detector_komega(geo),
+        "lifting_detector_mu" if k6c => k6c::lifting_detector_mu(geo),
+        "double_diffraction_vertical" if k6c => k6c::double_diffraction_vertical(geo, hkl2()),
+        "bissector_horizontal" if k6c => k6c::bissector_horizontal(geo),
+        "constant_phi_horizontal" if k6c => k6c::constant_phi_horizontal(geo, rad("phi")),
+        "constant_kphi_horizontal" if k6c => k6c::constant_kphi_horizontal(geo),
+        "double_diffraction_horizontal" if k6c => k6c::double_diffraction_horizontal(geo, hkl2()),
+        "psi_constant_vertical" if k6c => k6c::psi_constant_vertical(geo, hkl2(), psi()),
+        // hkl's init takes the normal as a lab direction at the start
+        // geometry, where the sample rotation carries the holder frame.
+        "constant_incidence" if k6c => {
+            let start = geo.poses(&axes(geo, &case["start_axes"])).unwrap();
+            let normal =
+                start.sample.rotation.inverse() * Vector3::new(param("x"), param("y"), param("z"));
+            k6c::constant_incidence(geo, normal, rad("incidence"), rad("azimuth"))
+        }
+        "bissector" if kappa => k4c::bissector(geo),
+        "constant_omega" if kappa => k4c::constant_omega(geo, rad("omega")),
+        "constant_chi" if kappa => k4c::constant_chi(geo, rad("chi")),
+        "constant_phi" if kappa => k4c::constant_phi(geo, rad("phi")),
+        "double_diffraction" if kappa => k4c::double_diffraction(geo, hkl2()),
+        "psi_constant" if kappa => k4c::psi_constant(geo, hkl2(), psi()),
         "bissector" => e4c::bissector(geo),
         "constant_omega" => e4c::constant_omega(geo),
         "constant_chi" => e4c::constant_chi(geo),
@@ -137,7 +168,8 @@ struct Counts {
     cases: usize,
     unreachable: usize,
     hkl_solutions: usize,
-    violators: usize,
+    hkl16: usize,
+    hkl18: usize,
     newton: usize,
     degenerate: usize,
     singular: usize,
@@ -197,11 +229,19 @@ fn run(geometry: &str, mode_name: &str) {
                 let r = s["constraint_resid"].as_object().unwrap();
                 r.values().all(|v| common::f(v).abs() <= VIOLATION)
             });
+        for v in &violators {
+            // A held axis off its value is the appended twin's.
+            let held = v["constraint_resid"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .any(|(k, r)| k.starts_with("fixed:") && common::f(r).abs() > VIOLATION);
+            *if held { &mut n.hkl16 } else { &mut n.hkl18 } += 1;
+        }
         let wrapped =
             |s: &Value| -> Vec<f64> { axes(&geo, &s["axes"]).into_iter().map(wrap).collect() };
         let theirs: Vec<Vec<f64>> = theirs.into_iter().map(wrapped).collect();
         let violators: Vec<Vec<f64>> = violators.into_iter().map(wrapped).collect();
-        n.violators += violators.len();
         for v in &violators {
             let r = inverse_check::residuals(&mode, &ub, wavelength, &hkl, v).unwrap();
             let miss = largest(r[..3].iter().map(|d| d.abs()));
@@ -283,8 +323,8 @@ fn run(geometry: &str, mode_name: &str) {
     }
     println!(
         "{geometry} {mode_name}: {} cases, {} unreachable, {} degenerate (hkl's {} solutions \
-         there singular); hkl {} solutions elsewhere, all found ({} after a Newton step), and {} \
-         violating the mode; hklrs {} solutions, {} beyond hkl's; hkl failed {} cases with \
+         there singular); hkl {} solutions elsewhere, all found ({} after a Newton step), {} \
+         moving a held axis (HKL-16) and {} violating an equation (HKL-18); hklrs {} solutions, {} beyond hkl's; hkl failed {} cases with \
          |Q| <= 2k, {} of them hkl misses (hklrs {} verified solutions there)",
         n.cases,
         n.unreachable,
@@ -292,7 +332,8 @@ fn run(geometry: &str, mode_name: &str) {
         n.singular,
         n.hkl_solutions,
         n.newton,
-        n.violators,
+        n.hkl16,
+        n.hkl18,
         n.hklrs_solutions,
         n.extras,
         n.hkl_failed,
@@ -346,4 +387,24 @@ golden! {
     id01_constant_nu_coplanar: "ESRF ID01 PSIC" "constant_nu_coplanar",
     id01_constant_delta_coplanar: "ESRF ID01 PSIC" "constant_delta_coplanar",
     id01_constant_eta_noncoplanar: "ESRF ID01 PSIC" "constant_eta_noncoplanar",
+    k4cv_bissector: "K4CV" "bissector",
+    k4cv_constant_omega: "K4CV" "constant_omega",
+    k4cv_constant_phi: "K4CV" "constant_phi",
+    k4cv_double_diffraction: "K4CV" "double_diffraction",
+    k4cv_psi_constant: "K4CV" "psi_constant",
+    k6c_bissector_vertical: "K6C" "bissector_vertical",
+    k6c_constant_omega_vertical: "K6C" "constant_omega_vertical",
+    k6c_constant_phi_vertical: "K6C" "constant_phi_vertical",
+    k6c_lifting_detector_komega: "K6C" "lifting_detector_komega",
+    k6c_double_diffraction_vertical: "K6C" "double_diffraction_vertical",
+    k6c_bissector_horizontal: "K6C" "bissector_horizontal",
+    k6c_constant_phi_horizontal: "K6C" "constant_phi_horizontal",
+    k6c_constant_kphi_horizontal: "K6C" "constant_kphi_horizontal",
+    k6c_double_diffraction_horizontal: "K6C" "double_diffraction_horizontal",
+    k6c_psi_constant_vertical: "K6C" "psi_constant_vertical",
+    k6c_constant_incidence: "K6C" "constant_incidence",
+    k4cv_constant_chi: "K4CV" "constant_chi",
+    k6c_constant_chi_vertical: "K6C" "constant_chi_vertical",
+    k6c_lifting_detector_kphi: "K6C" "lifting_detector_kphi",
+    k6c_lifting_detector_mu: "K6C" "lifting_detector_mu",
 }

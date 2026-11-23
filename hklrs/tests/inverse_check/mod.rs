@@ -1,9 +1,10 @@
 //! Independent checks of an inverse solution, shared by the inverse tests.
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use hklrs::inverse::kappa::Branch;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
-use hklrs::{Equation, Geometry, Mode, Wavelength, scattering};
+use hklrs::{Equation, Eulerian, Geometry, Mode, Wavelength, scattering};
 
 /// Largest hkl miss and mode-equation miss (rad, or relative to k²) allowed.
 pub const ROUND_TRIP: f64 = 1e-10;
@@ -65,6 +66,29 @@ pub fn residuals(
         }
         Equation::ZeroModPi { axis } => values[*axis].sin(),
         Equation::Equal { a, b } => wrap(values[*a] - values[*b]),
+        // Either eulerian image: they differ by π in omega and phi and in
+        // the sign of chi. Not the solver's wrapped rows.
+        Equation::Kappa(held) => {
+            let kappa = mode.kappa().unwrap();
+            let arm = kappa.axes().map(|i| values[i]);
+            let [omega, chi, phi] = kappa.arm().to_eulerian(arm, Branch::Same);
+            match held {
+                Eulerian::Omega(v) => (omega - v).sin(),
+                Eulerian::Chi(v) => chi - chi.signum() * wrap(*v).abs(),
+                Eulerian::Phi(v) => (phi - v).sin(),
+                Eulerian::Bisector { detector } => wrap(values[*detector] - 2.0 * omega),
+            }
+        }
+        // acos angles, not the solver's atan2 forms.
+        Equation::Incidence { normal, incidence } => {
+            let (n, ki) = surface(geo, normal, values);
+            n.angle(&ki) - FRAC_PI_2 - incidence
+        }
+        Equation::Azimuth { normal, azimuth } => {
+            let (n, ki) = surface(geo, normal, values);
+            let ki = ki.normalize();
+            (n - ki * n.dot(&ki)).angle(&Vector3::y()) - azimuth
+        }
     }));
     Ok(r)
 }
@@ -107,6 +131,13 @@ pub fn check(
         within(miss, || format!("{values:?} misses {e:?} by {miss:e}"))?;
     }
     Ok(())
+}
+
+/// The lab surface normal and k̂i at `values`.
+fn surface(geo: &Geometry, normal: &Vector3<f64>, values: &[f64]) -> (Vector3<f64>, Vector3<f64>) {
+    let poses = geo.poses(values).unwrap();
+    let beam = geo.beam_direction().into_inner();
+    (poses.sample.rotation * normal, poses.source * beam)
 }
 
 /// NaN is a miss.

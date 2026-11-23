@@ -3,7 +3,8 @@
 use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
 
 use super::jet::{Scalar, Vec3};
-use super::{Equation, Mode, wrap};
+use super::kappa::{Branch, KappaAxes, restrict};
+use super::{Equation, Eulerian, Mode, wrap};
 use crate::{Axis, AxisKind, Error, Geometry};
 
 /// Sine below which an angle ψ is built from (θ, π − 2θ, Q to the
@@ -15,6 +16,7 @@ pub(super) struct System<'a> {
     geometry: &'a Geometry,
     written: &'a [usize],
     extra: &'a [Equation],
+    kappa: Option<&'a KappaAxes>,
     current: &'a [f64],
     /// Target Q in the sample frame, units of k.
     q: Vector3<f64>,
@@ -113,6 +115,7 @@ impl<'a> System<'a> {
             geometry: mode.geometry(),
             written: mode.written(),
             extra: mode.extra(),
+            kappa: mode.kappa(),
             current,
             q,
             ub,
@@ -121,6 +124,10 @@ impl<'a> System<'a> {
 
     pub fn current(&self) -> &[f64] {
         self.current
+    }
+
+    pub fn kappa(&self) -> Option<&'a KappaAxes> {
+        self.kappa
     }
 
     pub fn is_written(&self, axis: usize) -> bool {
@@ -175,6 +182,31 @@ impl<'a> System<'a> {
                     d: self.written.iter().map(|w| f64::from(w == axis)).collect(),
                 },
                 Equation::Equal { a, b } => self.wrapped_sum(values, &[(*a, 1.0), (*b, -1.0)]),
+                // Mode::new_kappa is the only way to a Kappa equation.
+                Equation::Kappa(held) => self.eulerian(self.kappa?, *held, values),
+                // angle(n, k̂i) − π/2 = −atan2(n·k̂i, |n × k̂i|).
+                Equation::Incidence { normal, incidence } => {
+                    let n = fr.sample(normal);
+                    let a = Scalar::atan2(&n.dot(&fr.ki), &n.cross(&fr.ki).norm());
+                    Scalar {
+                        v: -a.v - incidence,
+                        d: a.d.iter().map(|d| -d).collect(),
+                    }
+                }
+                // Undefined with the normal along k̂i.
+                Equation::Azimuth { normal, azimuth } => {
+                    let n = fr.sample(normal);
+                    let p = n.sub(&fr.ki.scaled(&n.dot(&fr.ki)));
+                    if p.v.norm() <= NULL * n.v.norm() {
+                        return None;
+                    }
+                    let y = Vec3::constant(Vector3::y(), self.written.len());
+                    let a = Scalar::atan2(&p.cross(&y).norm(), &p.dot(&y));
+                    Scalar {
+                        v: a.v - azimuth,
+                        d: a.d,
+                    }
+                }
             });
         }
         Some(Eval {
@@ -196,6 +228,45 @@ impl<'a> System<'a> {
             v: wrap(terms.iter().map(|&(axis, c)| c * values[axis]).sum()),
             d,
         }
+    }
+
+    /// Residual of `held` at `values` and its gradient over the written
+    /// axes, from the Same-branch eulerians; omega and phi count mod π and
+    /// chi by magnitude, so the Opposite-branch image satisfies it as well.
+    fn eulerian(&self, kappa: &KappaAxes, held: Eulerian, values: &[f64]) -> Scalar {
+        let [ko, ka, kp] = kappa.axes();
+        let arm = kappa.arm();
+        let [omega, chi, phi] = arm.to_eulerian([values[ko], values[ka], values[kp]], Branch::Same);
+        let [dp, dchi] = arm.slopes(values[ka]);
+        let mut d = vec![0.0; self.written.len()];
+        let mut add = |axis: usize, coefficient: f64| {
+            if let Some(c) = self.written.iter().position(|&w| w == axis) {
+                d[c] += coefficient;
+            }
+        };
+        let v = match held {
+            Eulerian::Omega(target) => {
+                add(ko, 1.0);
+                add(ka, dp);
+                wrap(2.0 * (omega - target)) / 2.0
+            }
+            Eulerian::Phi(target) => {
+                add(kp, 1.0);
+                add(ka, dp);
+                wrap(2.0 * (phi - target)) / 2.0
+            }
+            Eulerian::Chi(target) => {
+                add(ka, if chi < 0.0 { -dchi } else { dchi });
+                chi.abs() - restrict(target).abs()
+            }
+            Eulerian::Bisector { detector } => {
+                add(detector, 1.0);
+                add(ko, -2.0);
+                add(ka, -2.0 * dp);
+                wrap(values[detector] - 2.0 * omega)
+            }
+        };
+        Scalar { v, d }
     }
 }
 
@@ -222,6 +293,45 @@ mod tests {
                 e6c::double_diffraction_horizontal(geo, hkl2).unwrap(),
                 e6c::psi_constant_horizontal(geo, reference, 0.4).unwrap(),
             ],
+            "K4CV" => [
+                Eulerian::Omega(0.2),
+                Eulerian::Chi(0.5),
+                Eulerian::Phi(-0.3),
+                Eulerian::Bisector { detector: 3 },
+            ]
+            .map(|held| {
+                Mode::new_kappa(
+                    geo,
+                    "m",
+                    [0, 1, 2],
+                    &[0, 1, 2, 3],
+                    vec![Equation::Kappa(held)],
+                )
+                .unwrap()
+            })
+            .into(),
+            // The surface rows, written komega, kappa, kphi, gamma, delta.
+            "K6C" => {
+                let normal = Vector3::new(0.4, -0.7, 0.6);
+                vec![
+                    Mode::new(
+                        geo,
+                        "m",
+                        &[1, 2, 3, 4, 5],
+                        vec![
+                            Equation::Incidence {
+                                normal,
+                                incidence: 0.1,
+                            },
+                            Equation::Azimuth {
+                                normal,
+                                azimuth: 1.2,
+                            },
+                        ],
+                    )
+                    .unwrap(),
+                ]
+            }
             _ => vec![
                 e4c::bissector(geo).unwrap(),
                 e4c::constant_omega(geo).unwrap(),
@@ -279,8 +389,10 @@ mod tests {
     }
 
     /// Analytic Jacobian against a central difference of the residual, for
-    /// every E4C mode, every kind of E6C mode and both ZAXIS modes (mu in
-    /// both stacks), at points away from the wrap cut of the angular rows.
+    /// every E4C mode, every kind of E6C mode, both ZAXIS modes (mu in both
+    /// stacks), every kappa eulerian row on K4CV and the surface rows on
+    /// K6C, at points away from the wrap cuts of the angular rows and from
+    /// kappa = 0.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
@@ -291,7 +403,7 @@ mod tests {
             [-2.0, 1.1, -0.7, -1.4, 0.8, -1.3],
             [1.0, 2.5, 3.0, 2.2, 2.9, 0.7],
         ];
-        for name in ["E4CV", "E4CH", "E6C", "ZAXIS"] {
+        for name in ["E4CV", "E4CH", "E6C", "ZAXIS", "K4CV", "K6C"] {
             let geo = preset(name).unwrap();
             let n = geo.axes().len();
             for point in &points {
@@ -312,8 +424,8 @@ mod tests {
                             let miss = (j[(r, c)] - numeric).abs();
                             assert!(
                                 miss <= 1e-8 * (1.0 + numeric.abs()),
-                                "{name} {} {values:?} J[{r},{c}] = {} vs {numeric}",
-                                mode.name(),
+                                "{name} {:?} {values:?} J[{r},{c}] = {} vs {numeric}",
+                                mode.extra(),
                                 j[(r, c)]
                             );
                         }

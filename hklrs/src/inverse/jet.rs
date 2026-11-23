@@ -109,6 +109,27 @@ impl Vec3 {
         }
     }
 
+    /// Constant along every one of `n` written axes.
+    pub fn constant(v: Vector3<f64>, n: usize) -> Vec3 {
+        Vec3 {
+            v,
+            d: vec![Vector3::zeros(); n],
+        }
+    }
+
+    /// |v|; at v = 0, where it has no derivative, the derivative is zero.
+    pub fn norm(&self) -> Scalar {
+        let n = self.v.norm();
+        Scalar {
+            v: n,
+            d: self
+                .d
+                .iter()
+                .map(|d| if n > 0.0 { self.v.dot(d) / n } else { 0.0 })
+                .collect(),
+        }
+    }
+
     /// The unit vector, `None` when |v| ≤ `min`.
     pub fn normalized(&self, min: f64) -> Option<Vec3> {
         let n = self.v.norm();
