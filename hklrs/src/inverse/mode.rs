@@ -59,6 +59,21 @@ pub enum Equation {
     /// direction of sample axis `axis` projected on it, minus θ, equals
     /// `omega`: You's virtual omega on E6C, `axis` chi.
     VirtualOmega { axis: usize, omega: f64 },
+    /// The angle 2θ between k̂i and k̂f, in [0, π], equals `tth` (mod 2π):
+    /// hkl's tth2 tth.
+    Tth { tth: f64 },
+    /// |Q| = 2k·sin θ equals `q`, Å⁻¹ with 2π, taken as 2θ = 2·asin(q/2k)
+    /// (mod 2π): hkl's q2 q.
+    QNorm { q: f64 },
+    /// [`crate::pseudo::q_signed`] equals `q`, Å⁻¹ with 2π, taken as the
+    /// signed 2θ = 2·asin(q/2k) (mod 2π): hkl's q engine.
+    QSigned { q: f64 },
+    /// Q·n̂ equals `qper`, Å⁻¹ with 2π, n̂ the sample-frame normal `surface`
+    /// turned into the lab: hkl's qper ([`crate::pseudo::qper_qpar`]).
+    Qper { surface: Vector3<f64>, qper: f64 },
+    /// |Q − (Q·n̂)n̂| signed by Q·(k̂i × n̂), zero counting as positive,
+    /// equals `qpar`, Å⁻¹ with 2π: hkl's qpar.
+    Qpar { surface: Vector3<f64>, qpar: f64 },
 }
 
 /// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
@@ -217,6 +232,12 @@ impl Equation {
                 in_stack(geometry, *axis, geometry.sample_stack(), "sample")?;
                 finite(&[*omega], "virtual omega")
             }
+            Self::Tth { tth } => finite(&[*tth], "tth"),
+            Self::QNorm { q } | Self::QSigned { q } => finite(&[*q], "q"),
+            Self::Qper { surface, qper: q } | Self::Qpar { surface, qpar: q } => {
+                reference(surface, "surface normal")?;
+                finite(&[*q], "q component")
+            }
             Self::Emergence { surface, emergence } => {
                 reference(surface, "emergence surface")?;
                 finite(&[*emergence], "emergence")?;
@@ -233,8 +254,9 @@ impl Equation {
 }
 
 impl<'g> Mode<'g> {
-    /// `written` are axis indices, rotations only; there must be exactly one
-    /// written axis per equation (3 + `extra.len()`).
+    /// `written` are axis indices, rotations only. A request must give one
+    /// written axis per equation: the rows of its [`super::Target`] and
+    /// `extra`.
     pub fn new(
         geometry: &'g Geometry,
         name: &str,
@@ -274,12 +296,6 @@ impl<'g> Mode<'g> {
                     name: axis.name().to_owned(),
                 });
             }
-        }
-        if written.len() != 3 + extra.len() {
-            return Err(InverseError::EquationCount {
-                written: written.len(),
-                equations: 3 + extra.len(),
-            });
         }
         for e in &extra {
             e.check(geometry, kappa.as_ref())?;

@@ -1,11 +1,11 @@
-//! Inverse: axis values that bring a target Q into reflection under a
-//! [`Mode`].
+//! Inverse: axis values that bring a [`Target`] about under a [`Mode`].
 //!
-//! Every mode implies the three hkl equations R_sample·q = k̂f − k̂i, with q in
+//! A Q target gives the three hkl equations R_sample·q = k̂f − k̂i, with q in
 //! units of k = 2π/λ and k̂f the detector rotation applied to the beam
-//! direction (a detector at infinity, as in hkl); the mode's extra
-//! [`Equation`]s close the system over its written axes, and its [`Slits`],
-//! if any, are turned into the surface after. Other axes stay at `current`.
+//! direction (a detector at infinity, as in hkl); [`Target::Detector`] gives
+//! none. The mode's extra [`Equation`]s close the system over its written
+//! axes, and its [`Slits`], if any, are turned into the surface after. Other
+//! axes stay at `current`.
 
 mod analytic;
 pub mod aps_04id_polar;
@@ -48,6 +48,19 @@ pub enum Target {
     Hkl(Vector3<f64>),
     /// Q in the sample frame, Å⁻¹ with 2π.
     QSample(Vector3<f64>),
+    /// No Q: the mode's equations alone place the detector, as hkl's `q`,
+    /// `q2`, `tth2` and `qper_qpar` engines do.
+    Detector,
+}
+
+impl Target {
+    /// How many equations the target itself gives.
+    fn rows(&self) -> usize {
+        match self {
+            Target::Hkl(_) | Target::QSample(_) => 3,
+            Target::Detector => 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +101,9 @@ pub enum InverseError {
     WrittenTwice { name: String },
     #[error("axis {name:?} is not in the {holder} stack")]
     NotInStack { name: String, holder: &'static str },
-    #[error("{written} written axes need {written} equations, the mode has {equations}")]
+    #[error(
+        "{written} written axes need {written} equations, the target and the mode give {equations}"
+    )]
     EquationCount { written: usize, equations: usize },
     #[error(
         "turning the slits on axis {name:?} would move k̂f: it must be the innermost detector axis and turn about the beam"
@@ -164,42 +179,89 @@ impl<'a> InverseRequest<'a> {
             .into_sorted()
     }
 
-    /// The mode's equations at the target, once it passes the reach gate.
+    /// The target's and the mode's equations, one per written axis, once
+    /// they pass the reach gate.
     fn system(&self) -> Result<system::System<'a>, InverseError> {
         let geometry = self.mode.geometry();
         geometry.poses(self.current)?;
         finite(self.ub.as_slice(), "UB")?;
-        let q = match self.target {
+        let (written, extra) = (self.mode.written().len(), self.mode.extra());
+        let equations = self.target.rows() + extra.len();
+        if written != equations {
+            return Err(InverseError::EquationCount { written, equations });
+        }
+        let k = self.wavelength.wavenumber();
+        let q_max = 2.0 * k;
+        reach(detector_q(extra), q_max)?;
+        let goal = match self.target {
             Target::Hkl(h) => {
                 finite(h.as_slice(), "target hkl")?;
-                self.ub * h
+                q_goal(self.ub * h, q_max)?
             }
             Target::QSample(q) => {
                 finite(q.as_slice(), "target Q")?;
-                q
+                q_goal(q, q_max)?
             }
-        };
-        let k = self.wavelength.wavenumber();
-        let (q_norm, q_max) = (q.norm(), 2.0 * k);
-        if q_norm > q_max * (1.0 + REACH) {
-            return Err(InverseError::Unreachable { q: q_norm, q_max });
-        }
-        // k̂f = k̂i then, which leaves the sample rotation free in any mode.
-        if q_norm == 0.0 {
-            return Err(InverseError::Degenerate);
-        }
-        let q = if q_norm > q_max {
-            q * (q_max / q_norm)
-        } else {
-            q
+            Target::Detector => system::Goal::Detector,
         };
         Ok(system::System::new(
             self.mode,
             self.ub / k,
-            q / k,
+            goal,
+            k,
             self.current,
         ))
     }
+}
+
+/// `Unreachable` for a |Q| of `q` Å⁻¹ beyond `q_max` = 2k.
+fn reach(q: f64, q_max: f64) -> Result<(), InverseError> {
+    if q > q_max * (1.0 + REACH) {
+        Err(InverseError::Unreachable { q, q_max })
+    } else {
+        Ok(())
+    }
+}
+
+/// `q` in units of k as the goal, pulled onto 2k past the reach gate.
+fn q_goal(q: Vector3<f64>, q_max: f64) -> Result<system::Goal, InverseError> {
+    let q_norm = q.norm();
+    reach(q_norm, q_max)?;
+    // k̂f = k̂i then, which leaves the sample rotation free in any mode.
+    if q_norm == 0.0 {
+        return Err(InverseError::Degenerate);
+    }
+    let q = if q_norm > q_max {
+        q * (q_max / q_norm)
+    } else {
+        q
+    };
+    Ok(system::Goal::Q(q * (2.0 / q_max)))
+}
+
+/// The largest |Q| the extra equations ask for, Å⁻¹: a qper and the qpar
+/// of the same surface count as their hypotenuse.
+fn detector_q(extra: &[Equation]) -> f64 {
+    let component = |surface: &Vector3<f64>, per: bool| {
+        extra
+            .iter()
+            .find_map(|e| match *e {
+                Equation::Qper { surface: s, qper } if per && s == *surface => Some(qper),
+                Equation::Qpar { surface: s, qpar } if !per && s == *surface => Some(qpar),
+                _ => None,
+            })
+            .unwrap_or(0.0)
+    };
+    extra
+        .iter()
+        .map(|e| match e {
+            Equation::QNorm { q } | Equation::QSigned { q } => q.abs(),
+            Equation::Qper { surface, .. } | Equation::Qpar { surface, .. } => {
+                component(surface, true).hypot(component(surface, false))
+            }
+            _ => 0.0,
+        })
+        .fold(0.0, f64::max)
 }
 
 /// ψ of `reference` (Miller indices) at `values`: the angle about Q̂ from

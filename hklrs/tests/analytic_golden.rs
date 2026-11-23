@@ -539,8 +539,9 @@ fn refused_modes_reach_four_sample_positions() {
 }
 
 /// Of the golden's "unsupported" constraint sets, which diffcalc refuses,
-/// the two with two and four constraints are no mode of six circles; the
-/// others are modes, which `analytic`'s own tests keep off its closed form.
+/// the two with two and four constraints are no request of six circles:
+/// they fail the count; the others are modes, which `analytic`'s own tests
+/// keep off its closed form.
 #[test]
 fn unsupported_sets_pose_as_modes_or_fail_the_count() {
     let geo = preset("E6C").unwrap();
@@ -549,10 +550,9 @@ fn unsupported_sets_pose_as_modes_or_fail_the_count() {
         if case["category"] != "unsupported" {
             continue;
         }
-        match pose(&geo, case) {
-            Ok(_) => {}
-            Err(InverseError::EquationCount { .. }) => short.push(case["id"].clone()),
-            Err(e) => panic!("{}: {e}", case["id"]),
+        let posed = pose(&geo, case).unwrap_or_else(|e| panic!("{}: {e}", case["id"]));
+        if let Err(InverseError::EquationCount { .. }) = posed.solve(case) {
+            short.push(case["id"].clone());
         }
     }
     assert_eq!(short, ["c375", "c378"]);

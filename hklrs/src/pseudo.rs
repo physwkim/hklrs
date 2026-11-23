@@ -21,8 +21,23 @@ pub const AZIMUTH_MIN: f64 = 1e-9;
 /// the lab frame (`common-q.c:96`). hkl's sign convention for the
 /// four-circle presets, where k_f stays in one plane.
 pub fn q_signed(s: &Scattering) -> f64 {
-    let kf = s.kf.into_inner();
-    if kf.y < 0.0 || kf.z < 0.0 { -s.q } else { s.q }
+    q_sign(&s.kf) * s.q
+}
+
+/// The sign of [`q_signed`] for a k_f along `kf`.
+pub(crate) fn q_sign(kf: &Vector3<f64>) -> f64 {
+    if kf.y < 0.0 || kf.z < 0.0 { -1.0 } else { 1.0 }
+}
+
+/// −1 below zero, else 1: hkl's qper and qpar signs.
+fn sign(dot: f64) -> f64 {
+    if dot < 0.0 { -1.0 } else { 1.0 }
+}
+
+/// The sign of qpar ([`qper_qpar`]) for Q along `q`, k_i along `ki` and the
+/// lab surface normal `n`.
+pub(crate) fn qpar_sign(q: &Vector3<f64>, ki: &Vector3<f64>, n: &Vector3<f64>) -> f64 {
+    sign(q.dot(&ki.cross(n)))
 }
 
 /// Engine `q2`: (|Q| ≥ 0, alpha), alpha = atan2(k_f,z, k_f,y), the angle from
@@ -56,10 +71,9 @@ pub fn qper_qpar(
     let n = surface_in_lab(sample_rotation, surface)?;
     let q = s.q_lab;
     let along = q.dot(&n);
-    let sign = |dot: f64| if dot < 0.0 { -1.0 } else { 1.0 };
     Ok((
         sign(along) * along.abs(),
-        sign(q.dot(&s.ki.cross(&n))) * (q - n * along).norm(),
+        qpar_sign(&q, &s.ki, &n) * (q - n * along).norm(),
     ))
 }
 

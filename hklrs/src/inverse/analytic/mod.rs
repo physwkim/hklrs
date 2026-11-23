@@ -1,13 +1,16 @@
-//! Closed-form candidates for the geometries that are You (1999) 4S+2D axis
-//! for axis: the constraint families solved as diffcalc-core (`059ec8a`,
-//! `src/diffcalc/hkl/calc*.py`) solves them, with its defects corrected
-//! (upstream-defects.md DC-1..DC-6).
+//! Closed-form candidates. For a Q goal, on the geometries that are You
+//! (1999) 4S+2D axis for axis: the constraint families solved as
+//! diffcalc-core (`059ec8a`, `src/diffcalc/hkl/calc*.py`) solves them, with
+//! its defects corrected (upstream-defects.md DC-1..DC-6). For a detector
+//! goal, the detector arms of [`detector`].
 //!
-//! [`search`] is the one boundary: it maps the mode's [`System`] onto You's
-//! constraints through [`frame`] and offers what the solver finds to the
-//! validator, as every generator does. Where an equation leaves an angle
-//! free the solver samples it, and the validator finds the family singular.
+//! [`search`] is the one boundary: it maps the mode's [`System`] onto a
+//! closed form (You's constraints through [`frame`]) and offers what it
+//! finds to the validator, as every generator does. Where an equation
+//! leaves an angle free the solver samples it, and the validator finds the
+//! family singular.
 
+mod detector;
 mod sample;
 mod solve;
 mod trig;
@@ -16,7 +19,7 @@ mod you;
 use nalgebra::{Matrix3, Vector3};
 
 use super::Equation;
-use super::system::System;
+use super::system::{Goal, System};
 use super::validate::SolutionSet;
 use crate::{AxisKind, Geometry};
 use sample::Known;
@@ -179,15 +182,23 @@ fn constraints(system: &System, layout: &[usize; 6]) -> Option<Constraints> {
     }
 }
 
-/// The set of `system` from You's solution of its mode: every candidate
+/// The set of `system` from a closed form of its mode: every candidate
 /// offered, written axes as solved and the others exactly `current`, until
-/// one is singular. `None` where the geometry or the mode is not You's.
-/// The reach gate has passed: Q is nonzero and no longer than 2k.
+/// one is singular. `None` where no closed form applies.
 pub(super) fn search<'a>(system: &'a System<'a>) -> Option<SolutionSet<'a>> {
+    match system.goal() {
+        Goal::Q(q) => you_search(system, q),
+        Goal::Detector => detector::search(system),
+    }
+}
+
+/// [`search`] by You's solution, where the geometry and the mode are
+/// You's. The reach gate has passed: `q` is nonzero and no longer than 2k.
+fn you_search<'a>(system: &'a System<'a>, q: &Vector3<f64>) -> Option<SolutionSet<'a>> {
     let layout = layout(system.geometry())?;
     let constraints = constraints(system, &layout)?;
     let mut set = SolutionSet::new(system);
-    for a in solve::Problem::new(&(frame() * system.q())).candidates(&constraints) {
+    for a in solve::Problem::new(&(frame() * q)).candidates(&constraints) {
         if set.is_degenerate() {
             break;
         }
@@ -257,7 +268,13 @@ mod tests {
         let current = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
         for (mode, maps) in modes {
             let mode = mode.unwrap();
-            let system = System::new(&mode, Matrix3::identity(), Vector3::z(), &current);
+            let system = System::new(
+                &mode,
+                Matrix3::identity(),
+                Goal::Q(Vector3::z()),
+                1.0,
+                &current,
+            );
             let layout = layout(mode.geometry()).unwrap();
             assert_eq!(
                 constraints(&system, &layout).is_some(),
@@ -375,6 +392,7 @@ mod tests {
                         assert!(
                             match e {
                                 InverseError::Unreachable { .. } => category == "unreachable",
+                                InverseError::EquationCount { .. } => category == "unsupported",
                                 InverseError::Degenerate => zero,
                                 _ => false,
                             },

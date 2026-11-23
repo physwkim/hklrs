@@ -261,11 +261,29 @@ fn mode_construction_errors() {
         Mode::new(&geo, "m", &[0, 1, 1], vec![]),
         Err(InverseError::WrittenTwice { name: "chi".into() })
     );
+    // The count is the request's: the target gives three equations, or
+    // none for a detector target.
+    let four = Mode::new(&geo, "m", &[0, 1, 2, 3], vec![]).unwrap();
+    let values = current(&geo);
+    let counted = |target| {
+        InverseRequest {
+            target,
+            ..request(&four, Vector3::new(1.0, 0.0, 0.0), &values)
+        }
+        .solve()
+    };
     assert_eq!(
-        Mode::new(&geo, "m", &[0, 1, 2, 3], vec![]),
+        counted(Target::Hkl(Vector3::new(1.0, 0.0, 0.0))),
         Err(InverseError::EquationCount {
             written: 4,
             equations: 3
+        })
+    );
+    assert_eq!(
+        counted(Target::Detector),
+        Err(InverseError::EquationCount {
+            written: 4,
+            equations: 0
         })
     );
     assert_eq!(

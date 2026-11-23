@@ -9,6 +9,7 @@ use super::kappa::{Branch, KappaAxes, restrict};
 use super::mode::rotation;
 use super::validate::ACCEPT;
 use super::{Equation, Eulerian, Mode, Slits, wrap};
+use crate::pseudo::{q_sign, qpar_sign};
 use crate::{Axis, AxisKind, Error, Geometry};
 
 /// Sine below which an angle ψ is built from (θ, π − 2θ, Q to the
@@ -16,14 +17,25 @@ use crate::{Axis, AxisKind, Error, Geometry};
 /// scale, so none depends on λ or on the units of k̂f and k̂i (HKL-25).
 const NULL: f64 = 1e-10;
 
+/// What the rows ahead of the extra equations solve for.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Goal {
+    /// R_sample·q = k̂f − k̂i, q the target Q in the sample frame in units
+    /// of k: three rows.
+    Q(Vector3<f64>),
+    /// No rows: the extra equations alone place the detector.
+    Detector,
+}
+
 pub(super) struct System<'a> {
     geometry: &'a Geometry,
     written: &'a [usize],
     extra: &'a [Equation],
     kappa: Option<&'a KappaAxes>,
     current: &'a [f64],
-    /// Target Q in the sample frame, units of k.
-    q: Vector3<f64>,
+    goal: Goal,
+    /// k = 2π/λ, Å⁻¹: the unit of the q values of the extra equations.
+    k: f64,
     /// UB in units of k.
     ub: Matrix3<f64>,
     slits: Option<&'a Slits>,
@@ -114,6 +126,31 @@ fn beam_azimuth(v: &Vec3, ki: &Vec3) -> Option<Scalar> {
     Some(Scalar::atan2(&ki.dot(&r.cross(&p)), &r.dot(&p)))
 }
 
+/// The angle between `a` and `b`, in [0, π]. Where they are parallel, a
+/// cone point with no derivative, each column takes the magnitude of its
+/// one-sided slope, so a root there that a written axis turns k̂f through
+/// counts as regular.
+fn angle(a: &Vec3, b: &Vec3) -> Scalar {
+    let c = a.cross(b);
+    let sine = if c.v == Vector3::zeros() {
+        Scalar {
+            v: 0.0,
+            d: c.d.iter().map(Vector3::norm).collect(),
+        }
+    } else {
+        c.norm()
+    };
+    Scalar::atan2(&sine, &a.dot(b))
+}
+
+/// wrap(s·a − target), differentiated.
+fn turned(a: Scalar, s: f64, target: f64) -> Scalar {
+    Scalar {
+        v: wrap(s * a.v - target),
+        d: a.d.iter().map(|d| s * d).collect(),
+    }
+}
+
 /// ψ of the sample-frame vector `reference` at `values`.
 pub(super) fn psi_at(
     geometry: &Geometry,
@@ -125,16 +162,23 @@ pub(super) fn psi_at(
 }
 
 impl<'a> System<'a> {
-    /// `ub` and `q` in units of k; `current` already checked against the
-    /// geometry.
-    pub fn new(mode: &'a Mode<'a>, ub: Matrix3<f64>, q: Vector3<f64>, current: &'a [f64]) -> Self {
+    /// `ub` and a [`Goal::Q`] in units of k, `k` = 2π/λ; `current` already
+    /// checked against the geometry.
+    pub fn new(
+        mode: &'a Mode<'a>,
+        ub: Matrix3<f64>,
+        goal: Goal,
+        k: f64,
+        current: &'a [f64],
+    ) -> Self {
         Self {
             geometry: mode.geometry(),
             written: mode.written(),
             extra: mode.extra(),
             kappa: mode.kappa(),
             current,
-            q,
+            goal,
+            k,
             ub,
             slits: mode.slits(),
         }
@@ -157,9 +201,17 @@ impl<'a> System<'a> {
         &self.ub
     }
 
-    /// Target Q in the sample frame, units of k.
-    pub fn q(&self) -> &Vector3<f64> {
-        &self.q
+    pub fn goal(&self) -> &Goal {
+        &self.goal
+    }
+
+    /// k = 2π/λ, Å⁻¹.
+    pub fn k(&self) -> f64 {
+        self.k
+    }
+
+    pub fn written(&self) -> &'a [usize] {
+        self.written
     }
 
     pub fn kappa(&self) -> Option<&'a KappaAxes> {
@@ -243,13 +295,19 @@ impl<'a> System<'a> {
         self.written.iter().map(|&i| values[i]).collect()
     }
 
-    /// Residuals (3 hkl rows, then the extra equations; dimensionless) and
-    /// their Jacobian over the written axes at `values`, every axis given.
-    /// `None` where the values are invalid or an equation is undefined.
+    /// Residuals (the goal's rows, then the extra equations;
+    /// dimensionless) and their Jacobian over the written axes at `values`,
+    /// every axis given. `None` where the values are invalid or an equation
+    /// is undefined.
     pub fn eval(&self, values: &[f64]) -> Option<Eval> {
         let fr = Frames::new(self.geometry, self.written, values).ok()?;
-        let hkl = fr.sample(&self.q).sub(&fr.kf.sub(&fr.ki));
-        let mut rows: Vec<Scalar> = (0..3).map(|i| hkl.component(i)).collect();
+        let mut rows: Vec<Scalar> = match &self.goal {
+            Goal::Q(q) => {
+                let hkl = fr.sample(q).sub(&fr.kf.sub(&fr.ki));
+                (0..3).map(|i| hkl.component(i)).collect()
+            }
+            Goal::Detector => Vec::new(),
+        };
         for e in self.extra {
             rows.push(match e {
                 Equation::Bisector { sample, detector } => {
@@ -346,12 +404,59 @@ impl<'a> System<'a> {
                         d: r.d,
                     }
                 }
+                Equation::Tth { tth } => turned(angle(&fr.kf, &fr.ki), 1.0, *tth),
+                Equation::QNorm { q } => turned(angle(&fr.kf, &fr.ki), 1.0, self.two_theta(*q)),
+                Equation::QSigned { q } => {
+                    turned(angle(&fr.kf, &fr.ki), q_sign(&fr.kf.v), self.two_theta(*q))
+                }
+                Equation::Qper { surface, qper } => {
+                    let along = fr.kf.sub(&fr.ki).dot(&fr.sample(&surface.normalize()));
+                    Scalar {
+                        v: along.v - qper / self.k,
+                        d: along.d,
+                    }
+                }
+                Equation::Qpar { surface, qpar } => {
+                    let n = fr.sample(&surface.normalize());
+                    let q = fr.kf.sub(&fr.ki);
+                    let s = qpar_sign(&q.v, &fr.ki.v, &n.v);
+                    let p = q.sub(&n.scaled(&q.dot(&n))).norm();
+                    Scalar {
+                        v: s * p.v - qpar / self.k,
+                        d: p.d.iter().map(|d| s * d).collect(),
+                    }
+                }
             });
         }
         Some(Eval {
             f: DVector::from_iterator(rows.len(), rows.iter().map(|r| r.v)),
             j: DMatrix::from_fn(rows.len(), self.written.len(), |r, c| rows[r].d[c]),
         })
+    }
+
+    /// 2θ of |Q| = `q` Å⁻¹, signed as `q`; an excess over 2k within the
+    /// reach gate is pulled onto 2k.
+    fn two_theta(&self, q: f64) -> f64 {
+        2.0 * (q / (2.0 * self.k)).clamp(-1.0, 1.0).asin()
+    }
+
+    /// cos 2θ, k̂f·k̂i, that the goal or the extra equation `e` fixes: a
+    /// qpar with the qper of its surface; `None` for any other equation.
+    pub fn cos_two_theta(&self, e: Option<&Equation>) -> Option<f64> {
+        let q = match (&self.goal, e) {
+            (Goal::Q(q), None) => return Some(1.0 - q.norm_squared() / 2.0),
+            (_, Some(Equation::Tth { tth })) => return Some(tth.cos()),
+            (_, Some(Equation::QNorm { q } | Equation::QSigned { q })) => *q,
+            (_, Some(Equation::Qpar { surface, qpar })) => {
+                let qper = self.extra.iter().find_map(|e| match e {
+                    Equation::Qper { surface: s, qper } if s == surface => Some(*qper),
+                    _ => None,
+                })?;
+                qper.hypot(*qpar)
+            }
+            _ => return None,
+        };
+        Some(self.two_theta(q).cos())
     }
 
     /// The lab direction of sample axis `axis` at `values`: its own
@@ -567,6 +672,42 @@ mod tests {
         }
     }
 
+    /// Modes of a detector goal, k = 1 Å⁻¹; "E6C" adds the Q-component rows
+    /// written on a sample axis.
+    fn detector_modes<'g>(name: &str, geo: &'g Geometry) -> Vec<Mode<'g>> {
+        let surface = Vector3::new(0.3, 1.0, -0.4);
+        let gamma_delta =
+            |extra: Vec<Equation>| Mode::named(geo, "m", &["gamma", "delta"], |_| extra).unwrap();
+        match name {
+            "E4CV" | "E4CH" => [Equation::QSigned { q: -1.3 }, Equation::QNorm { q: 0.7 }]
+                .map(|e| Mode::named(geo, "m", &["tth"], |_| vec![e]).unwrap())
+                .into(),
+            "E6C" => vec![
+                gamma_delta(vec![Equation::QNorm { q: 1.1 }, Equation::Qaz { qaz: 0.4 }]),
+                gamma_delta(vec![
+                    Equation::Tth { tth: 0.9 },
+                    Equation::Qaz { qaz: -2.6 },
+                ]),
+                gamma_delta(vec![
+                    Equation::Qper { surface, qper: 0.3 },
+                    Equation::Qpar {
+                        surface,
+                        qpar: -0.5,
+                    },
+                ]),
+                Mode::named(geo, "m", &["mu", "gamma", "delta"], |_| {
+                    vec![
+                        Equation::Qaz { qaz: 0.4 },
+                        Equation::Qper { surface, qper: 0.3 },
+                        Equation::Qpar { surface, qpar: 0.5 },
+                    ]
+                })
+                .unwrap(),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     /// ψ of `reference` with k̂f at 2θ from k̂i about z, k̂f and k̂i scaled
     /// by k and `reference` by 1/k, at λ = 0.1 Å and 50 Å.
     fn psi_at_two_wavelengths(kf: Vector3<f64>, reference: Vector3<f64>) -> [Option<f64>; 2] {
@@ -619,8 +760,9 @@ mod tests {
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
     /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
     /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa
-    /// eulerian row on K4CV and the surface rows on K6C, at points away from
-    /// the wrap cuts of the angular rows and from kappa = 0.
+    /// eulerian row on K4CV, the surface rows on K6C and the detector goals'
+    /// rows, at points away from the wrap cuts of the angular rows, from
+    /// kappa = 0 and from the sign changes of a signed q or qpar.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
@@ -649,8 +791,12 @@ mod tests {
             let n = geo.axes().len();
             for point in &points {
                 let values = &point[..n];
-                for mode in &modes(name, &geo) {
-                    let s = System::new(mode, ub, q, values);
+                let q_modes = modes(name, &geo).into_iter().map(|m| (Goal::Q(q), m));
+                let detector = detector_modes(name, &geo)
+                    .into_iter()
+                    .map(|m| (Goal::Detector, m));
+                for (goal, mode) in &q_modes.chain(detector).collect::<Vec<_>>() {
+                    let s = System::new(mode, ub, *goal, 1.0, values);
                     let x = s.written_values(values);
                     let j = s.eval(values).unwrap().j;
                     for c in 0..x.len() {
