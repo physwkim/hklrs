@@ -67,7 +67,7 @@ fn frame_map() -> FrameMap {
         Projection::QSample,
         &detector,
         &Region::new(0..4, 0..6, (2, 2)),
-        PixelFields::new(SHAPE),
+        PixelFields::new(),
         vec![Binning::new(0.01, 0.0).unwrap(); 3],
     )
     .unwrap()

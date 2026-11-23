@@ -140,7 +140,7 @@ fn refusal(c: &Value, e: &Value, outcome: &Value) -> Option<PoniError> {
 
 /// count, sum and sum of squares (mod 2^64) of the masked row-major indices.
 fn fingerprint(det: &PixelDetector) -> Vec<u64> {
-    let mask = det.mask().unwrap_or(&[]);
+    let mask = det.mask().data();
     let mut out = [0u64; 3];
     for (k, _) in mask.iter().enumerate().filter(|&(_, &m)| m) {
         let k = k as u64;
@@ -565,7 +565,7 @@ fn generic_binnings_are_pyfai_s() {
         );
         for (lab_name, lab, [a1, a2, a3]) in labs() {
             let det = pf.detector(&lab).unwrap();
-            assert_eq!(det.mask(), None, "{text}");
+            assert!(!det.mask().data().contains(&true), "{text}");
             let pixels = outcome["pixels"].as_array().unwrap();
             for (px, zyx) in pixels.iter().zip(outcome["zyx"].as_array().unwrap()) {
                 let want = a1 * f(&zyx[1]) + a2 * f(&zyx[2]) + a3 * f(&zyx[0]);

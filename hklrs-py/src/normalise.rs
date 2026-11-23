@@ -72,21 +72,21 @@ fn mean_monitor(monitor: Vec<f64>) -> PyResult<f64> {
 }
 
 /// The detector's dark rate (counts per second) and flat field (relative
-/// gain), arrays of the whole raw frame's `shape`. A flat pixel that is not
-/// finite or is <= 1e-5 is masked (`BadFlat`).
+/// gain), arrays of the whole raw frame's shape; `Normaliser` and
+/// `FrameMap` refuse another. A flat pixel that is not finite or is
+/// <= 1e-5 is masked (`BadFlat`).
 #[pyclass(name = "PixelFields", module = "hklrs.normalise", frozen)]
 pub(crate) struct PyPixelFields(pub(crate) core::PixelFields);
 
 #[pymethods]
 impl PyPixelFields {
     #[new]
-    #[pyo3(signature = (shape, dark_rate=None, flat=None))]
+    #[pyo3(signature = (dark_rate=None, flat=None))]
     fn new(
-        shape: (usize, usize),
         dark_rate: Option<PyReadonlyArray2<'_, f64>>,
         flat: Option<PyReadonlyArray2<'_, f64>>,
     ) -> PyResult<Self> {
-        let mut f = core::PixelFields::new(shape);
+        let mut f = core::PixelFields::new();
         if let Some(d) = dark_rate {
             f = f.dark_rate(image(&d)?).map_err(err)?;
         }
@@ -167,7 +167,7 @@ impl PyNormaliser {
             .map_err(err)
     }
 
-    /// One frame: `raw` is the whole raw frame (the fields' shape);
+    /// One frame: `raw` is the whole raw frame (the reducer's raw shape);
     /// `weights` are (values, reasons) pairs from `solid_angle` and
     /// `polarisation` (or `absorption`) of the binned detector. Returns
     /// (counts, weight, reasons) of the binned shape; the corrected value is

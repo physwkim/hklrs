@@ -82,7 +82,7 @@ fn scan() -> Scan {
         Projection::QSample,
         &detector,
         &Region::new(0..shape.0, 0..shape.1, (1, 1)),
-        PixelFields::new(shape),
+        PixelFields::new(),
         binnings,
     )
     .unwrap();

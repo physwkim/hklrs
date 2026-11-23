@@ -397,12 +397,11 @@ impl Miss {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PixelDetector {
-    shape: (usize, usize),
     /// Tile the image: every pixel is in exactly one.
     modules: Vec<Module>,
-    /// Row-major over `shape`, `Some` only when a pixel is masked, so an
-    /// all-clear mask and no mask are one value.
-    mask: Option<Vec<bool>>,
+    /// True where a pixel is masked, all false when none is; its shape is
+    /// the detector's.
+    mask: Image<bool>,
 }
 
 fn finite(v: &Vector3<f64>, what: &str) -> Result<(), Error> {
@@ -413,10 +412,6 @@ fn finite(v: &Vector3<f64>, what: &str) -> Result<(), Error> {
             what: what.to_owned(),
         })
     }
-}
-
-fn any_masked(masked: Vec<bool>) -> Option<Vec<bool>> {
-    masked.contains(&true).then_some(masked)
 }
 
 /// The axis of `n` pixels one `step` apart; a zero step is a point, which
@@ -506,44 +501,40 @@ impl PixelDetector {
             return Err(Error::ModuleTiling { shape });
         }
         Ok(Self {
-            shape,
             modules,
-            mask: None,
+            mask: Image::from_fn(shape, |_, _| false),
         })
     }
 
     /// `masked`, of the detector's shape, excludes each pixel where it is
     /// true; replaces any earlier mask.
     pub fn with_mask(self, masked: Image<bool>) -> Result<Self, Error> {
-        masked.check("mask", self.shape)?;
+        masked.check("mask", self.shape())?;
         Ok(Self {
-            mask: any_masked(masked.into_data()),
+            mask: masked,
             ..self
         })
     }
 
     pub fn shape(&self) -> (usize, usize) {
-        self.shape
+        self.mask.shape()
     }
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
     }
 
-    /// Row-major mask over the shape, `None` when no pixel is masked.
-    pub fn mask(&self) -> Option<&[bool]> {
-        self.mask.as_deref()
+    /// True where a pixel is masked, all false when none is.
+    pub fn mask(&self) -> &Image<bool> {
+        &self.mask
     }
 
     fn index(&self, slow: usize, fast: usize) -> Result<usize, Error> {
-        if slow >= self.shape.0 || fast >= self.shape.1 {
-            return Err(Error::PixelOutside {
-                slow,
-                fast,
-                shape: self.shape,
-            });
+        let shape = self.shape();
+        if slow >= shape.0 || fast >= shape.1 {
+            return Err(Error::PixelOutside { slow, fast, shape });
         }
-        Ok(slow * self.shape.1 + fast)
+        Ok(slow * shape.1 + fast)
     }
 
     /// Centre of pixel (slow, fast) in the detector-arm frame.
@@ -619,8 +610,8 @@ impl PixelDetector {
     }
 
     pub fn is_masked(&self, slow: usize, fast: usize) -> Result<bool, Error> {
-        let i = self.index(slow, fast)?;
-        Ok(self.mask.as_ref().is_some_and(|m| m[i]))
+        self.index(slow, fast)?;
+        Ok(self.mask.get(slow, fast))
     }
 
     /// Every module moved by `motion`.
@@ -636,7 +627,6 @@ impl PixelDetector {
             })
             .collect();
         Self {
-            shape: self.shape,
             modules,
             mask: self.mask.clone(),
         }
@@ -646,13 +636,9 @@ impl PixelDetector {
     /// is this detector's (slow.start, fast.start); a module keeps the part
     /// of it inside the roi.
     pub fn roi(&self, slow: Range<usize>, fast: Range<usize>) -> Result<Self, Error> {
-        if slow.is_empty() || fast.is_empty() || slow.end > self.shape.0 || fast.end > self.shape.1
-        {
-            return Err(Error::Roi {
-                slow,
-                fast,
-                shape: self.shape,
-            });
+        let shape = self.shape();
+        if slow.is_empty() || fast.is_empty() || slow.end > shape.0 || fast.end > shape.1 {
+            return Err(Error::Roi { slow, fast, shape });
         }
         let clip = |at: usize, n: usize, roi: &Range<usize>| {
             at.max(roi.start) - at..(at + n).min(roi.end).saturating_sub(at)
@@ -680,17 +666,10 @@ impl PixelDetector {
                 })
             })
             .collect();
-        let width = self.shape.1;
-        let mask = self.mask.as_ref().map(|m| {
-            slow.clone()
-                .flat_map(|s| fast.clone().map(move |f| m[s * width + f]))
-                .collect()
+        let mask = Image::from_fn((slow.len(), fast.len()), |s, f| {
+            self.mask.get(slow.start + s, fast.start + f)
         });
-        Ok(Self {
-            shape: (slow.len(), fast.len()),
-            modules,
-            mask: mask.and_then(any_masked),
-        })
+        Ok(Self { modules, mask })
     }
 
     /// Blocks of `slow` x `fast` pixels as one pixel each, spanning the
@@ -698,14 +677,15 @@ impl PixelDetector {
     /// module left without a block; a block is masked when any of its
     /// pixels is. A block must lie in one module.
     pub fn bin(&self, slow: usize, fast: usize) -> Result<Self, Error> {
-        if slow == 0 || fast == 0 || slow > self.shape.0 || fast > self.shape.1 {
+        let raw = self.shape();
+        if slow == 0 || fast == 0 || slow > raw.0 || fast > raw.1 {
             return Err(Error::Bin {
                 slow,
                 fast,
-                shape: self.shape,
+                shape: raw,
             });
         }
-        let shape = (self.shape.0 / slow, self.shape.1 / fast);
+        let shape = (raw.0 / slow, raw.1 / fast);
         // the binned module's pixels, as a range of raw pixels cut at the
         // last whole block
         let cut = |at: usize, n: usize, k: usize, blocks: usize| {
@@ -736,22 +716,11 @@ impl PixelDetector {
                 fast: m.fast.bin(fast, r2.len() / fast),
             });
         }
-        let width = self.shape.1;
-        let mask = self.mask.as_ref().map(|m| {
-            (0..shape.0)
-                .flat_map(|bs| {
-                    (0..shape.1).map(move |bf| {
-                        (bs * slow..(bs + 1) * slow)
-                            .any(|s| (bf * fast..(bf + 1) * fast).any(|f| m[s * width + f]))
-                    })
-                })
-                .collect()
+        let mask = Image::from_fn(shape, |bs, bf| {
+            (bs * slow..(bs + 1) * slow)
+                .any(|s| (bf * fast..(bf + 1) * fast).any(|f| self.mask.get(s, f)))
         });
-        Ok(Self {
-            shape,
-            modules,
-            mask: mask.and_then(any_masked),
-        })
+        Ok(Self { modules, mask })
     }
 }
 
@@ -1066,13 +1035,14 @@ mod tests {
 
         let r = det.roi(1..5, 2..6).unwrap();
         assert!(r.is_masked(1, 1).unwrap());
-        assert_eq!(r.mask().unwrap().iter().filter(|&&x| x).count(), 1);
-        // the roi leaves the masked pixel out: no mask remains
-        assert_eq!(det.roi(3..5, 0..7).unwrap().mask(), None);
+        assert_eq!(r.mask().data().iter().filter(|&&x| x).count(), 1);
+        // the roi leaves the masked pixel out: no pixel stays masked
+        let clear = det.roi(3..5, 0..7).unwrap();
+        assert_eq!(clear.mask(), &Image::from_fn((2, 7), |_, _| false));
 
         // block (1, 1) of 2x3 holds pixel (2, 3); every other block is clear
         let b = det.bin(2, 3).unwrap();
-        assert_eq!(b.mask().unwrap(), &[false, false, false, true]);
+        assert_eq!(b.mask().data(), &[false, false, false, true]);
     }
 
     #[test]

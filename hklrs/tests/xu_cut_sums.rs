@@ -95,7 +95,7 @@ fn unit_pixels(counts: &[f64]) -> Vec<Result<Normalised, Masked>> {
     )
     .unwrap();
     let (_, r) = Region::new(0..1, 0..n, (1, 1)).apply(&det).unwrap();
-    let frame = Normaliser::new(PixelFields::new((1, n)), r)
+    let frame = Normaliser::new(PixelFields::new(), r)
         .unwrap()
         .normalise(
             &Image::new((1, n), counts.to_vec()).unwrap(),
