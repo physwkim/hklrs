@@ -274,20 +274,17 @@ fn best_start<T>(
     starts: usize,
     mut one: impl FnMut(usize) -> Result<Run<T>, CalibError>,
 ) -> Result<Run<T>, CalibError> {
-    let mut best: Result<Run<T>, CalibError> = Err(CalibError::BadProblem);
-    let mut first = true;
+    let mut best: Option<Result<Run<T>, CalibError>> = None;
     for s in 0..starts {
         let r = one(s);
-        best = match (first, best, r) {
-            (true, _, r) => r,
-            (_, Ok(a), Ok(b)) => Ok(if b.cost < a.cost { b } else { a }),
-            (_, Ok(a), Err(_)) => Ok(a),
-            (_, Err(_), Ok(b)) => Ok(b),
-            (_, Err(a), Err(b)) => Err(worse(a, b)),
-        };
-        first = false;
+        best = Some(match (best, r) {
+            (None, r) => r,
+            (Some(Ok(a)), Ok(b)) => Ok(if b.cost < a.cost { b } else { a }),
+            (Some(Ok(a)), Err(_)) | (Some(Err(_)), Ok(a)) => Ok(a),
+            (Some(Err(a)), Err(b)) => Err(worse(a, b)),
+        });
     }
-    best
+    best.unwrap_or(Err(CalibError::BadProblem))
 }
 
 /// The best candidate, or `AmbiguousDirections` when the runner-up is within
