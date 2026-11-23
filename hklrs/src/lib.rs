@@ -33,7 +33,9 @@ pub use forward::{
     scattering, scattering_at,
 };
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
-pub use inverse::{Equation, Eulerian, InverseError, InverseRequest, Mode, Picker, Slits, Target};
+pub use inverse::{
+    Equation, Eulerian, InverseError, InverseRequest, Mode, ModeSpec, Picker, Slits, Target,
+};
 pub use lattice::Lattice;
 pub use qmap::{
     Planes, Polarisation, QMap, Weights, absorption, detector_positions, polarisation, q_map,

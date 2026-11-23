@@ -119,6 +119,18 @@ create_exception!(
 );
 create_exception!(
     hklrs,
+    UnknownMode,
+    InverseError,
+    "No mode has this name; carries name."
+);
+create_exception!(
+    hklrs,
+    ModeParameter,
+    InverseError,
+    "The mode needs a parameter it was not given; carries mode and needs."
+);
+create_exception!(
+    hklrs,
     EmergenceRange,
     InverseError,
     "Emergence outside [-90, 90]; carries emergence (degrees)."
@@ -177,6 +189,10 @@ pub(crate) fn to_py(py: Python<'_>, geometry: &hklrs::Geometry, e: E) -> PyErr {
         E::EmergenceRange { emergence } => {
             raise!(EmergenceRange, "emergence" => emergence.to_degrees())
         }
+        E::UnknownMode { name } => raise!(UnknownMode, "name" => name),
+        E::ModeParameter { mode, needs } => {
+            raise!(ModeParameter, "mode" => mode, "needs" => needs)
+        }
     }
 }
 
@@ -201,5 +217,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("WrittenTwice", py.get_type::<WrittenTwice>())?;
     m.add("NotInStack", py.get_type::<NotInStack>())?;
     m.add("SlitsMoveDetector", py.get_type::<SlitsMoveDetector>())?;
-    m.add("EmergenceRange", py.get_type::<EmergenceRange>())
+    m.add("EmergenceRange", py.get_type::<EmergenceRange>())?;
+    m.add("UnknownMode", py.get_type::<UnknownMode>())?;
+    m.add("ModeParameter", py.get_type::<ModeParameter>())
 }
