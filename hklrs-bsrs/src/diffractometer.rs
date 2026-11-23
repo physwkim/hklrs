@@ -62,6 +62,8 @@ impl WavelengthSource {
 
 #[derive(Clone)]
 struct State {
+    /// Its limits and cut points change; its axes and stacks do not.
+    geometry: Geometry,
     wavelength: WavelengthSource,
     samples: Samples,
     /// None only for a geometry no [`ModeSpec`] builds on.
@@ -101,6 +103,7 @@ const SETTABLE: [&str; 3] = ["sample", "wavelength", "mode"];
 
 /// What a plan solves its trajectory from.
 pub(crate) struct Snapshot {
+    pub geometry: Geometry,
     /// Readbacks in geometry axis order, degrees and metres.
     pub current: Vec<f64>,
     pub wavelength: Wavelength,
@@ -108,9 +111,140 @@ pub(crate) struct Snapshot {
     pub mode: Option<ModeSpec>,
 }
 
+impl Snapshot {
+    pub fn mode(&self) -> Result<&ModeSpec, DiffError> {
+        require_mode(&self.geometry, self.mode.as_ref())
+    }
+
+    /// Axis values for each point of `path` in its mode, each picked closest
+    /// to the previous point's solution and the first to the readbacks, so
+    /// the path takes no branch jump.
+    pub fn solve_path(&self, path: &[([f64; 3], ModeSpec)]) -> Result<Vec<Vec<f64>>, DiffError> {
+        let geometry = &self.geometry;
+        let ub = self.sample.ub();
+        let mut seed = geometry.values_from_degrees(&self.current)?;
+        let mut solved = Vec::with_capacity(path.len());
+        for (index, (hkl, mode)) in path.iter().enumerate() {
+            let point = |source| DiffError::Point {
+                index,
+                source: Box::new(source),
+            };
+            let values = solve(geometry, mode, ub, self.wavelength, *hkl, &seed).map_err(point)?;
+            let degrees = geometry.values_to_degrees(&values);
+            solved.push(degrees.map_err(|e| point(e.into()))?);
+            seed = values;
+        }
+        Ok(solved)
+    }
+}
+
+fn require_mode<'m>(
+    geometry: &Geometry,
+    mode: Option<&'m ModeSpec>,
+) -> Result<&'m ModeSpec, DiffError> {
+    mode.ok_or_else(|| DiffError::NoMode {
+        geometry: geometry.name().to_owned(),
+    })
+}
+
+pub(crate) fn build_mode<'g>(
+    geometry: &'g Geometry,
+    mode: &ModeSpec,
+) -> Result<Mode<'g>, DiffError> {
+    mode.build(geometry).map_err(|source| DiffError::Mode {
+        mode: mode.name.clone(),
+        source,
+    })
+}
+
+/// hkl's default: the first of [`ModeSpec::names`] `geometry` builds.
+fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
+    ModeSpec::names()
+        .map(ModeSpec::new)
+        .find(|m| m.build(geometry).is_ok())
+}
+
+/// [`Diffractometer::set_limits`] on `geometry`.
+fn set_limits(geometry: &mut Geometry, name: &str, min: f64, max: f64) -> Result<(), DiffError> {
+    let rotation = geometry.axes()[geometry.axis_index(name)?].is_rotation();
+    let value = |v: f64| if rotation { v.to_radians() } else { v };
+    geometry
+        .set_limits(name, value(min), value(max))
+        .map_err(|e| match e {
+            hklrs::Error::AxisLimits { name, .. } => DiffError::Limits { name, min, max },
+            e => e.into(),
+        })
+}
+
+/// Radian axis values reaching `hkl` in `mode`, closest to `seed`.
+fn solve(
+    geometry: &Geometry,
+    mode: &ModeSpec,
+    ub: Matrix3<f64>,
+    wavelength: Wavelength,
+    hkl: [f64; 3],
+    seed: &[f64],
+) -> Result<Vec<f64>, DiffError> {
+    let mode = build_mode(geometry, mode)?;
+    let request = InverseRequest {
+        mode: &mode,
+        ub,
+        wavelength,
+        target: Target::Hkl(Vector3::from(hkl)),
+        current: seed,
+    };
+    request
+        .pick(Picker::Closest)
+        .map_err(|source| DiffError::Solve { hkl, source })
+}
+
+/// A point on the scattered beam in the detector-arm frame: the hkl
+/// detector, at any distance along the beam.
+fn point(geometry: &Geometry) -> Point3<f64> {
+    Point3::from(geometry.beam_direction().into_inner())
+}
+
+fn reflection(geometry: &Geometry, m: &Measured) -> Result<Reflection, DiffError> {
+    let values = geometry.values_from_degrees(&m.positions)?;
+    Ok(Reflection::measure(
+        Vector3::from(m.hkl),
+        geometry,
+        &values,
+        m.wavelength,
+        &point(geometry),
+    )?)
+}
+
+/// Configuration values by field, without the device-name prefix.
+pub(crate) fn configuration(
+    geometry: &Geometry,
+    sample: &Sample,
+    mode: Option<&str>,
+    wavelength: Wavelength,
+) -> Vec<(&'static str, Value)> {
+    let l = &sample.lattice;
+    let deg = |r| Deg::from(r).0;
+    let values = [
+        json!(geometry.name()),
+        json!(sample.name),
+        json!([
+            l.a(),
+            l.b(),
+            l.c(),
+            deg(l.alpha()),
+            deg(l.beta()),
+            deg(l.gamma())
+        ]),
+        json!(rows(&sample.u().to_rotation_matrix().into_inner())),
+        json!(rows(&sample.ub())),
+        json!(wavelength.angstrom()),
+        json!(mode),
+    ];
+    CONFIG.iter().map(|c| c.0).zip(values).collect()
+}
+
 pub struct Diffractometer {
     name: String,
-    geometry: Geometry,
     /// `reals[i]` drives `geometry.axes()[i]`.
     reals: Vec<Arc<dyn RealAxis>>,
     state: RwLock<State>,
@@ -147,15 +281,12 @@ impl Diffractometer {
                 })
             })
             .collect::<Result<_, _>>()?;
-        // hkl's default: the engine's first mode
-        let mode = ModeSpec::names()
-            .map(ModeSpec::new)
-            .find(|m| m.build(&geometry).is_ok());
+        let mode = default_mode(&geometry);
         Ok(Self {
             name: name.to_owned(),
-            geometry,
             reals,
             state: RwLock::new(State {
+                geometry,
                 wavelength,
                 samples: Samples::new(sample),
                 mode,
@@ -165,8 +296,9 @@ impl Diffractometer {
         })
     }
 
-    pub fn geometry(&self) -> &Geometry {
-        &self.geometry
+    /// A copy of the geometry with its current limits and cut points.
+    pub fn geometry(&self) -> Geometry {
+        self.state().geometry.clone()
     }
 
     /// The reals in geometry axis order.
@@ -180,11 +312,9 @@ impl Diffractometer {
 
     /// Reading keys of the axis readbacks, in geometry axis order.
     pub fn axis_keys(&self) -> Vec<String> {
-        self.geometry
-            .axes()
-            .iter()
-            .map(|a| self.key(a.name()))
-            .collect()
+        let state = self.state();
+        let axes = state.geometry.axes().iter();
+        axes.map(|a| self.key(a.name())).collect()
     }
 
     pub fn hkl_keys(&self) -> [String; 3] {
@@ -192,7 +322,8 @@ impl Diffractometer {
     }
 
     // Every mutation is computed before the guard is written, so a lock
-    // poisoned by a panic elsewhere still holds a whole state.
+    // poisoned by a panic elsewhere still holds a whole state. No guard is
+    // taken while another is held.
     fn state(&self) -> RwLockReadGuard<'_, State> {
         self.state.read().unwrap_or_else(PoisonError::into_inner)
     }
@@ -244,6 +375,21 @@ impl Diffractometer {
         self.state_mut().set_wavelength(wavelength)
     }
 
+    /// Limits axis `name` to `[min, max]`, degrees for a rotation and metres
+    /// for a translation; an infinite end is unbounded. A solution outside
+    /// the limits after wrapping to the cut point is rejected.
+    pub fn set_limits(&self, name: &str, min: f64, max: f64) -> Result<(), DiffError> {
+        set_limits(&mut self.state_mut().geometry, name, min, max)
+    }
+
+    /// Represents rotation `name` in [cut, cut + 360) degrees.
+    pub fn set_cut_point(&self, name: &str, cut: f64) -> Result<(), DiffError> {
+        Ok(self
+            .state_mut()
+            .geometry
+            .set_cut_point(name, cut.to_radians())?)
+    }
+
     /// The hkl mode the pseudo axes solve in; at construction the first of
     /// [`ModeSpec::names`] this geometry builds.
     pub fn mode(&self) -> Option<ModeSpec> {
@@ -251,17 +397,10 @@ impl Diffractometer {
     }
 
     pub fn set_mode(&self, mode: ModeSpec) -> Result<(), DiffError> {
-        self.build_mode(&mode)?;
-        self.state_mut().mode = Some(mode);
+        let mut state = self.state_mut();
+        build_mode(&state.geometry, &mode)?;
+        state.mode = Some(mode);
         Ok(())
-    }
-
-    fn build_mode<'g>(&'g self, mode: &ModeSpec) -> Result<Mode<'g>, DiffError> {
-        mode.build(&self.geometry)
-            .map_err(|source| DiffError::Mode {
-                mode: mode.name.clone(),
-                source,
-            })
     }
 
     /// The last h, k, l the pseudo axes were sent to.
@@ -271,8 +410,8 @@ impl Diffractometer {
 
     /// Records reflection `name` of the current sample.
     pub fn add_reflection(&self, name: &str, measured: Measured) -> Result<(), DiffError> {
-        self.reflection(&measured)?;
         let mut state = self.state_mut();
+        reflection(&state.geometry, &measured)?;
         let entry = state.samples.current_mut();
         if entry.reflections.contains_key(name) {
             return Err(DiffError::DuplicateReflection {
@@ -287,31 +426,15 @@ impl Diffractometer {
     /// Orients the current sample from two of its reflections (Busing &
     /// Levy) and returns its UB.
     pub fn compute_ub(&self, primary: &str, secondary: &str) -> Result<Matrix3<f64>, DiffError> {
-        let mut state = self.state_mut();
+        let mut guard = self.state_mut();
+        let state = &mut *guard;
         let entry = state.samples.current_mut();
         let orientation = Orientation::busing_levy(
-            self.reflection(entry.reflection(primary)?)?,
-            self.reflection(entry.reflection(secondary)?)?,
+            reflection(&state.geometry, entry.reflection(primary)?)?,
+            reflection(&state.geometry, entry.reflection(secondary)?)?,
         )?;
         entry.sample.orientation = orientation;
         Ok(entry.sample.ub())
-    }
-
-    fn reflection(&self, m: &Measured) -> Result<Reflection, DiffError> {
-        let values = self.geometry.values_from_degrees(&m.positions)?;
-        Ok(Reflection::measure(
-            Vector3::from(m.hkl),
-            &self.geometry,
-            &values,
-            m.wavelength,
-            &self.point(),
-        )?)
-    }
-
-    /// A point on the scattered beam in the detector-arm frame: the hkl
-    /// detector, at any distance along the beam.
-    fn point(&self) -> Point3<f64> {
-        Point3::from(self.geometry.beam_direction().into_inner())
     }
 
     /// Readbacks of every real in geometry axis order, degrees for rotations
@@ -333,10 +456,11 @@ impl Diffractometer {
         positions: &[f64],
         wavelength: Wavelength,
     ) -> Result<Vector3<f64>, DiffError> {
-        let values = self.geometry.values_from_degrees(positions)?;
         let state = self.state();
+        let geometry = &state.geometry;
+        let values = geometry.values_from_degrees(positions)?;
         let sample = &state.samples.current().sample;
-        Ok(forward(&self.geometry, sample, &values, wavelength, &self.point())?.hkl)
+        Ok(forward(geometry, sample, &values, wavelength, &point(geometry))?.hkl)
     }
 
     /// Axis values that reach `hkl` with the current sample and mode, the
@@ -349,50 +473,22 @@ impl Diffractometer {
         current: &[f64],
         wavelength: Wavelength,
     ) -> Result<Vec<f64>, DiffError> {
-        let current = self.geometry.values_from_degrees(current)?;
-        let (mode, ub) = {
-            let state = self.state();
-            (state.mode.clone(), state.samples.current().sample.ub())
-        };
-        let mode = self.require_mode(mode.as_ref())?;
-        let values = self.solve(&mode, ub, wavelength, hkl, &current)?;
-        Ok(self.geometry.values_to_degrees(&values)?)
+        let state = self.state();
+        let geometry = &state.geometry;
+        let mode = require_mode(geometry, state.mode.as_ref())?;
+        let seed = geometry.values_from_degrees(current)?;
+        let ub = state.samples.current().sample.ub();
+        let values = solve(geometry, mode, ub, wavelength, hkl, &seed)?;
+        Ok(geometry.values_to_degrees(&values)?)
     }
 
-    pub(crate) fn require_mode(&self, mode: Option<&ModeSpec>) -> Result<ModeSpec, DiffError> {
-        mode.cloned().ok_or_else(|| DiffError::NoMode {
-            geometry: self.geometry.name().to_owned(),
-        })
-    }
-
-    /// Radian axis values reaching `hkl` in `mode`, closest to `seed`.
-    fn solve(
-        &self,
-        mode: &ModeSpec,
-        ub: Matrix3<f64>,
-        wavelength: Wavelength,
-        hkl: [f64; 3],
-        seed: &[f64],
-    ) -> Result<Vec<f64>, DiffError> {
-        let mode = self.build_mode(mode)?;
-        let request = InverseRequest {
-            mode: &mode,
-            ub,
-            wavelength,
-            target: Target::Hkl(Vector3::from(hkl)),
-            current: seed,
-        };
-        request
-            .pick(Picker::Closest)
-            .map_err(|source| DiffError::Solve { hkl, source })
-    }
-
-    /// The readbacks, the wavelength, and the sample and mode from one read
-    /// of the state.
+    /// The readbacks, the wavelength, and the geometry, sample and mode from
+    /// one read of the state.
     pub(crate) async fn snapshot(&self) -> Result<Snapshot, BsrsError> {
         let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
         let state = self.state();
         Ok(Snapshot {
+            geometry: state.geometry.clone(),
             current,
             wavelength,
             sample: state.samples.current().sample.clone(),
@@ -400,62 +496,8 @@ impl Diffractometer {
         })
     }
 
-    /// Axis values for each point of `path` in its mode, each picked closest
-    /// to the previous point's solution and the first to the readbacks, so
-    /// the path takes no branch jump.
-    pub(crate) fn solve_path(
-        &self,
-        snapshot: &Snapshot,
-        path: &[([f64; 3], ModeSpec)],
-    ) -> Result<Vec<Vec<f64>>, DiffError> {
-        let ub = snapshot.sample.ub();
-        let mut seed = self.geometry.values_from_degrees(&snapshot.current)?;
-        let mut solved = Vec::with_capacity(path.len());
-        for (index, (hkl, mode)) in path.iter().enumerate() {
-            let point = |source| DiffError::Point {
-                index,
-                source: Box::new(source),
-            };
-            let values = self
-                .solve(mode, ub, snapshot.wavelength, *hkl, &seed)
-                .map_err(point)?;
-            let degrees = self.geometry.values_to_degrees(&values);
-            solved.push(degrees.map_err(|e| point(e.into()))?);
-            seed = values;
-        }
-        Ok(solved)
-    }
-
     pub(crate) fn set_target(&self, target: Option<[f64; 3]>) {
         self.state_mut().target = target;
-    }
-
-    /// Configuration values by field, without the device-name prefix.
-    pub(crate) fn configuration(
-        &self,
-        sample: &Sample,
-        mode: Option<&str>,
-        wavelength: Wavelength,
-    ) -> Vec<(&'static str, Value)> {
-        let l = &sample.lattice;
-        let deg = |r| Deg::from(r).0;
-        let values = [
-            json!(self.geometry.name()),
-            json!(sample.name),
-            json!([
-                l.a(),
-                l.b(),
-                l.c(),
-                deg(l.alpha()),
-                deg(l.beta()),
-                deg(l.gamma())
-            ]),
-            json!(rows(&sample.u().to_rotation_matrix().into_inner())),
-            json!(rows(&sample.ub())),
-            json!(wavelength.angstrom()),
-            json!(mode),
-        ];
-        CONFIG.iter().map(|c| c.0).zip(values).collect()
     }
 
     /// Replaces component `index` of the pseudo setpoint (the readback h, k,
@@ -520,7 +562,7 @@ impl Diffractometer {
                 }
                 Some("mode") => {
                     let mode = ModeSpec::new(value.as_str().ok_or_else(|| bad("string"))?);
-                    self.build_mode(&mode)?;
+                    build_mode(&next.geometry, &mode)?;
                     next.mode = Some(mode);
                 }
                 _ => {
@@ -583,7 +625,8 @@ impl ReadableObj for Diffractometer {
     }
 
     async fn describe_dyn(&self) -> Result<HashMap<String, DataKey>, BsrsError> {
-        let axes = self.geometry.axes().iter().map(|a| {
+        let state = self.state();
+        let axes = state.geometry.axes().iter().map(|a| {
             let units = match a.kind() {
                 AxisKind::Rotation { .. } | AxisKind::RotationAbout { .. } => Some("deg"),
                 AxisKind::Translation { .. } => Some("m"),
@@ -617,7 +660,8 @@ impl ConfigurableObj for Diffractometer {
         let fields = {
             let state = self.state();
             let mode = state.mode.as_ref().map(|m| m.name.as_str());
-            self.configuration(&state.samples.current().sample, mode, wavelength)
+            let sample = &state.samples.current().sample;
+            configuration(&state.geometry, sample, mode, wavelength)
         };
         let t = now();
         Ok(fields

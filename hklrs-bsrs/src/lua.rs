@@ -127,12 +127,8 @@ impl LuaDiffractometer {
     }
 
     fn named(&self, values: &[f64]) -> Positions {
-        let names = self
-            .dx
-            .geometry()
-            .axes()
-            .iter()
-            .map(|a| a.name().to_owned());
+        let geometry = self.dx.geometry();
+        let names = geometry.axes().iter().map(|a| a.name().to_owned());
         names.zip(values.iter().copied()).collect()
     }
 }

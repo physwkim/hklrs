@@ -63,6 +63,8 @@ pub enum DiffError {
     },
     #[error("hkl {start:?} and {stop:?} span no zone: both must be non-zero and not parallel")]
     Zone { start: [f64; 3], stop: [f64; 3] },
+    #[error("axis {name:?} limits [{min}, {max}] are not an interval")]
+    Limits { name: String, min: f64, max: f64 },
     #[error(transparent)]
     Core(#[from] hklrs::Error),
 }
