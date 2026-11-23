@@ -405,4 +405,6 @@ golden! {
     k6c_constant_incidence: "K6C" "constant_incidence",
     k4cv_constant_chi: "K4CV" "constant_chi",
     k6c_constant_chi_vertical: "K6C" "constant_chi_vertical",
+    k6c_lifting_detector_kphi: "K6C" "lifting_detector_kphi",
+    k6c_lifting_detector_mu: "K6C" "lifting_detector_mu",
 }
