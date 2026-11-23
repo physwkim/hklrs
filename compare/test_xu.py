@@ -200,13 +200,13 @@ def frames(name, qc, det, dim, tag):
             q_h, p_h = q_h[0], p_h[0]
         q_x = xu_vectors(xu_q(*ang))
         p_x = xu_vectors(qc.getDetectorPos(*ang[n_sample:], dim=dim))
-        assert q_h.shape == q_x.shape == p_h.shape == p_x.shape
         out.append((ang, q_x, q_h, p_x, p_h))
     return out
 
 
 def assert_matches_xu(name, qc, det, dim, tag):
     for ang, q_x, q_h, p_x, p_h in frames(name, qc, det, dim, tag):
+        assert q_h.shape == q_x.shape == p_h.shape == p_x.shape
         np.testing.assert_allclose(q_h, q_x, rtol=0, atol=Q_TOL, err_msg=f"Q at {ang}")
         np.testing.assert_allclose(p_h, p_x, rtol=0, atol=POS_TOL, err_msg=f"position at {ang}")
 
@@ -264,6 +264,136 @@ def test_linear_end_to_end(name, case):
     det = hklrs_linear(p)
     assert det.shape[0] == 1
     assert_matches_xu(name, xu_linear(name, p), det, 1, case)
+
+
+def block_grid(cch, start, end, n):
+    """Centre channel and count of the unbinned chip whose pixels are the
+    centres of the Nav-blocks of [start, end)."""
+    assert (end - start) % n == 0
+    return (cch - start - (n - 1) / 2) / n, (end - start) // n
+
+
+NAV_AREA = {"nav": dict(nch=(10, 12), nav=(2, 3)), "nav_roi": dict(nav=(2, 3), roi=(1, 9, 2, 11))}
+NAV_LINEAR = {"nav": dict(nav=3), "nav_roi": dict(nav=2, roi=(1, 9))}
+
+
+@pytest.mark.parametrize("case", sorted(NAV_AREA))
+def test_xu13_area_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block(name, case):
+    """XU-13: an hklrs Nav pixel is the centre of the raw block xu averages,
+    as xu's unbinned chip on the block grid computes it; xu's own Nav pixel k
+    sits on raw pixel Nav*(roi0//Nav + k). Fails when xu fixes it."""
+    p = params(AREA_BASE, NAV_AREA[case])
+    nav = p["nav"]
+    r = p.get("roi", (0, p["nch"][0], 0, p["nch"][1]))
+    grid = [block_grid(p["cch"][k], r[2 * k], r[2 * k + 1], nav[k]) for k in (0, 1)]
+    reference = xu_area(name, params(p, dict(
+        cch=tuple(g[0] for g in grid), nch=tuple(g[1] for g in grid),
+        pwidth=tuple(w * n for w, n in zip(p["pwidth"], nav)), nav=None, roi=None)))
+    det = hklrs_area(p)
+    assert_matches_xu(name, reference, det, 2, case)
+    whole = hklrs_area(params(p, dict(nav=None, roi=None)))
+    assert_matches_xu(name, reference, whole.roi(r[:2], r[2:]).bin(*nav), 2, case)
+    rows, cols = (nav[k] * (r[2 * k] // nav[k] + np.arange(grid[k][1])) for k in (0, 1))
+    for ang, q_x, q_h, p_x, p_h in frames(name, xu_area(name, p), whole, 2, case):
+        np.testing.assert_allclose(q_x, q_h[np.ix_(rows, cols)], rtol=0, atol=Q_TOL, err_msg=f"{ang}")
+        np.testing.assert_allclose(p_x, p_h[np.ix_(rows, cols)], rtol=0, atol=POS_TOL)
+    for _, q_x, q_h, _, _ in frames(name, xu_area(name, p), det, 2, case):
+        assert np.abs(q_h - q_x).max() > 1e-6
+
+
+@pytest.mark.parametrize("case", sorted(NAV_LINEAR))
+def test_xu13_linear_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block(name, case):
+    """XU-13 for a linear detector, as for the area above."""
+    p = params(LINEAR_BASE, NAV_LINEAR[case])
+    nav = p["nav"]
+    r = p.get("roi", (0, p["nch"]))
+    cch, n = block_grid(p["cch"], *r, nav)
+    reference = xu_linear(name, params(p, dict(cch=cch, nch=n, pwidth=p["pwidth"] * nav,
+                                               nav=None, roi=None)))
+    det = hklrs_linear(p)
+    assert_matches_xu(name, reference, det, 1, case)
+    whole = hklrs_linear(params(p, dict(nav=None, roi=None)))
+    assert_matches_xu(name, reference, whole.roi((0, 1), r).bin(1, nav), 1, case)
+    pixels = nav * (r[0] // nav + np.arange(n))
+    for ang, q_x, q_h, p_x, p_h in frames(name, xu_linear(name, p), whole, 1, case):
+        np.testing.assert_allclose(q_x, q_h[pixels], rtol=0, atol=Q_TOL, err_msg=f"{ang}")
+        np.testing.assert_allclose(p_x, p_h[pixels], rtol=0, atol=POS_TOL)
+    for _, q_x, q_h, _, _ in frames(name, xu_linear(name, p), det, 1, case):
+        assert np.abs(q_h - q_x).max() > 1e-6
+
+
+def test_xu14_tilted_linear_along_r_i_is_rejected_where_xu_scales_its_pitch(name):
+    """XU-14: a linear row along r_i has no tilt axis. hklrs rejects the tilt;
+    xu zeroes the NaN axis, which scales the pitch by cos(tilt) and here moves
+    pixels 0 and 1 from upstream of the sample to downstream. Fails when xu
+    fixes it."""
+    tilt = 60.0
+    p = params(LINEAR_BASE, dict(dir="y+", pwidth=0.4, tilt=tilt))
+    with pytest.raises(ValueError, match="parallel"):
+        hklrs_linear(p)
+    untilted = params(p, dict(tilt=None))
+    scaled = params(untilted, dict(pwidth=p["pwidth"] * math.cos(math.radians(tilt))))
+    assert_matches_xu(name, xu_linear(name, p), hklrs_linear(scaled), 1, "xu14")
+    for _, q_x, q_h, _, _ in frames(name, xu_linear(name, p), hklrs_linear(untilted), 1, "xu14"):
+        assert np.abs(q_h - q_x).max() > 1e-3
+
+
+def test_xu16_roi_off_the_chip_is_rejected_where_xu_extrapolates(name):
+    """XU-16: hklrs rejects a roi that leaves the chip; xu returns Q for the
+    missing pixels, those of a larger chip. Fails when xu checks the roi."""
+    area = params(AREA_BASE, dict(roi=(0, 12, 0, 15)))
+    with pytest.raises(ValueError, match="outside the detector shape"):
+        hklrs_area(area)
+    larger = hklrs_area(params(area, dict(nch=(12, 15), roi=None)))
+    assert_matches_xu(name, xu_area(name, area), larger, 2, "xu16")
+    linear = params(LINEAR_BASE, dict(roi=(0, 12)))
+    with pytest.raises(ValueError, match="outside the detector shape"):
+        hklrs_linear(linear)
+    longer = hklrs_linear(params(linear, dict(nch=12, roi=None)))
+    assert_matches_xu(name, xu_linear(name, linear), longer, 1, "xu16")
+
+
+def pixels(det):
+    s, f = det.shape
+    return np.array([[det.pixel(i, j) for j in range(f)] for i in range(s)])
+
+
+def test_xu3_detector_tilt_turns_left_handed():
+    """XU-3: rotation_arb turns left-handed, so xu's tilt about r_i x dir
+    (linear, qconversion.c:431) and about -sin(az) dir1 + cos(az) dir2 (area,
+    :598) is a right-handed turn by -tilt. hklrs imports the values unchanged
+    and reproduces that turn. Fails when xu fixes rotation_arb."""
+    t = 10.0
+    r_i = np.array(R_I, float)
+
+    p = params(LINEAR_BASE, dict(tilt=t))
+    e = xu.math.getVector(p["dir"])
+    k = np.arange(p["nch"]) - p["cch"]
+
+    def row(turn):
+        return p["distance"] * r_i + np.outer(k * p["pwidth"], turn @ e)
+
+    axis = np.cross(r_i, e)
+    got = np.stack(xu_linear("E4CV", p).getDetectorPos(0.0, dim=1), axis=-1)
+    np.testing.assert_allclose(got, row(_ref.rot(axis, -math.radians(t))), rtol=0, atol=POS_TOL)
+    assert np.abs(got - row(_ref.rot(axis, math.radians(t)))).max() > 1e-6
+    np.testing.assert_allclose(pixels(hklrs_linear(p))[0], got @ M.T, rtol=0, atol=POS_TOL)
+
+    p = params(AREA_BASE, dict(tilt=t, tiltazimuth=30.0))
+    e1, e2 = xu.math.getVector(p["dir1"]), xu.math.getVector(p["dir2"])
+    i, j = np.meshgrid(np.arange(p["nch"][0]) - p["cch"][0], np.arange(p["nch"][1]) - p["cch"][1],
+                       indexing="ij")
+
+    def chip(turn):
+        return (p["distance"] * r_i + (i * p["pwidth"][0])[..., None] * (turn @ e1)
+                + (j * p["pwidth"][1])[..., None] * (turn @ e2))
+
+    az = math.radians(p["tiltazimuth"])
+    axis = -math.sin(az) * e1 + math.cos(az) * e2
+    got = np.stack(xu_area("E4CV", p).getDetectorPos(0.0, dim=2), axis=-1)
+    np.testing.assert_allclose(got, chip(_ref.rot(axis, -math.radians(t))), rtol=0, atol=POS_TOL)
+    assert np.abs(got - chip(_ref.rot(axis, math.radians(t)))).max() > 1e-6
+    np.testing.assert_allclose(pixels(hklrs_area(p)), got @ M.T, rtol=0, atol=POS_TOL)
 
 
 def test_kappa_plus_is_inverse_rotation():
