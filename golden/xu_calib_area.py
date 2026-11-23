@@ -29,8 +29,8 @@ conv.init_area("z+", "y+", cch1=TRUTH["cch1"], cch2=TRUTH["cch2"], Nch1=N, Nch2=
                tiltazimuth=0, tilt=0)
 
 
-def beampix(a1, a2):
-    q = np.array(conv.area(a1, a2, wl=WL, deg=True))
+def beampix(a1, a2, area=None):
+    q = np.array((area or conv.area)(a1, a2, wl=WL, deg=True))
     m = np.linalg.norm(q, axis=0)
     i, j = np.unravel_index(m.argmin(), m.shape)
     ii, jj = np.mgrid[-3:4, -3:4]
@@ -72,6 +72,16 @@ for a1, a2 in zip(A1, A2):
                        sigma_pixel=centroid_sigma(img, cen)))
     imgs.append(img)
 
+# the same beam, generated in the order the fit model applies the circles
+# (R_x(detrot) R_y R_z, detrot as an explicit third circle; r13 'rev')
+tc = xu.QConversion([], ["x+", "y-", "z+"], [1, 0, 0])
+tc.init_area("z+", "y+", cch1=TRUTH["cch1"], cch2=TRUTH["cch2"], Nch1=N, Nch2=N,
+             pwidth1=PW, pwidth2=PW, distance=D, tiltazimuth=0, tilt=0)
+rev_pix = [beampix(a1, a2, lambda x, y, **k: tc.area(TRUTH["detrot"], y, x, **k)) for a1, a2 in zip(A1, A2)]
+exact = {id(im): np.array(f["true_pixel"]) for im, f in zip(imgs, frames)}
+rev_exact = {id(im): np.array(p) for im, p in zip(imgs, rev_pix)}
+_peak = sa._peak_position
+
 # capture every odr_fit result xu makes, without changing the call
 calls = []
 _odr = sa.odr_fit
@@ -87,8 +97,9 @@ def _record(*a, **k):
 sa.odr_fit = _record
 
 
-def run(label, detrot_start, fix_detrot):
+def run(label, detrot_start, fix_detrot, pix=None):
     calls.clear()
+    sa._peak_position = (lambda img, nw, plot=False: tuple(pix[id(img)])) if pix else _peak
     res, eps = sa.area_detector_calib(
         A1, A2, imgs, ["z+", "y-"], "x+", plot=False, wl=WL,
         start=(None, None, D, 0, 0, detrot_start, 0),
@@ -107,7 +118,9 @@ def run(label, detrot_start, fix_detrot):
                  sum_square=float(getattr(best, "sum_square", float("nan")))))
 
 
-fits = [run("detrot free, start 0", 0.0, False), run("detrot fixed at truth", TRUTH["detrot"], True)]
+fits = [run("detrot free, start 0", 0.0, False), run("detrot fixed at truth", TRUTH["detrot"], True),
+        run("detrot fixed at truth, exact beam pixels from Ang2Q.area (no peak finding)", TRUTH["detrot"], True, exact),
+        run("detrot fixed at truth, exact pixels generated in the fit model's circle order", TRUTH["detrot"], True, rev_exact)]
 json.dump(dict(
     program="xrayutilities 1.8.0 sample_align.area_detector_calib (step_beta removed), odrpack 0.7.1",
     units=dict(angle="deg", length="m", pixel="index, centres at integers, [slow, fast]"),
@@ -115,7 +128,9 @@ json.dump(dict(
           "r_i x+; detrot is xu's init_area detrot; true_pixel from QConversion.area, xu_pixel from "
           "_peak_position on the noisy image; sigma_pixel is our Poisson centroid error, xu has none; "
           "xu's fit does not recover the truth it generated the data from (pwidth 0.00205/0.00195 vs "
-          "0.002, detrot free runs off to 3e6 with info 12): the fit model and Ang2Q disagree (XU-1)"),
+          "0.002, detrot free runs off to 3e6 with info 12). Cause: XU-1, not peak finding: the same bias "
+          "remains with exact Ang2Q beam pixels (fit 3), and goes away when the pixels are generated with the "
+          "circles in the fit model's order (fit 4)"),
     wavelength=WL, shape=[N, N], truth=TRUTH,
     image=dict(amplitude=AMP, background=BG, sigma_px=SIGMA_PX, noise="poisson, numpy default_rng(20260101)", nwindow=NWINDOW),
     frames=frames, fits=fits), open(OUT, "w"), indent=1)

@@ -5,7 +5,7 @@
   "length": "m",
   "pixel": "index, centres at integers, [slow, fast]"
  },
- "note": "circles: outer 'z+' (angle1), arm 'y-' (angle2); detector directions z+ (slow), y+ (fast); r_i x+; detrot is xu's init_area detrot; true_pixel from QConversion.area, xu_pixel from _peak_position on the noisy image; sigma_pixel is our Poisson centroid error, xu has none; xu's fit does not recover the truth it generated the data from (pwidth 0.00205/0.00195 vs 0.002, detrot free runs off to 3e6 with info 12): the fit model and Ang2Q disagree (XU-1)",
+ "note": "circles: outer 'z+' (angle1), arm 'y-' (angle2); detector directions z+ (slow), y+ (fast); r_i x+; detrot is xu's init_area detrot; true_pixel from QConversion.area, xu_pixel from _peak_position on the noisy image; sigma_pixel is our Poisson centroid error, xu has none; xu's fit does not recover the truth it generated the data from (pwidth 0.00205/0.00195 vs 0.002, detrot free runs off to 3e6 with info 12). Cause: XU-1, not peak finding: the same bias remains with exact Ang2Q beam pixels (fit 3), and goes away when the pixels are generated with the circles in the fit model's order (fit 4)",
  "wavelength": 1.54,
  "shape": [
   800,
@@ -537,6 +537,114 @@
      0.0
     ],
     "sum_square": 9.440447497096805e-05
+   }
+  },
+  {
+   "label": "detrot fixed at truth, exact beam pixels from Ang2Q.area (no peak finding)",
+   "start_detrot": 2.0,
+   "fixed_detrot": true,
+   "fixed": [
+    "distance",
+    "tiltazimuth",
+    "tilt",
+    "offset",
+    "detrot"
+   ],
+   "fitted": {
+    "cch1": 401.2999897692136,
+    "cch2": 396.7000007300942,
+    "pwidth1": 0.0020509722551353346,
+    "pwidth2": 0.0019493377117788906,
+    "distance": 1.0,
+    "tiltazimuth": 0.0,
+    "tilt": 0.0,
+    "detrot": 2.0,
+    "offset": 0.0
+   },
+   "eps": 0.001632743264872199,
+   "n_odr_calls": 1,
+   "odr": {
+    "info": 1,
+    "stopreason": "Sum of squares convergence.",
+    "niter": 10,
+    "nfev": 68,
+    "beta": [
+     401.2999897692136,
+     396.7000007300942,
+     0.0020509722551353346,
+     0.0019493377117788906,
+     1.0,
+     0.0,
+     0.0,
+     2.0,
+     0.0
+    ],
+    "sd_beta": [
+     0.9865120311384423,
+     1.087554852906791,
+     2.914244548670413e-05,
+     2.9355637423645502e-05,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "sum_square": 9.435000141024135e-05
+   }
+  },
+  {
+   "label": "detrot fixed at truth, exact pixels generated in the fit model's circle order",
+   "start_detrot": 2.0,
+   "fixed_detrot": true,
+   "fixed": [
+    "distance",
+    "tiltazimuth",
+    "tilt",
+    "offset",
+    "detrot"
+   ],
+   "fitted": {
+    "cch1": 401.30000976763523,
+    "cch2": 396.69999502149483,
+    "pwidth1": 0.0019999717552055683,
+    "pwidth2": 0.0019999717295838587,
+    "distance": 1.0,
+    "tiltazimuth": 0.0,
+    "tilt": 0.0,
+    "detrot": 2.0,
+    "offset": 0.0
+   },
+   "eps": 4.16211962255632e-13,
+   "n_odr_calls": 1,
+   "odr": {
+    "info": 2,
+    "stopreason": "Parameter convergence.",
+    "niter": 26,
+    "nfev": 145,
+    "beta": [
+     401.30000976763523,
+     396.69999502149483,
+     0.0019999717552055683,
+     0.0019999717295838587,
+     1.0,
+     0.0,
+     0.0,
+     2.0,
+     0.0
+    ],
+    "sd_beta": [
+     1.9189083249085558e-05,
+     2.1085922175685463e-05,
+     4.3208780806168987e-10,
+     4.577505823885737e-10,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "sum_square": 7.668978490692932e-24
    }
   }
  ]
