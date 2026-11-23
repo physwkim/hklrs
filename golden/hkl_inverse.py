@@ -11,7 +11,7 @@ The C solver restarts with libc rand(); srand() is seeded per call through
 ctypes so the output is reproducible.
 Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c (E4CV, E4CH and
 SOLEIL MARS), -e6c.c, -k4c.c,
--k6c.c, -zaxis.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
+-k6c.c, -zaxis.c, -aps-04id-polar.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
 _psi_constant_*, _emergence_fixed_func), -soleil-sixs-med.c; the ESRF BM28
 and ID01 PSIC modes only hold axes. SOLEIL SIXS MED2+3, and MED2+3 v2 with
 its engine-list parameter eta_a_rotation = 1, refit eta_a after the solve
@@ -42,11 +42,12 @@ N_UNREACH = 4
 TOL = 1e-6
 GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
               "ESRF ID01 PSIC", "SOLEIL SIXS MED2+2", "SOLEIL SIXS MED1+2",
-              "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS"]
+              "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS",
+              "APS POLAR"]
 # Engine-list parameter sets run per geometry; [] where the list has none.
 LIST_PARAMS = {"SOLEIL SIXS MED2+3 v2": [[0.0], [1.0]]}
-PARAM_MODES = ("double_diffraction", "psi_constant", "constant_incidence",
-               "emergence_fixed")
+PARAM_MODES = ("double_diffraction", "psi_constant", "psi constant",
+               "constant_incidence", "emergence_fixed")
 UNIT = {"Degree": ("rot", 1.0), "Milli Radian": ("rot", math.pi / 180.0 * 1000.0),
         "Milli Meter": ("trans", 1.0), "Meter": ("trans", 1e-3)}
 ALPHA = math.radians(50.0)  # kappa angle of the 4-circle kappa geometries
@@ -257,6 +258,10 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable, fitted)
     if mode == "reflectivity" and g == "SOLEIL SIXS MED2+2":
         # soleil-sixs-med.c:52; the range shift moves gamma by 360 without mu
         r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])
+    if g == "APS POLAR" and mode == "4-circles bissecting horizontal":
+        r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # aps-04id-polar.c:157
+    if mode == "zaxis + alpha=beta":
+        r["tau-delta"] = wrap(n["tau"] - n["delta"])  # aps-04id-polar.c:123
     if mode == "bissector_horizontal":
         r["omega mod 180"] = wrap(om, 180.0)  # e6c.c:50, k6c.c:70
         r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # e6c.c:51, k6c.c:80
@@ -280,7 +285,7 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable, fitted)
         k = 2 * math.pi / WL
         v = rs @ ctx.ub @ np.array([pv["h2"], pv["k2"], pv["l2"]], float) + np.array([k, 0, 0])
         r["|R.UB.h2+ki|^2-|ki|^2"] = float(v @ v - k * k)  # common-hkl.c:512 (f[3])
-    if mode.startswith("psi_constant"):
+    if mode.startswith(("psi_constant", "psi constant")):
         ps = psi_of(ctx, [pv["h2"], pv["k2"], pv["l2"]], geo_sol)
         if ps is not None:
             r["psi-psi0"] = wrap(ps - pv["psi"])  # common-hkl.c:567
