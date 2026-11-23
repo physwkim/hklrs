@@ -1,6 +1,7 @@
 //! Python bindings: conversions only. Angles are degrees at this boundary,
 //! translations metres, wavelength Å.
 
+mod calib;
 mod cut;
 mod normalise;
 
@@ -1412,6 +1413,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         xu.add_class::<PyXuArea>()?;
         xu.add_class::<PyXuLinear>()
     })?;
+    submodule(m, "calib", calib::register)?;
     submodule(m, "normalise", normalise::register)?;
     submodule(m, "cut", cut::register)?;
     submodule(m, "poni", |p| {
