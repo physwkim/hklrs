@@ -255,9 +255,10 @@ pub fn preset(name: &str) -> Result<Geometry, Error> {
             .detector_rotation("delta", MY)
             .build(),
         // hkl 7be4f79 hkl-engine-pyfai.c: no sample axes; the three
-        // translations are in metres and, unlike hkl's kf, move the pixel
+        // translations are in metres and, unlike hkl's kf, move the pixel.
+        // rot3 turns about −x as in pyFAI; hkl has +x (HKL-37)
         "PYFAI" => b
-            .detector_rotation("rot3", X)
+            .detector_rotation("rot3", MX)
             .detector_rotation("rot2", MY)
             .detector_rotation("rot1", MZ)
             .detector_translation("poni1", Z)

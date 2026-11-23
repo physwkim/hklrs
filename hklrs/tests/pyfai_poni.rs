@@ -4,9 +4,9 @@
 pub mod common;
 
 use common::{f, load};
-use hklrs::Rad;
-use hklrs::nalgebra::{Unit, Vector3};
+use hklrs::nalgebra::{Point3, Unit, Vector3};
 use hklrs::poni::{LabAxes, Orientation, Poni};
+use hklrs::{Rad, presets};
 use serde_json::Value;
 
 /// Metres; pixel positions are about 0.3 m from the sample.
@@ -121,4 +121,64 @@ fn bin_3_rot3_sign_is_pyfai_s() {
         n += 1;
     }
     assert_eq!(n, 4 * 3, "rot3, all and all_large in every orientation");
+}
+
+/// HKL-37: hkl 7be4f79 turns PYFAI's rot3 about +x; pyFAI, and so the hklrs
+/// preset, about −x. The preset must put each pixel where pyFAI does, and
+/// hkl's sign must not.
+#[test]
+fn hkl_37_pyfai_preset_turns_rot3_as_pyfai_does() {
+    let g = load("pyfai_poni.json");
+    let geo = presets::preset("PYFAI").unwrap();
+    let gap = |case: &Value, rot3_sign: f64| {
+        let values: Vec<f64> = geo
+            .axes()
+            .iter()
+            .map(|a| match a.name() {
+                "rot1" | "rot2" => f(&case[a.name()]),
+                "rot3" => rot3_sign * f(&case["rot3"]),
+                "poni1" | "poni2" => f(&g[a.name()]),
+                "sdd" => f(&g["dist"]),
+                other => panic!("PYFAI axis {other}"),
+            })
+            .collect();
+        let pose = geo.poses(&values).unwrap().detector;
+        let mut worst = 0.0f64;
+        for (px, zyx) in g["pixels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(case["zyx"].as_array().unwrap())
+        {
+            // orientation 3: the image index is the physical one
+            let p = |k: usize, pitch: &str| f(&g[pitch]) * (f(&px[k]) + 0.5);
+            let got = pose * Point3::new(0.0, -p(1, "pixel2"), -p(0, "pixel1"));
+            // the preset's poni1, poni2 and sdd put pyFAI's axes 1, 2, 3
+            // along −z, −y and x
+            let (t3, t1, t2) = (f(&zyx[0]), f(&zyx[1]), f(&zyx[2]));
+            let d = (got.coords - Vector3::new(t3, -t2, -t1)).norm();
+            if d > worst || d.is_nan() {
+                worst = d;
+            }
+        }
+        worst
+    };
+    let mut n = 0;
+    for case in g["cases"].as_array().unwrap() {
+        if case["orientation"] != 3 {
+            continue;
+        }
+        let w = gap(case, 1.0);
+        assert!(w <= TOL, "{}: {w} m", case["rots"]);
+        if f(&case["rot3"]) != 0.0 {
+            let hkl = gap(case, -1.0);
+            assert!(
+                hkl > 1e-3,
+                "{}: hkl's rot3 sign not seen ({hkl} m)",
+                case["rots"]
+            );
+            n += 1;
+        }
+    }
+    assert_eq!(n, 3, "rot3, all and all_large");
 }
