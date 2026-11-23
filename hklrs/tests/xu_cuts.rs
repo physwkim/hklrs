@@ -1,7 +1,7 @@
 //! Line-cut geometry against xrayutilities deff08f (golden/xu_cuts.py): the
 //! coordinate along the cut, the distance from it and the pixel selection
 //! xu makes, for every kind and integration direction, plus the xu
-//! divergences XU-17 and XU-18 (XU-19 is about intensities: phase 2).
+//! divergences XU-17 and XU-18 (XU-19 is about intensities: xu_cut_sums.rs).
 
 pub mod common;
 
