@@ -27,8 +27,8 @@ use hklrs_bsrs::{
     FailedFrame, FrameFailure, FrameReader, Hdf5FrameError, Hdf5FrameReader, ReadError,
     RsmCallback, RsmConfig, RsmValue,
 };
-use rust_hdf5::H5Type;
 use rust_hdf5::swmr::SwmrFileWriter;
+use rust_hdf5::{Complex32, H5Type};
 use serde_json::{Value, json};
 
 const LAMBDA: f64 = 1.54;
@@ -148,6 +148,15 @@ impl Pixel for f32 {
 impl Pixel for f64 {
     fn bytes(self) -> Vec<u8> {
         self.to_ne_bytes().to_vec()
+    }
+}
+
+impl Pixel for Complex32 {
+    fn bytes(self) -> Vec<u8> {
+        [self.re, self.im]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect()
     }
 }
 
@@ -596,6 +605,24 @@ fn an_integer_pixel_past_2_pow_53_is_inexact() {
     );
 }
 
+/// A compound pixel, rust-hdf5's complex number.
+#[test]
+fn a_compound_pixel_is_an_unsupported_type() {
+    let dir = scratch("a_compound_pixel_is_an_unsupported_type");
+    let frame = vec![Complex32 { re: 1.0, im: 2.0 }; SHAPE.0 * SHAPE.1];
+    let writer = stream(
+        &dir,
+        "/entry/data",
+        "data",
+        &[SHAPE.0 as u64, SHAPE.1 as u64],
+        &[frame],
+    );
+    let e = Hdf5FrameReader.frame(&image_resource(&dir), 0).unwrap_err();
+    assert!(!not_yet(&image_resource(&dir), 0));
+    writer.close();
+    assert!(matches!(e, Hdf5FrameError::UnsupportedType(_)), "{e:?}");
+}
+
 /// A file at the uri that is not HDF5.
 #[test]
 fn a_file_that_is_not_hdf5_fails_in_hdf5() {
@@ -643,11 +670,11 @@ fn reads_as_written(names: &[&str]) {
     }
 }
 
-/// NDFileHDF5's N-bit at the type's full 16 bits, which the filter passes
-/// through.
+/// NDFileHDF5's N-bit, on a 12-bit integer type at bit offset 0 and at 4,
+/// and at the type's full 16 bits, which the filter passes through.
 #[test]
-fn nbit_at_full_precision_is_read() {
-    reads_as_written(&["nbit_full"]);
+fn nbit_is_read() {
+    reads_as_written(&["nbit", "nbit_offset4", "nbit_full"]);
 }
 
 /// NDFileHDF5's szip (nearest neighbour), and szip with entropy coding.
@@ -723,23 +750,6 @@ fn a_filter_not_decoded_is_named() {
         assert_eq!(
             e.to_string(),
             format!("HDF5 filter {id} ({filter}) is not one this reader decodes")
-        );
-        assert!(!not_yet(&compressed(name), 0));
-    }
-}
-
-/// NDFileHDF5's N-bit, on a 12-bit integer type at bit offset 0 and at 4:
-/// rust-hdf5 has the filter's decoder but converts integers only of full
-/// width.
-#[test]
-fn an_nbit_type_of_reduced_precision_is_not_readable() {
-    for (name, offset) in [("nbit", 0), ("nbit_offset4", 4)] {
-        assert_eq!(
-            Hdf5FrameReader.frame(&compressed(name), 0).unwrap_err(),
-            Hdf5FrameError::UnsupportedType(format!(
-                "fixed-point datatype (size 2, bit offset {offset}, precision 12) \
-                 is not a standard-width integer"
-            ))
         );
         assert!(!not_yet(&compressed(name), 0));
     }
