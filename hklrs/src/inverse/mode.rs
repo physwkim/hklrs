@@ -52,6 +52,13 @@ pub enum Equation {
     /// n̂·(k̂i + k̂f) = 0, You's a_eq_b (reference vector) or bin_eq_bout
     /// (surface) on E6C.
     IncidenceEqualsEmergence { normal: Vector3<f64> },
+    /// The lab direction of sample axis `axis` lies in the scattering plane
+    /// of k̂i and k̂f: You's bisect on E6C, `axis` chi.
+    InScatteringPlane { axis: usize },
+    /// The angle from k̂i toward Q in the scattering plane to the lab
+    /// direction of sample axis `axis` projected on it, minus θ, equals
+    /// `omega`: You's virtual omega on E6C, `axis` chi.
+    VirtualOmega { axis: usize, omega: f64 },
 }
 
 /// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
@@ -203,6 +210,13 @@ impl Equation {
             }
             Self::Qaz { qaz } => finite(&[*qaz], "qaz"),
             Self::IncidenceEqualsEmergence { normal } => reference(normal, "surface normal"),
+            Self::InScatteringPlane { axis } => {
+                in_stack(geometry, *axis, geometry.sample_stack(), "sample")
+            }
+            Self::VirtualOmega { axis, omega } => {
+                in_stack(geometry, *axis, geometry.sample_stack(), "sample")?;
+                finite(&[*omega], "virtual omega")
+            }
             Self::Emergence { surface, emergence } => {
                 reference(surface, "emergence surface")?;
                 finite(&[*emergence], "emergence")?;

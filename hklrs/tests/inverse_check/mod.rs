@@ -111,6 +111,17 @@ pub fn residuals(
             let kf = geo.poses(values).unwrap().detector.rotation * geo.beam_direction();
             n.angle(&ki) + n.angle(&kf) - PI
         }
+        Equation::InScatteringPlane { axis } => {
+            let (a, ki, kf) = axis_and_beams(geo, *axis, values);
+            a.dot(&ki.cross(&kf).normalize())
+        }
+        Equation::VirtualOmega { axis, omega } => {
+            let (a, ki, kf) = axis_and_beams(geo, *axis, values);
+            let q = kf - ki;
+            let e2 = (q - ki * q.dot(&ki)).normalize();
+            let theta = (q.norm() / 2.0).asin();
+            wrap(a.dot(&e2).atan2(a.dot(&ki)) - theta - omega)
+        }
     }));
     if let Some(slits) = mode.slits() {
         let poses = geo.poses(values).unwrap();
@@ -170,6 +181,26 @@ fn surface(geo: &Geometry, normal: &Vector3<f64>, values: &[f64]) -> (Vector3<f6
     let poses = geo.poses(values).unwrap();
     let beam = geo.beam_direction().into_inner();
     (poses.sample.rotation * normal, poses.source * beam)
+}
+
+/// The lab direction of sample axis `axis`, k̂i and k̂f at `values`; the
+/// axis is that of the sample rotation from `values` to `axis` turned by 1
+/// rad, not the solver's walk down the stack.
+fn axis_and_beams(
+    geo: &Geometry,
+    axis: usize,
+    values: &[f64],
+) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
+    let poses = geo.poses(values).unwrap();
+    let mut turned = values.to_vec();
+    turned[axis] += 1.0;
+    let turn = geo.poses(&turned).unwrap().sample.rotation * poses.sample.rotation.inverse();
+    let beam = geo.beam_direction().into_inner();
+    (
+        turn.axis().unwrap().into_inner(),
+        poses.source * beam,
+        poses.detector.rotation * beam,
+    )
 }
 
 /// The azimuth of `v` about the unit `ki` in the frame (e₁, k̂i × e₁), e₁

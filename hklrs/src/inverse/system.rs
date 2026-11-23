@@ -6,6 +6,7 @@ use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
 
 use super::jet::{Scalar, Vec3};
 use super::kappa::{Branch, KappaAxes, restrict};
+use super::mode::rotation;
 use super::validate::ACCEPT;
 use super::{Equation, Eulerian, Mode, Slits, wrap};
 use crate::{Axis, AxisKind, Error, Geometry};
@@ -306,12 +307,49 @@ impl<'a> System<'a> {
                 Equation::IncidenceEqualsEmergence { normal } => {
                     fr.sample(&normal.normalize()).dot(&fr.ki.add(&fr.kf))
                 }
+                // sin of the axis's angle out of the plane
+                Equation::InScatteringPlane { axis } => {
+                    let plane = fr.ki.cross(&fr.kf).normalized(NULL)?;
+                    self.sample_axis(*axis, values)?.dot(&plane)
+                }
+                Equation::VirtualOmega { axis, omega } => {
+                    let q = fr.kf.sub(&fr.ki);
+                    let toward = q.sub(&fr.ki.scaled(&q.dot(&fr.ki))).normalized(NULL)?;
+                    let a = self.sample_axis(*axis, values)?;
+                    let (y, x) = (a.dot(&toward), a.dot(&fr.ki));
+                    if y.v.hypot(x.v) <= NULL {
+                        return None;
+                    }
+                    // |k̂f − k̂i| = 2 sin θ, |k̂f + k̂i| = 2 cos θ.
+                    let theta = Scalar::atan2(&q.norm(), &fr.kf.add(&fr.ki).norm());
+                    let r = Scalar::atan2(&y, &x).sub(&theta);
+                    Scalar {
+                        v: wrap(r.v - omega),
+                        d: r.d,
+                    }
+                }
             });
         }
         Some(Eval {
             f: DVector::from_iterator(rows.len(), rows.iter().map(|r| r.v)),
             j: DMatrix::from_fn(rows.len(), self.written.len(), |r, c| rows[r].d[c]),
         })
+    }
+
+    /// The lab direction of sample axis `axis` at `values`: its own
+    /// direction turned by the axes outside it.
+    fn sample_axis(&self, axis: usize, values: &[f64]) -> Option<Vec3> {
+        let stack = self.geometry.sample_stack();
+        let outer = &stack[..stack.iter().position(|&i| i == axis)?];
+        let (_, direction) = rotation(self.geometry, axis).ok()?;
+        let turn = outer.iter().fold(UnitQuaternion::identity(), |r, &i| {
+            r * self.axis(i).transform(values[i]).rotation
+        });
+        Some(Vec3::rotated(
+            &turn,
+            &lab_axes(self.geometry, self.written, outer, values),
+            &direction,
+        ))
     }
 
     /// wrap(Σ c·values[axis]) over `terms` (axis, c), differentiated over the
@@ -445,6 +483,21 @@ mod tests {
                     vec![Equation::IncidenceEqualsEmergence { normal: reference }]
                 })
                 .unwrap(),
+                Mode::named(
+                    geo,
+                    "bisect omega",
+                    &["mu", "omega", "chi", "phi", "gamma"],
+                    |w| {
+                        vec![
+                            Equation::InScatteringPlane { axis: w[2] },
+                            Equation::VirtualOmega {
+                                axis: w[2],
+                                omega: 0.3,
+                            },
+                        ]
+                    },
+                )
+                .unwrap(),
             ],
             "K4CV" => [
                 Eulerian::Omega(0.2),
@@ -543,7 +596,8 @@ mod tests {
 
     /// Analytic Jacobian against a central difference of the residual, for
     /// every E4C mode, every kind of E6C mode, an emergence one and one per
-    /// You constraint (qaz with naz, incidence = emergence), both
+    /// You constraint (qaz with naz, incidence = emergence, bisect with
+    /// virtual omega), both
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
     /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
     /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa
