@@ -21,10 +21,24 @@ R_I = (0, 1, 0)
 XU_CIRCLES = {
     "E4CV": (("x+", "y+", "x+"), ("x+",)),
     "E6C": (("z+", "x+", "y+", "x+"), ("z+", "x+")),
+    # XU-3: xu 'k+' turns left-handed, so the right-handed circle is 'k-'
+    "K4CV": (("x+", "k-", "x+"), ("x+",)),
 }
 WL = 1.54
 LAT = (4.1, 5.3, 6.7, 82.0, 97.0, 101.0)
 U = _ref.rot((1.0, -2.0, 0.5), 0.9)
+
+
+@pytest.fixture(autouse=True)
+def kappa_axis_in_xu_frame():
+    """xu takes the kappa direction from its config: hklrs's kappa axis
+    (0, -cos 50, -sin 50) mapped to the xu frame is (cos 50, 0, -sin 50),
+    i.e. plane 'xz' tilted by -50 degrees ('k+' base vector)."""
+    old = xu.config.KAPPA_PLANE, xu.config.KAPPA_ANGLE
+    xu.config.KAPPA_PLANE, xu.config.KAPPA_ANGLE = "xz", -50.0
+    np.testing.assert_allclose(M @ xu.math.getVector("k+"), _ref.KAPPA, atol=1e-15)
+    yield
+    xu.config.KAPPA_PLANE, xu.config.KAPPA_ANGLE = old
 
 
 def angles(name, n, seed):
@@ -109,3 +123,18 @@ def test_area_small_detector(name):
 
 def test_area_large_detector_square_and_rectangular_pixels(name):
     assert area_case(name, (40, 30), (172e-6, 100e-6), 0.25, (19.0, 14.5), "large") < 1e-11
+
+
+def test_kappa_plus_is_inverse_rotation():
+    """XU-3: xu 'k+' is the inverse of the right-handed kappa rotation. Fails
+    when xu fixes it; then drop the 'k-' workaround above."""
+    qc = xu.QConversion(("x+", "k+", "x+"), ("x+",), R_I, wl=WL)
+    for ang in angles("K4CV", 20, "k+"):
+        s, d = _ref.stacks_from_angles("K4CV", ang)
+        s[1] = (s[1][0], -s[1][1])
+        _, _, _, q_sample, _ = _ref.forward(s, d, WL)
+        np.testing.assert_allclose(M @ np.array(qc.point(*ang)), q_sample, atol=1e-12)
+        s[1] = (s[1][0], -s[1][1])
+        _, _, _, wrong, _ = _ref.forward(s, d, WL)
+        if abs(ang[1]) > 1e-3 and abs(ang[1]) < 179.9:
+            assert np.abs(M @ np.array(qc.point(*ang)) - wrong).max() > 1e-6
