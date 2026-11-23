@@ -476,12 +476,14 @@ fn pseudo_voigt(x: f64, p: &[f64]) -> f64 {
     let t = (x - p[0]) / p[1].abs();
     let gauss = (-4.0 * std::f64::consts::LN_2 * t * t).exp();
     let lorentz = 1.0 / (1.0 + 4.0 * t * t);
-    let eta = 0.5 * (1.0 + p[4].sin());
+    let eta = p[4];
     p[3] + p[2] * (eta * lorentz + (1.0 - eta) * gauss)
 }
 
 /// A peak along one row of channels: [`find_peak`]'s window on one axis,
-/// then a pseudo-Voigt fit (centre, FWHM, height, background, Lorentz share)
+/// then a pseudo-Voigt fit (centre, FWHM, height, background, Lorentz share;
+/// the share is unbounded, so a pure Gaussian or Lorentzian fits at its
+/// optimum with a non-vanishing derivative)
 /// to counts weighted by their Poisson error, over ±3.5 FWHM of the window
 /// centre. `sigma` is the fit's error of the centre with the other
 /// parameters held, scaled by `max(1, χ²/dof)^½`.
@@ -547,7 +549,7 @@ pub fn find_peak_1d(
     if xs.len() < 7 {
         return failed();
     }
-    let start = [c, fwhm0, wmax, bg, 0.0];
+    let start = [c, fwhm0, wmax, bg, 0.5];
     let scale = [1.0, fwhm0, wmax.abs(), bg.abs().max(1.0), 1.0];
     let model = |p: &[f64]| -> Vec<f64> {
         xs.iter()
@@ -830,6 +832,25 @@ mod tests {
         }
         let rms = (sum2 / count).sqrt();
         assert!((0.7..1.4).contains(&rms), "rms of error/sigma = {rms}");
+    }
+
+    /// A pure Gaussian line puts the optimum of the Lorentz share at its
+    /// bound; the fit must still settle there (it ran to the iteration cap
+    /// when the share was `0.5 (1 + sin p)`, whose derivative vanishes at the
+    /// bound).
+    #[test]
+    fn pure_gaussian_rows_converge_at_every_background() {
+        let mut rng = Rng(0x5EED_0001);
+        let fwhm = 2.0 * (2.0 * std::f64::consts::LN_2).sqrt() * 2.5;
+        for bg in [0.0, 2.0, 5.0, 20.0] {
+            for _ in 0..12 {
+                let c = 100.0 + rng.uniform() * 3.0;
+                let row = row_pv(200, c, fwhm, 0.0, 3000.0, bg, &mut rng);
+                let p = find_peak_1d(&row, None, None, &PeakOptions::default())
+                    .unwrap_or_else(|e| panic!("bg {bg} c {c}: {e}"));
+                assert!((p.pos - c).abs() < 5.0 * p.sigma.max(1e-3), "{p:?} vs {c}");
+            }
+        }
     }
 
     #[test]
