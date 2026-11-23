@@ -21,6 +21,7 @@ mod mode;
 pub mod petra3_p09_eh2;
 pub mod petra3_p23_4c;
 pub mod petra3_p23_6c;
+pub mod pseudo;
 pub mod soleil_nanoscopium_robot;
 pub mod soleil_sirius_turret;
 pub mod soleil_sixs_med;

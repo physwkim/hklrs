@@ -67,3 +67,17 @@ pub fn psi_constant(
         vec![Equation::PsiConstant { reference, psi }]
     })
 }
+
+/// hkl's psi engine: ψ of `reference` (Miller indices) at `psi` rad with Q
+/// at the request's [`super::Target::Hkl`], which is hkl's hkl0. hkl takes
+/// hkl0 from the axes when the engine is initialised and solves against
+/// memory never written before that (HKL-39).
+pub fn psi(
+    geometry: &Geometry,
+    reference: Vector3<f64>,
+    psi: f64,
+) -> Result<Mode<'_>, InverseError> {
+    Mode::named(geometry, "psi", &ALL, |_| {
+        vec![Equation::PsiConstant { reference, psi }]
+    })
+}

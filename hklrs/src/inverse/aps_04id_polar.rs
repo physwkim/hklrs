@@ -123,3 +123,18 @@ pub fn psi_constant_vertical(
         |_| vec![Equation::PsiConstant { reference, psi }],
     )
 }
+
+/// hkl's psi engine, as [`super::e4c::psi`]: unlike [`psi_constant_vertical`]
+/// it writes mu, not tau.
+pub fn psi_vertical(
+    geometry: &Geometry,
+    reference: Vector3<f64>,
+    psi: f64,
+) -> Result<Mode<'_>, InverseError> {
+    Mode::named(
+        geometry,
+        "psi_vertical",
+        &["mu", "chi", "phi", "delta"],
+        |_| vec![Equation::PsiConstant { reference, psi }],
+    )
+}

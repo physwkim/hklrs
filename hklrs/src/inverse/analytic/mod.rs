@@ -322,8 +322,7 @@ mod tests {
     fn arm_agrees_with_numeric() {
         for name in ["K4CV", "K6C", "SOLEIL SIRIUS KAPPA", "SOLEIL CRISTAL K4C"] {
             let geometry = preset(name).unwrap();
-            let arm = ["komega", "kappa", "kphi"];
-            let mode = Mode::named_kappa(&geometry, "eulerians", &arm, |_| vec![]).unwrap();
+            let mode = super::super::pseudo::eulerians(&geometry).unwrap();
             let current: Vec<f64> = (0..geometry.axes().len())
                 .map(|i| 0.3 - 0.17 * i as f64)
                 .collect();
