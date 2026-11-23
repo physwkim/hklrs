@@ -313,6 +313,54 @@ impl SlabFrame {
     }
 }
 
+/// A flat layer on the detector, crossed by the scattered beam.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layer {
+    mu: PerMetre,
+    thickness: f64,
+}
+
+impl Layer {
+    /// `thickness` along the detector normal, metres.
+    pub fn new(mu: PerMetre, thickness: f64) -> Result<Self, Error> {
+        Ok(Self {
+            mu,
+            thickness: positive("layer thickness", thickness)?,
+        })
+    }
+
+    /// Optical depth along a ray at `cos θ` to the normal.
+    fn depth(&self, cos: f64) -> f64 {
+        self.mu.per_metre() * self.thickness / cos
+    }
+}
+
+/// Detector-side terms at one energy; an absent term weighs 1.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DetectorPath {
+    /// Air or He between the sample and the pixel.
+    pub air: Option<PerMetre>,
+    /// Window or filter, transmitted.
+    pub window: Option<Layer>,
+    /// Sensor, absorbed.
+    pub sensor: Option<Layer>,
+}
+
+impl DetectorPath {
+    /// Weight of the pixel at `p` from the sample, on a detector with
+    /// `normal` of either sense, lab frame.
+    pub fn weight(&self, p: &Vector3<f64>, normal: &Unit<Vector3<f64>>) -> Result<f64, Error> {
+        let (kf, distance) = Unit::try_new_and_get(*p, 0.0).ok_or(Error::DetectorAtSample)?;
+        let cos = kf.dot(normal).abs();
+        let air = self
+            .air
+            .map_or(1.0, |mu| (-mu.per_metre() * distance).exp());
+        let window = self.window.map_or(1.0, |w| (-w.depth(cos)).exp());
+        let sensor = self.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1());
+        Ok(air * window * sensor)
+    }
+}
+
 /// φ(x) = expm1(x)/x with φ(0) = 1, so t φ(−at) = ∫₀ᵗ e^(−az) dz holds at
 /// a = 0 instead of being 0/0.
 fn phi(x: f64) -> f64 {
@@ -702,6 +750,83 @@ mod tests {
         let mu = PerMetre::new(1234.5).unwrap();
         for kev in [1.0, 8.048, 100.0] {
             assert_eq!(mu.mu(Energy::new(kev).unwrap()), mu);
+        }
+    }
+
+    fn layer(m: f64, t: f64) -> Layer {
+        Layer::new(mu(m), t).unwrap()
+    }
+
+    #[test]
+    fn detector_terms_at_normal_incidence() {
+        let (p, n) = (Vector3::new(0.0, 0.0, 0.5), Vector3::z_axis());
+        let alone = |path: DetectorPath| path.weight(&p, &n).unwrap();
+        assert_eq!(alone(DetectorPath::default()), 1.0);
+        let air = alone(DetectorPath {
+            air: Some(mu(1.2)),
+            ..Default::default()
+        });
+        assert!(close(air, (-0.6f64).exp(), 2.0 * f64::EPSILON), "{air}");
+        let window = alone(DetectorPath {
+            window: Some(layer(1e4, 25e-6)),
+            ..Default::default()
+        });
+        assert!(
+            close(window, (-0.25f64).exp(), 2.0 * f64::EPSILON),
+            "{window}"
+        );
+        let sensor = alone(DetectorPath {
+            sensor: Some(layer(3e3, 450e-6)),
+            ..Default::default()
+        });
+        assert!(
+            close(sensor, 1.0 - (-1.35f64).exp(), 4.0 * f64::EPSILON),
+            "{sensor}"
+        );
+        let all = DetectorPath {
+            air: Some(mu(1.2)),
+            window: Some(layer(1e4, 25e-6)),
+            sensor: Some(layer(3e3, 450e-6)),
+        };
+        let w = all.weight(&p, &n).unwrap();
+        assert!(close(w, air * window * sensor, 2.0 * f64::EPSILON), "{w}");
+    }
+
+    /// At 60° to the normal, of either sense, the layers are crossed over
+    /// twice their thickness; the air path is |p| at any angle.
+    #[test]
+    fn detector_layers_at_60_degrees_double_the_path() {
+        let p = Vector3::new(3f64.sqrt(), 0.0, 1.0) * 0.25;
+        let path = DetectorPath {
+            air: Some(mu(1.2)),
+            window: Some(layer(1e4, 25e-6)),
+            sensor: Some(layer(3e3, 450e-6)),
+        };
+        let want = (-0.6f64).exp() * (-0.5f64).exp() * -(-2.7f64).exp_m1();
+        for n in [Vector3::z_axis(), -Vector3::z_axis()] {
+            let w = path.weight(&p, &n).unwrap();
+            assert!(close(w, want, 1e-15), "{n:?}: {w}");
+        }
+    }
+
+    /// 1 − e^(−x) is 0 below x ≈ 1e-16; −expm1(−x) keeps x.
+    #[test]
+    fn thin_sensor_absorbs_its_optical_depth() {
+        let path = DetectorPath {
+            sensor: Some(layer(1e-14, 1e-6)),
+            ..Default::default()
+        };
+        let w = path.weight(&Vector3::z(), &Vector3::z_axis()).unwrap();
+        assert!(close(w, 1e-20, 4.0 * f64::EPSILON), "{w}");
+    }
+
+    #[test]
+    fn detector_path_rejects_bad_input() {
+        let path = DetectorPath::default();
+        let got = path.weight(&Vector3::zeros(), &Vector3::z_axis());
+        assert!(matches!(got, Err(Error::DetectorAtSample)), "{got:?}");
+        for t in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
+            assert!(Layer::new(mu(1.0), t).is_err(), "{t}");
         }
     }
 }
