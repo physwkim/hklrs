@@ -209,6 +209,22 @@ impl<'g> Mode<'g> {
         Self::new(geometry, name, &w, extra(&w))
     }
 
+    /// [`Mode::new_kappa`] on the arm komega, kappa, kphi, with the written
+    /// axes by name; `extra` gets their indices.
+    pub(super) fn named_kappa(
+        geometry: &'g Geometry,
+        name: &str,
+        written: &[&str],
+        extra: impl FnOnce(&[usize]) -> Vec<Equation>,
+    ) -> Result<Self, InverseError> {
+        let [komega, kappa, kphi] = ["komega", "kappa", "kphi"].map(|n| geometry.axis_index(n));
+        let w = written
+            .iter()
+            .map(|n| geometry.axis_index(n))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new_kappa(geometry, name, [komega?, kappa?, kphi?], &w, extra(&w))
+    }
+
     pub fn geometry(&self) -> &'g Geometry {
         self.geometry
     }

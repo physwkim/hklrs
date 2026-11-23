@@ -1,5 +1,5 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
-//! ESRF BM28 PSIC, ZAXIS and ESRF ID01 PSIC.
+//! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC and K4CV.
 //!
 //! Per case: the mode writes hkl's axes; every hkl solution within VIOLATION
 //! of hkl's own mode equations is in the hklrs set within MATCH rad, directly
@@ -16,7 +16,7 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, zaxis};
+use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, k4c, zaxis};
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength};
@@ -44,9 +44,17 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         let i = names.iter().position(|p| p == n).unwrap();
         common::f(&case["parameters"][i])
     };
+    let rad = |n: &str| param(n).to_radians();
     let hkl2 = || Vector3::new(param("h2"), param("k2"), param("l2"));
     let psi = || param("psi").to_radians();
+    let kappa = case["geometry"] == "K4CV";
     match case["mode"].as_str().unwrap() {
+        "bissector" if kappa => k4c::bissector(geo),
+        "constant_omega" if kappa => k4c::constant_omega(geo, rad("omega")),
+        "constant_chi" if kappa => k4c::constant_chi(geo, rad("chi")),
+        "constant_phi" if kappa => k4c::constant_phi(geo, rad("phi")),
+        "double_diffraction" if kappa => k4c::double_diffraction(geo, hkl2()),
+        "psi_constant" if kappa => k4c::psi_constant(geo, hkl2(), psi()),
         "bissector" => e4c::bissector(geo),
         "constant_omega" => e4c::constant_omega(geo),
         "constant_chi" => e4c::constant_chi(geo),
@@ -346,4 +354,9 @@ golden! {
     id01_constant_nu_coplanar: "ESRF ID01 PSIC" "constant_nu_coplanar",
     id01_constant_delta_coplanar: "ESRF ID01 PSIC" "constant_delta_coplanar",
     id01_constant_eta_noncoplanar: "ESRF ID01 PSIC" "constant_eta_noncoplanar",
+    k4cv_bissector: "K4CV" "bissector",
+    k4cv_constant_omega: "K4CV" "constant_omega",
+    k4cv_constant_phi: "K4CV" "constant_phi",
+    k4cv_double_diffraction: "K4CV" "double_diffraction",
+    k4cv_psi_constant: "K4CV" "psi_constant",
 }
