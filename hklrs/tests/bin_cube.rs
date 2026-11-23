@@ -197,3 +197,71 @@ fn merge_of_half_scans_matches_cube_new_merge() {
     s.check(&b, "second_half");
     s.check(&a.merge(b).unwrap(), "merged");
 }
+
+/// binoculars' HDF5 I/O on the merged cube (golden/bin_7be4f79_hdf5.c):
+/// binoculars wrote bin_7be4f79_cube.h5 with hkl_binoculars_cube_save_hdf5,
+/// hklrs wrote hklrs_7be4f79_cube.h5, and bin_7be4f79_hdf5.json is
+/// hkl_binoculars_cube_new_from_file's verdict on both. `HKLRS_BLESS=1`
+/// rewrites hklrs' file (bin_7be4f79_hdf5.sh).
+#[cfg(feature = "hdf5")]
+mod hdf5 {
+    use super::{common::load, scan};
+    use hklrs::grid::{Cube, hdf5};
+    use rust_hdf5::H5File;
+
+    fn golden(file: &str) -> String {
+        format!("{}/../golden/{file}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn merged() -> Cube {
+        let s = scan();
+        let (first, second) = s.frames.split_at(s.frames.len() / 2);
+        s.grown(first).merge(s.grown(second)).unwrap()
+    }
+
+    #[test]
+    fn binoculars_file_reads_as_the_merged_cube() {
+        let (cube, config) = hdf5::read(golden("bin_7be4f79_cube.h5")).unwrap();
+        // binoculars' f32 counts widen exactly; its axes carry no anchor
+        // and read as −step/2, the binnings of scan()
+        assert_eq!(cube, merged());
+        let verdict = load("bin_7be4f79_hdf5.json");
+        assert_eq!(config, verdict["config"].as_str().unwrap());
+    }
+
+    #[test]
+    fn hklrs_writes_the_merged_cube() {
+        let theirs = golden("bin_7be4f79_cube.h5");
+        let (_, config) = hdf5::read(&theirs).unwrap();
+        let ours = golden("hklrs_7be4f79_cube.h5");
+        if std::env::var_os("HKLRS_BLESS").is_some() {
+            hdf5::write(&ours, &merged(), &config).unwrap();
+            return;
+        }
+        // the committed file is what binoculars loaded: this writer must
+        // still produce it byte for byte
+        let fresh = format!("{}/hklrs_7be4f79_cube.h5", env!("CARGO_TARGET_TMPDIR"));
+        hdf5::write(&fresh, &merged(), &config).unwrap();
+        assert!(std::fs::read(&fresh).unwrap() == std::fs::read(&ours).unwrap());
+
+        let verdict = &load("bin_7be4f79_hdf5.json")["loads"]["hklrs_7be4f79_cube.h5"];
+        for key in ["loaded", "axes", "offset0", "photons", "contributions"] {
+            assert_eq!(verdict[key], true, "{key}");
+        }
+        assert_eq!(verdict["cube_cmp"], 0);
+
+        // binoculars' tools read the axis rows: index, min, max, resolution,
+        // imin, imax, the same doubles binoculars writes
+        let (a, b) = (H5File::open(&ours).unwrap(), H5File::open(&theirs).unwrap());
+        for name in ["qx", "qy", "qz"] {
+            let row = |f: &H5File| {
+                f.dataset(&format!("binoculars/axes/{name}"))
+                    .unwrap()
+                    .read_raw::<f64>()
+                    .unwrap()
+            };
+            assert_eq!(row(&a), row(&b), "{name}");
+        }
+        assert_eq!(hdf5::read(&ours).unwrap(), (merged(), config));
+    }
+}

@@ -1,0 +1,5 @@
+{"binoculars_version": "7be4f79", "config": "[input]\ntype = bin_7be4f79_scan.h\n[projection]\ntype = qcustom qx_qy_qz\nresolution = 0.0214, 0.0177, 0.0199\n",
+ "merged_offset0": {"cube_new_merge": 1903, "from_axes": 3663},
+ "loads": {
+  "bin_7be4f79_cube.h5": {"loaded": true, "axes": true, "offset0": true, "photons": true, "contributions": true, "cube_cmp": 0},
+  "hklrs_7be4f79_cube.h5": {"loaded": true, "axes": true, "offset0": true, "photons": true, "contributions": true, "cube_cmp": 0}}}
