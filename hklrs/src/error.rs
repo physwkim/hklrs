@@ -73,4 +73,8 @@ pub enum Error {
     NoPixelArea { shape: (usize, usize) },
     #[error("polarisation factor must be in [-1, 1], got {value}")]
     PolarisationFactor { value: f64 },
+    #[error("detector id {id} is not in the table of {count}")]
+    UnknownDetector { id: u32, count: usize },
+    #[error("detector {name} has no regular pixel grid, so it is not a PixelDetector")]
+    DetectorNotRegular { name: &'static str },
 }
