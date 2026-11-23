@@ -7,8 +7,9 @@ its "solutions" parameter:
 - forward: axes set, engine list get, the engine's (omega, chi, phi);
 - inverse: (omega, chi, phi) set from a start geometry; every solution hkl
   returns (its kappa twin and axis-range images included, sorted by hkl), or
-  the error text. Out-of-reach chi (|chi| > 2*alpha, HKL-9) and chi given
-  outside (-180, 180] are included.
+  the error text. Out-of-reach chi (|chi| > 2*alpha, HKL-9), chi given
+  outside (-180, 180] (HKL-19) and chi within 1e-11 deg of 2*alpha, where
+  kappa is ill-conditioned in chi, are included.
 Angles are degrees, as hkl's user unit for these axes.
 """
 import json
@@ -31,6 +32,9 @@ KAPPA_SPECIAL = [0.0, 180.0, -180.0, 90.0, -90.0, 1e-9, 200.0, -250.0, 359.0]
 # chi at the reach 2*alpha = 100 deg, past it (HKL-9), and outside (-180, 180]
 CHI_SPECIAL = [0.0, 100.0, -100.0, 99.999999, 100.0001, -100.0001, 150.0, -180.0,
                350.0, -300.0, 450.0]
+# chi within 1e-11 deg of 2*alpha: asin near 1, kappa ill-conditioned in chi
+CHI_NEAR_REACH = [99.99999999999999, -99.99999999999997, 99.9999999999999,
+                  -99.9999999999997, 99.999999999999, -99.99999999999]
 
 
 class Ctx:
@@ -102,7 +106,7 @@ def main():
             axes[ctx.names.index("kappa")] = kappa
             for s in SOLUTIONS:
                 cases.append(forward_case(ctx, axes, s))
-        chis = [rng.uniform(-100, 100) for _ in range(N_RANDOM)] + CHI_SPECIAL
+        chis = [rng.uniform(-100, 100) for _ in range(N_RANDOM)] + CHI_SPECIAL + CHI_NEAR_REACH
         for chi in chis:
             eul = [rng.uniform(-180, 180), chi, rng.uniform(-180, 180)]
             st = start()
