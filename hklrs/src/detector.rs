@@ -305,6 +305,26 @@ impl Module {
     /// A module with one point axis is a line, met where the ray projected
     /// onto the plane through `origin` and the line crosses it.
     fn meet(&self, origin: &Point3<f64>, dir: &Vector3<f64>) -> Result<(f64, [f64; 2]), Miss> {
+        let (distance, along) = self.cross(origin, dir)?;
+        let index = |axis: &PixelAxis, x: f64, at: usize| {
+            let i = axis.index_at(x);
+            (-0.5..=axis.pixel_count() as f64 - 0.5)
+                .contains(&i)
+                .then_some(i + at as f64)
+        };
+        match (
+            index(&self.slow, along[0], self.at.0),
+            index(&self.fast, along[1], self.at.1),
+        ) {
+            (Some(i), Some(j)) => Ok((distance, [i, j])),
+            _ => Err(Miss::Outside),
+        }
+    }
+
+    /// Where the ray meets the module's plane (its line's plane for a line
+    /// module), with no regard for the module's extent: the distance and
+    /// the coordinates along the two pixel axes.
+    fn cross(&self, origin: &Point3<f64>, dir: &Vector3<f64>) -> Result<(f64, [f64; 2]), Miss> {
         let c = self.corner - origin;
         let (distance, along) = match (self.slow.dir(), self.fast.dir()) {
             (None, None) => return Err(Miss::Point),
@@ -347,19 +367,7 @@ impl Module {
                 ((c + d.into_inner() * u).norm(), at)
             }
         };
-        let index = |axis: &PixelAxis, x: f64, at: usize| {
-            let i = axis.index_at(x);
-            (-0.5..=axis.pixel_count() as f64 - 0.5)
-                .contains(&i)
-                .then_some(i + at as f64)
-        };
-        match (
-            index(&self.slow, along[0], self.at.0),
-            index(&self.fast, along[1], self.at.1),
-        ) {
-            (Some(i), Some(j)) => Ok((distance, [i, j])),
-            _ => Err(Miss::Outside),
-        }
+        Ok((distance, along))
     }
 }
 
@@ -577,6 +585,42 @@ impl PixelDetector {
             }
         }
         nearest.map(|(_, at)| at).ok_or(miss.error())
+    }
+
+    /// The module that holds pixel (slow, fast).
+    pub fn module(&self, slow: usize, fast: usize) -> Result<&Module, Error> {
+        self.index(slow, fast)?;
+        Ok(self
+            .modules
+            .iter()
+            .find(|m| m.covers(slow, fast))
+            .expect("the modules tile the image"))
+    }
+
+    /// The fractional image index (slow, fast) where the ray from `origin`
+    /// along `direction` meets the plane of `module`, a module of this
+    /// detector, however far from its pixels: the index mapping continues
+    /// linearly past the end pixels. Only a ray parallel to the plane or
+    /// meeting it behind `origin` has no index. Across a line module, as in
+    /// [`locate`](Self::locate), only the in-plane angle counts.
+    pub fn locate_on(
+        &self,
+        module: &Module,
+        origin: Point3<f64>,
+        direction: Vector3<f64>,
+    ) -> Result<[f64; 2], Error> {
+        debug_assert!(self.modules.iter().any(|m| std::ptr::eq(m, module)));
+        finite(&origin.coords, "ray origin")?;
+        if !direction.iter().all(|x| x.is_finite()) || direction == Vector3::zeros() {
+            return Err(Error::ZeroVector {
+                what: "ray direction".to_owned(),
+            });
+        }
+        let (_, along) = module.cross(&origin, &direction).map_err(Miss::error)?;
+        Ok([
+            module.slow.index_at(along[0]) + module.at.0 as f64,
+            module.fast.index_at(along[1]) + module.at.1 as f64,
+        ])
     }
 
     pub fn is_masked(&self, slow: usize, fast: usize) -> Result<bool, Error> {
@@ -1168,6 +1212,30 @@ mod tests {
             assert!((got[1] - (2.0 + want)).abs() <= 1e-12, "{fast}: {got:?}");
         }
         assert_eq!(det.locate(o, at(5.6e-3) - o), Err(Error::RayOutside));
+    }
+
+    #[test]
+    fn locate_on_continues_past_the_chip_and_keeps_the_other_misses() {
+        let det = tiled();
+        let b = &det.modules()[1];
+        let f = b.fast().dir().unwrap().into_inner();
+        let at = |fast: f64| b.corner() + Vector3::z() * 2.75e-3 + f * fast;
+        let o = Point3::origin();
+        // inside: the same index as locate
+        let k = at(2.95e-3) - o;
+        assert_eq!(det.locate_on(b, o, k), det.locate(o, k));
+        // past the end pixel, where locate misses: the linear continuation
+        let k = at(5.3e-3) - o;
+        let got = det.locate_on(b, o, k).unwrap();
+        assert!((got[1] - 5.3).abs() <= 1e-12, "{got:?}");
+        let far = at(1.0) - o;
+        assert_eq!(det.locate(o, far), Err(Error::RayOutside));
+        assert!(det.locate_on(b, o, far).unwrap()[1] > 100.0);
+        assert_eq!(det.module(0, 3).unwrap().at(), b.at());
+        let p = b.corner() - o;
+        assert_eq!(det.locate_on(b, o, -p), Err(Error::RayBehind));
+        assert_eq!(det.locate_on(b, o, f), Err(Error::RayParallel));
+        assert!(det.module(99, 0).is_err());
     }
 
     #[test]
