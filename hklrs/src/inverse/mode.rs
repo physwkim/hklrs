@@ -1,6 +1,6 @@
 use std::f64::consts::FRAC_PI_2;
 
-use nalgebra::Vector3;
+use nalgebra::{Unit, Vector3};
 
 use super::kappa::{KappaAxes, restrict};
 use super::{InverseError, finite};
@@ -57,6 +57,33 @@ pub enum Eulerian {
     Bisector { detector: usize },
 }
 
+/// Slits on the innermost detector axis `axis`, which turns about the beam
+/// and so moves no other equation: once the mode's equations are solved,
+/// it turns the slits normal into the sample surface,
+/// (R_sample·surface)·(R_detector·normal) = 0.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Slits {
+    axis: usize,
+    surface: Unit<Vector3<f64>>,
+    normal: Unit<Vector3<f64>>,
+}
+
+impl Slits {
+    pub fn axis(&self) -> usize {
+        self.axis
+    }
+
+    /// Surface normal, sample-holder frame (not through UB).
+    pub fn surface(&self) -> Unit<Vector3<f64>> {
+        self.surface
+    }
+
+    /// Slits normal, detector frame.
+    pub fn normal(&self) -> Unit<Vector3<f64>> {
+        self.normal
+    }
+}
+
 /// Which axes the inverse writes and the equations that fix them, checked
 /// against the geometry it borrows, so it cannot outlive or be applied to
 /// another one.
@@ -67,6 +94,7 @@ pub struct Mode<'g> {
     written: Vec<usize>,
     extra: Vec<Equation>,
     kappa: Option<KappaAxes>,
+    slits: Option<Slits>,
 }
 
 /// The axis at `index` and its direction; rotations only.
@@ -233,6 +261,43 @@ impl<'g> Mode<'g> {
             written: written.to_vec(),
             extra,
             kappa,
+            slits: None,
+        })
+    }
+
+    /// The mode with [`Slits`] on `axis`, a detector axis it does not
+    /// write; each solution then comes once per slits root, or with the
+    /// slits at `current` where the surface lies along `axis` and every
+    /// value is a root.
+    pub fn with_slits(
+        self,
+        axis: usize,
+        surface: Vector3<f64>,
+        normal: Vector3<f64>,
+    ) -> Result<Self, InverseError> {
+        let detector = self.geometry.detector_stack();
+        in_stack(self.geometry, axis, detector, "detector")?;
+        let (turning, u) = rotation(self.geometry, axis)?;
+        let about_beam = u.cross(&self.geometry.beam_direction()) == Vector3::zeros();
+        if detector.last() != Some(&axis) || !about_beam {
+            return Err(InverseError::SlitsMoveDetector {
+                name: turning.name().to_owned(),
+            });
+        }
+        if self.written.contains(&axis) {
+            return Err(InverseError::WrittenTwice {
+                name: turning.name().to_owned(),
+            });
+        }
+        reference(&surface, "slits surface")?;
+        reference(&normal, "slits normal")?;
+        Ok(Self {
+            slits: Some(Slits {
+                axis,
+                surface: Unit::new_normalize(surface),
+                normal: Unit::new_normalize(normal),
+            }),
+            ..self
         })
     }
 
@@ -286,5 +351,9 @@ impl<'g> Mode<'g> {
 
     pub fn kappa(&self) -> Option<&KappaAxes> {
         self.kappa.as_ref()
+    }
+
+    pub fn slits(&self) -> Option<&Slits> {
+        self.slits.as_ref()
     }
 }

@@ -7,7 +7,7 @@ mod inverse_check;
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, zaxis};
+use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, soleil_sixs_med, zaxis};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use hklrs::presets::{KAPPA_ALPHA_DEG, kappa_axis, preset};
 use hklrs::{
@@ -614,6 +614,188 @@ fn zero_q_is_degenerate_in_every_mode() {
     ] {
         degenerate(&mode.unwrap(), &current);
     }
+    let geo = preset("SOLEIL SIXS MED2+2").unwrap();
+    let current = geo
+        .values_from_degrees(&[5.0, 10.0, 20.0, 30.0, 15.0])
+        .unwrap();
+    for mode in [
+        soleil_sixs_med::mu_fixed(&geo),
+        soleil_sixs_med::reflectivity(&geo),
+        soleil_sixs_med::emergence_fixed(&geo, Vector3::y(), 0.2),
+    ] {
+        degenerate(&mode.unwrap(), &current);
+    }
+    let geo = preset("SOLEIL SIXS MED1+2").unwrap();
+    let current = geo.values_from_degrees(&[5.0, 10.0, 20.0, 30.0]).unwrap();
+    for mode in [
+        soleil_sixs_med::pitch_fixed(&geo),
+        soleil_sixs_med::delta_fixed(&geo),
+    ] {
+        degenerate(&mode.unwrap(), &current);
+    }
+    for (name, degrees) in med_2_3() {
+        let geo = preset(name).unwrap();
+        let current = geo.values_from_degrees(degrees).unwrap();
+        for mode in med_2_3_modes(&geo) {
+            degenerate(&mode, &current);
+            degenerate(&soleil_sixs_med::slits(mode).unwrap(), &current);
+        }
+    }
+}
+
+/// MED2+3 and its v2 with a current position.
+fn med_2_3() -> [(&'static str, &'static [f64]); 2] {
+    [
+        ("SOLEIL SIXS MED2+3", &[7.0, 10.0, 20.0, 30.0, 15.0, 40.0]),
+        ("SOLEIL SIXS MED2+3 v2", &[10.0, 20.0, 30.0, 15.0, 40.0]),
+    ]
+}
+
+fn med_2_3_modes(geo: &Geometry) -> Vec<Mode<'_>> {
+    vec![
+        soleil_sixs_med::mu_fixed(geo).unwrap(),
+        soleil_sixs_med::gamma_fixed(geo).unwrap(),
+        soleil_sixs_med::emergence_fixed(geo, Vector3::y(), 0.2).unwrap(),
+    ]
+}
+
+/// The slit fit doubles every solution of the mode without it: the same
+/// other axes, eta_a at two roots π apart, each turning the slits into the
+/// surface.
+#[test]
+fn slits_double_every_solution() {
+    for (name, degrees) in med_2_3() {
+        let geo = preset(name).unwrap();
+        let current = geo.values_from_degrees(degrees).unwrap();
+        let eta_a = geo.axis_index("eta_a").unwrap();
+        let mut solved = 0;
+        for base in med_2_3_modes(&geo) {
+            let slits = soleil_sixs_med::slits(base.clone()).unwrap();
+            for t in TARGETS {
+                let hkl = Vector3::from(t);
+                let (held, fitted) = match (
+                    request(&base, hkl, &current).solve(),
+                    request(&slits, hkl, &current).solve(),
+                ) {
+                    (Ok(held), Ok(fitted)) => (held, fitted),
+                    (Err(InverseError::NoSolution), Err(InverseError::NoSolution)) => continue,
+                    other => panic!("{name} {} {hkl}: {other:?}", base.name()),
+                };
+                assert_eq!(fitted.len(), 2 * held.len(), "{name} {}", base.name());
+                for s in &fitted {
+                    assert_solution(&slits, &hkl, &current, s);
+                    let other_axes = |b: &Vec<f64>| {
+                        (0..s.len())
+                            .filter(|&i| i != eta_a)
+                            .all(|i| (b[i] - s[i]).abs() <= 1e-9)
+                    };
+                    assert_eq!(held.iter().filter(|b| other_axes(b)).count(), 1);
+                    let twins = fitted.iter().filter(|f| {
+                        other_axes(f) && (wrap(f[eta_a] - s[eta_a]).abs() - PI).abs() <= 1e-9
+                    });
+                    assert_eq!(twins.count(), 1, "{name} {} {s:?}", base.name());
+                }
+                solved += fitted.len();
+            }
+        }
+        assert!(solved > 0, "{name}");
+    }
+}
+
+/// With the surface normal along k̂f, so along eta_a, every eta_a turns the
+/// slits into the surface: the solution there keeps eta_a at `current`
+/// rather than making the whole solve degenerate, and the other solutions
+/// still come in root pairs.
+#[test]
+fn slits_along_the_surface_hold_at_current() {
+    let geo = preset("SOLEIL SIXS MED2+3").unwrap();
+    let mode = soleil_sixs_med::slits(soleil_sixs_med::gamma_fixed(&geo).unwrap()).unwrap();
+    let eta_a = geo.axis_index("eta_a").unwrap();
+    // mu - gamma = 90°, delta = 0: R_s·(0, -1, 0) is k̂f.
+    let current = geo
+        .values_from_degrees(&[7.0, 30.0, 20.0, -60.0, 0.0, 40.0])
+        .unwrap();
+    let miss = |values: &[f64]| {
+        inverse_check::residuals(&mode, &ub(), wavelength(), &Vector3::zeros(), values).unwrap()
+    };
+    let hkl = Vector3::from_iterator(miss(&current)[..3].iter().copied());
+    for eta in [-2.0, 0.5, 3.0] {
+        let mut v = current.clone();
+        v[eta_a] = eta;
+        assert!(miss(&v)[3].abs() <= 1e-15);
+    }
+    let solutions = request(&mode, hkl, &current).solve().unwrap();
+    let at_current = |s: &Vec<f64>| (0..s.len()).all(|i| (s[i] - current[i]).abs() <= 1e-9);
+    let (here, others): (Vec<_>, Vec<_>) = solutions.iter().partition(|s| at_current(s));
+    assert_eq!(here.len(), 1, "{solutions:?}");
+    assert_eq!(here[0][eta_a], current[eta_a]);
+    assert!(!others.is_empty());
+    for s in &solutions {
+        assert_solution(&mode, &hkl, &current, s);
+    }
+    for s in &others {
+        let twins = others.iter().filter(|f| {
+            (0..s.len()).all(|i| i == eta_a || (f[i] - s[i]).abs() <= 1e-9)
+                && (wrap(f[eta_a] - s[eta_a]).abs() - PI).abs() <= 1e-9
+        });
+        assert_eq!(twins.count(), 1, "{s:?}");
+    }
+}
+
+#[test]
+fn slits_construction_errors() {
+    let geo = preset("SOLEIL SIXS MED2+3").unwrap();
+    let index = |n| geo.axis_index(n).unwrap();
+    let mode = soleil_sixs_med::mu_fixed(&geo).unwrap();
+    let with = |axis, surface, normal| mode.clone().with_slits(axis, surface, normal);
+    let (y, z) = (Vector3::y(), Vector3::z());
+    assert_eq!(
+        with(index("mu"), y, z),
+        Err(InverseError::NotInStack {
+            name: "mu".into(),
+            holder: "detector"
+        })
+    );
+    assert_eq!(
+        with(index("gamma"), y, z),
+        Err(InverseError::SlitsMoveDetector {
+            name: "gamma".into()
+        })
+    );
+    assert_eq!(
+        with(index("eta_a"), Vector3::zeros(), z),
+        Err(InverseError::ZeroReference {
+            what: "slits surface"
+        })
+    );
+    assert_eq!(
+        with(index("eta_a"), y, Vector3::new(0.0, 0.0, f64::NAN)),
+        Err(InverseError::NonFinite {
+            what: "slits normal"
+        })
+    );
+    let written = Mode::new(
+        &geo,
+        "m",
+        &[index("omega"), index("delta"), index("eta_a")],
+        vec![],
+    );
+    assert_eq!(
+        written.unwrap().with_slits(index("eta_a"), y, z),
+        Err(InverseError::WrittenTwice {
+            name: "eta_a".into()
+        })
+    );
+    // MED2+2's innermost detector axis, delta, turns about -y, not the beam.
+    let geo = preset("SOLEIL SIXS MED2+2").unwrap();
+    let mode = soleil_sixs_med::mu_fixed(&geo).unwrap();
+    let delta = geo.axis_index("delta").unwrap();
+    assert_eq!(
+        mode.with_slits(delta, y, z),
+        Err(InverseError::SlitsMoveDetector {
+            name: "delta".into()
+        })
+    );
 }
 
 /// ESRF BM28 PSIC constant_nu_coplanar from all-zero axes, hkl's fresh

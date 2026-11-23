@@ -4,8 +4,8 @@
 //! Every mode implies the three hkl equations R_sample·q = k̂f − k̂i, with q in
 //! units of k = 2π/λ and k̂f the detector rotation applied to the beam
 //! direction (a detector at infinity, as in hkl); the mode's extra
-//! [`Equation`]s close the system over its written axes. Non-written axes
-//! stay at `current`.
+//! [`Equation`]s close the system over its written axes, and its [`Slits`],
+//! if any, are turned into the surface after. Other axes stay at `current`.
 
 pub mod e4c;
 pub mod e6c;
@@ -16,6 +16,7 @@ pub mod k4c;
 pub mod k6c;
 pub mod kappa;
 mod mode;
+pub mod soleil_sixs_med;
 mod solve;
 mod system;
 mod validate;
@@ -27,7 +28,7 @@ use nalgebra::{Matrix3, Vector3};
 
 use crate::{Error, Geometry, Wavelength};
 
-pub use mode::{Equation, Eulerian, Mode};
+pub use mode::{Equation, Eulerian, Mode, Slits};
 
 /// Relative excess of |Q| over 2k still solved, pulled onto 2k: UB·h alone
 /// rounds by ~1e-15, so a strict test would turn exact backscatter targets
@@ -82,6 +83,10 @@ pub enum InverseError {
     NotInStack { name: String, holder: &'static str },
     #[error("{written} written axes need {written} equations, the mode has {equations}")]
     EquationCount { written: usize, equations: usize },
+    #[error(
+        "turning the slits on axis {name:?} would move k̂f: it must be the innermost detector axis and turn about the beam"
+    )]
+    SlitsMoveDetector { name: String },
     #[error("emergence {emergence} rad is outside [-π/2, π/2]")]
     EmergenceRange { emergence: f64 },
     #[error("psi is undefined: Q, k̂f × k̂i or the reference projected normal to Q is null")]
