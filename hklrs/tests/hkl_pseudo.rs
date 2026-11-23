@@ -9,7 +9,7 @@
 use hklrs::Axis;
 use hklrs::nalgebra::Vector3;
 use hklrs::presets::preset;
-use hklrs::pseudo::{q_at, q2_at, qper_qpar_at, tth2_at};
+use hklrs::pseudo::{emergence_at, incidence_at, q_at, q2_at, qper_qpar_at, tth2_at};
 use hklrs::{PixelDetector, Wavelength};
 use serde_json::Value;
 
@@ -111,6 +111,43 @@ fn pseudos_match_hkl() {
                     assert!(d.abs() < 1e-7, "{ctx}: alpha differs by {d} deg");
                 }
             }
+            "incidence" | "emergence" => {
+                let n = &case["parameters"];
+                let n = Vector3::new(f(&n[0]), f(&n[1]), f(&n[2]));
+                let (value, az) = if engine == "incidence" {
+                    incidence_at(&geo, &values, wl, &point, &n)
+                } else {
+                    emergence_at(&geo, &values, wl, &point, &n)
+                }
+                .unwrap();
+                assert!(
+                    (value.0.to_degrees() - hkl(0)).abs() < 1e-7,
+                    "{ctx}: value {} vs {}",
+                    value.0.to_degrees(),
+                    hkl(0)
+                );
+                // hkl's "azimuth" is one object shared by both engines, so its
+                // incidence azimuth is the emergence engine's (unassigned
+                // defect, see the task report); the independent value is the
+                // reference there. Emergence is computed last and is hkl's.
+                let want = if engine == "incidence" {
+                    &case["numpy"]["azimuth_incidence"]
+                } else {
+                    &case["numpy"]["azimuth_emergence"]
+                };
+                match (az, want.as_f64()) {
+                    (Some(a), Some(w)) => {
+                        let d = wrap_deg(a.0.to_degrees() - w);
+                        assert!(d.abs() < 1e-7, "{ctx}: azimuth differs by {d} deg");
+                        if engine == "emergence" {
+                            assert!((a.0.to_degrees() - hkl(1)).abs() < 1e-7, "{ctx}");
+                        }
+                    }
+                    // n along the beam normal: hkl returns 0
+                    (None, None) => {}
+                    other => panic!("{ctx}: azimuth {other:?}"),
+                }
+            }
             "qper_qpar" => {
                 let n = &case["parameters"];
                 let n = Vector3::new(f(&n[0]), f(&n[1]), f(&n[2]));
@@ -131,7 +168,7 @@ fn pseudos_match_hkl() {
             .entry((name.to_owned(), engine.to_owned()))
             .or_default() += 1;
     }
-    assert_eq!(seen.len(), 4 + 11 * 3, "{seen:?}");
+    assert_eq!(seen.len(), 4 + 11 * 3 + 16 * 2, "{seen:?}");
     // per q preset: the zero position and 2θ = 1e-6° (the HKL-11 case)
     assert_eq!(hkl11, 8);
 }
