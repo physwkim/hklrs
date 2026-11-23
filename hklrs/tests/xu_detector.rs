@@ -202,11 +202,11 @@ fn linear_combined() {
     check_linear("combined");
 }
 
-/// xu's own Nav output sits on the first raw pixel of a block aligned to
-/// pixel 0, which is why the golden takes Nav cases from the block-grid
-/// reference detector instead.
+/// XU-13: xu's own Nav output sits on the first raw pixel of a block
+/// aligned to pixel 0, which is why the golden takes Nav cases from the
+/// block-grid reference detector instead.
 #[test]
-fn xu_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block() {
+fn xu13_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block() {
     let doc = doc();
     for (kind, linear) in [("area", false), ("linear", true)] {
         for c in array(&doc[kind])
