@@ -10,8 +10,6 @@
 //! solution outside them still seeds it. They bind every axis, a held one at
 //! its unwrapped value: a held motor is never asked to turn a full circle.
 
-use std::cmp::Ordering;
-
 use super::system::System;
 use super::{InverseError, wrap};
 
@@ -113,24 +111,49 @@ impl<'a> SolutionSet<'a> {
     }
 }
 
-/// `set` sorted by distance to `current`, and where its first went.
+/// `set` (in the order offered) sorted by distance to `current`, and where
+/// its first went. Distances within SAME are one: an exact tie comes out
+/// of a solver apart by noise, and the values, near a cut, are no better,
+/// so the order offered keeps it.
 fn sorted(current: &[f64], set: Vec<Vec<f64>>) -> (Vec<Vec<f64>>, Option<usize>) {
     let distance = |s: &[f64]| -> f64 {
         s.iter()
             .zip(current)
             .map(|(a, b)| wrap(a - b).powi(2))
-            .sum()
+            .sum::<f64>()
+            .sqrt()
     };
-    let mut indexed: Vec<(usize, Vec<f64>)> = set.into_iter().enumerate().collect();
-    indexed.sort_by(|(_, a), (_, b)| {
-        distance(a).total_cmp(&distance(b)).then_with(|| {
-            a.iter()
-                .zip(b)
-                .map(|(x, y)| x.total_cmp(y))
-                .find(|o| o.is_ne())
-                .unwrap_or(Ordering::Equal)
-        })
-    });
-    let first = indexed.iter().position(|&(i, _)| i == 0);
-    (indexed.into_iter().map(|(_, s)| s).collect(), first)
+    let mut indexed: Vec<(f64, usize, Vec<f64>)> = set
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| (distance(&s), i, s))
+        .collect();
+    indexed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for tied in indexed.chunk_by_mut(|a, b| b.0 - a.0 <= SAME) {
+        tied.sort_by_key(|&(_, i, _)| i);
+    }
+    let first = indexed.iter().position(|&(_, i, _)| i == 0);
+    (indexed.into_iter().map(|(_, _, s)| s).collect(), first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two solutions a tie apart by noise either way keep the order offered;
+    /// apart by more than SAME, the nearer comes first.
+    #[test]
+    fn sorted_ties_keep_the_order_offered() {
+        let current = [0.0, 0.0];
+        for noise in [1e-13, -1e-13] {
+            let (a, b) = (vec![1.0 + noise, 0.0], vec![-1.0, 0.0]);
+            let set = vec![a.clone(), b.clone()];
+            assert_eq!(sorted(&current, set), (vec![a.clone(), b.clone()], Some(0)));
+            let set = vec![b.clone(), a.clone()];
+            assert_eq!(sorted(&current, set), (vec![b, a], Some(0)));
+        }
+        let (a, b) = (vec![1.0 + 1e-8, 0.0], vec![-1.0, 0.0]);
+        let set = vec![a.clone(), b.clone()];
+        assert_eq!(sorted(&current, set), (vec![b, a], Some(1)));
+    }
 }
