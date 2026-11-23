@@ -47,6 +47,11 @@ pub enum Equation {
     /// [`Equation::Azimuth`] signed as [`Equation::Qaz`], in (−π, π]: You's
     /// naz of the reference vector `normal` on E6C.
     Naz { normal: Vector3<f64>, naz: f64 },
+    /// The incidence of `normal` equals its emergence, as
+    /// [`Equation::Incidence`] and [`Equation::Emergence`] take them:
+    /// n̂·(k̂i + k̂f) = 0, You's a_eq_b (reference vector) or bin_eq_bout
+    /// (surface) on E6C.
+    IncidenceEqualsEmergence { normal: Vector3<f64> },
 }
 
 /// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
@@ -197,6 +202,7 @@ impl Equation {
                 finite(&[*angle], "surface angle")
             }
             Self::Qaz { qaz } => finite(&[*qaz], "qaz"),
+            Self::IncidenceEqualsEmergence { normal } => reference(normal, "surface normal"),
             Self::Emergence { surface, emergence } => {
                 reference(surface, "emergence surface")?;
                 finite(&[*emergence], "emergence")?;

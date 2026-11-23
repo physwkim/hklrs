@@ -106,6 +106,11 @@ pub fn residuals(
             let (n, ki) = surface(geo, normal, values);
             wrap(beam_azimuth(&n, &ki) - naz)
         }
+        Equation::IncidenceEqualsEmergence { normal } => {
+            let (n, ki) = surface(geo, normal, values);
+            let kf = geo.poses(values).unwrap().detector.rotation * geo.beam_direction();
+            n.angle(&ki) + n.angle(&kf) - PI
+        }
     }));
     if let Some(slits) = mode.slits() {
         let poses = geo.poses(values).unwrap();

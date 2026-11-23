@@ -302,6 +302,10 @@ impl<'a> System<'a> {
                         d: a.d,
                     }
                 }
+                // sin(emergence) − sin(incidence)
+                Equation::IncidenceEqualsEmergence { normal } => {
+                    fr.sample(&normal.normalize()).dot(&fr.ki.add(&fr.kf))
+                }
             });
         }
         Some(Eval {
@@ -437,6 +441,10 @@ mod tests {
                     },
                 )
                 .unwrap(),
+                Mode::named(geo, "a=b", &["omega", "chi", "phi", "gamma"], |_| {
+                    vec![Equation::IncidenceEqualsEmergence { normal: reference }]
+                })
+                .unwrap(),
             ],
             "K4CV" => [
                 Eulerian::Omega(0.2),
@@ -535,7 +543,7 @@ mod tests {
 
     /// Analytic Jacobian against a central difference of the residual, for
     /// every E4C mode, every kind of E6C mode, an emergence one and one per
-    /// You constraint (qaz with naz), both
+    /// You constraint (qaz with naz, incidence = emergence), both
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
     /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
     /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa
