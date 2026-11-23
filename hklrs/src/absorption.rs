@@ -110,7 +110,19 @@ impl Slab {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Beam {
     axis: Unit<Vector3<f64>>,
-    width: [f64; 2],
+    profile: Profile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Profile {
+    /// Full widths.
+    TopHat([f64; 2]),
+    /// Standard deviations.
+    Gaussian([f64; 2]),
+}
+
+fn sizes(what: &'static str, size: [f64; 2]) -> Result<[f64; 2], Error> {
+    Ok([positive(what, size[0])?, positive(what, size[1])?])
 }
 
 impl Beam {
@@ -118,19 +130,89 @@ impl Beam {
     pub fn top_hat(axis: Vector3<f64>, width: [f64; 2]) -> Result<Self, Error> {
         Ok(Self {
             axis: unit(axis, "beam profile axis")?,
-            width: [
-                positive("beam width", width[0])?,
-                positive("beam width", width[1])?,
-            ],
+            profile: Profile::TopHat(sizes("beam width", width)?),
         })
     }
 
-    /// Fraction of the flux that falls inside `poly`, a convex polygon in
-    /// the profile's own coordinates.
-    fn fraction(&self, poly: &[[f64; 2]]) -> f64 {
-        let [w0, w1] = self.width;
-        area(&clip_to_box(poly, [w0 / 2.0, w1 / 2.0])) / (w0 * w1)
+    /// Gaussian with full widths at half maximum `fwhm`.
+    pub fn gaussian_fwhm(axis: Vector3<f64>, fwhm: [f64; 2]) -> Result<Self, Error> {
+        let to_sigma = 1.0 / (2.0 * (2.0 * std::f64::consts::LN_2).sqrt());
+        let [f0, f1] = sizes("beam FWHM", fwhm)?;
+        Ok(Self {
+            axis: unit(axis, "beam profile axis")?,
+            profile: Profile::Gaussian([f0 * to_sigma, f1 * to_sigma]),
+        })
     }
+
+    /// Fraction of the flux that falls inside `poly`, a convex polygon
+    /// around the origin in the profile's own coordinates.
+    fn fraction(&self, poly: &[[f64; 2]]) -> f64 {
+        match self.profile {
+            Profile::TopHat([w0, w1]) => area(&clip_to_box(poly, [w0 / 2.0, w1 / 2.0])) / (w0 * w1),
+            Profile::Gaussian([s0, s1]) => {
+                let z: Vec<_> = poly.iter().map(|p| [p[0] / s0, p[1] / s1]).collect();
+                normal_mass(&clip_to_box(&z, [REACH; 2]))
+            }
+        }
+    }
+}
+
+/// Half-width in σ of the box a Gaussian is integrated over; the flux
+/// outside it, about 4e-17, is below half an ulp of 1.
+const REACH: f64 = 8.5;
+
+/// Positive nodes and weights of 8-point Gauss-Legendre on [−1, 1].
+const GAUSS_LEGENDRE_8: [(f64, f64); 4] = [
+    (0.18343464249564978, 0.36268378337836166),
+    (0.525532409916329, 0.3137066458778869),
+    (0.7966664774136267, 0.22238103445337443),
+    (0.9602898564975362, 0.10122853629037706),
+];
+
+/// ∫ f over [lo, hi], 8-point Gauss-Legendre on each piece between
+/// consecutive integers.
+fn integrate(lo: f64, hi: f64, f: impl Fn(f64) -> f64) -> f64 {
+    let mut sum = 0.0;
+    let mut a = lo;
+    while a < hi {
+        let b = (a.floor() + 1.0).min(hi);
+        let (c, h) = ((a + b) / 2.0, (b - a) / 2.0);
+        sum += h * GAUSS_LEGENDRE_8
+            .iter()
+            .map(|&(x, w)| w * (f(c - h * x) + f(c + h * x)))
+            .sum::<f64>();
+        a = b;
+    }
+    sum
+}
+
+/// Standard bivariate normal mass inside a convex polygon around the
+/// origin, as the sum over edges AB of the triangle 0AB. Its radial
+/// integral is closed, leaving (d/2π) ∫ g(d² + t²) dt along the edge, with
+/// d the edge line's signed distance from the origin, t the position along
+/// it, and g(s) = (1 − e^(−s/2))/s entire, so fixed-order quadrature
+/// converges at any edge slope; around the origin no two terms cancel.
+fn normal_mass(poly: &[[f64; 2]]) -> f64 {
+    let g = |s: f64| {
+        if s == 0.0 {
+            0.5
+        } else {
+            -(-s / 2.0).exp_m1() / s
+        }
+    };
+    let mut sum = 0.0;
+    for (i, a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = dx.hypot(dy);
+        if len == 0.0 {
+            continue;
+        }
+        let d = (a[0] * dy - a[1] * dx) / len;
+        let t0 = (a[0] * dx + a[1] * dy) / len;
+        sum += d * integrate(t0, t0 + len, |t| g(d * d + t * t));
+    }
+    sum.abs() / std::f64::consts::TAU
 }
 
 /// Sample-side state of one frame: everything that depends on k̂i and R_s
@@ -276,6 +358,8 @@ fn area(poly: &[[f64; 2]]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, SQRT_2, TAU};
+
     use super::*;
 
     /// Relative closeness that fails on NaN.
@@ -332,7 +416,7 @@ mod tests {
         let t = 2e-3;
         let slab = Slab::new(face(1.0, 1.0), t).unwrap();
         for mt in [1e-3, 0.5, 3.0, 20.0] {
-            let f = frame(&slab, &pencil(), mt / t, std::f64::consts::FRAC_PI_2);
+            let f = frame(&slab, &pencil(), mt / t, FRAC_PI_2);
             let a = f.weight(&ki()).unwrap();
             assert!(close(a, t * (-mt).exp(), 1e-14), "μt {mt}: {a}");
         }
@@ -427,11 +511,125 @@ mod tests {
         }
     }
 
+    /// erf(x) from scipy.special.erf.
+    const ERF: [(f64, f64); 4] = [
+        (0.5, 0.5204998778130465),
+        (1.0, 0.8427007929497148),
+        (2.0, 0.9953222650189527),
+        (3.0, 0.9999779095030014),
+    ];
+
+    /// FWHM = 2√(2 ln 2) σ.
+    const FWHM_PER_SIGMA: f64 = 2.3548200450309493;
+
+    fn gaussian(sigma: [f64; 2]) -> Beam {
+        Beam::gaussian_fwhm(Vector3::z(), sigma.map(|s| s * FWHM_PER_SIGMA)).unwrap()
+    }
+
+    /// Degree 0 holds the weights to a sum of exactly 1 on [0, 1]; above
+    /// it, powi rounds once per multiply.
+    #[test]
+    fn gauss_legendre_8_is_exact_to_degree_15() {
+        assert_eq!(integrate(0.0, 1.0, |_| 1.0), 1.0);
+        for k in 1..=15 {
+            let got = integrate(0.0, 1.0, |x| x.powi(k));
+            let tol = 2.0 * f64::from(k + 1) * f64::EPSILON;
+            assert!(close(got, 1.0 / f64::from(k + 1), tol), "{k}: {got}");
+        }
+        // pieces split at the integers
+        assert!(close(
+            integrate(-2.5, 1.75, |x| x.powi(15)),
+            (1.75f64.powi(16) - 2.5f64.powi(16)) / 16.0,
+            1e-14
+        ));
+    }
+
+    /// At normal incidence the face projects onto itself, so half-sizes of
+    /// √2·x0·σ0 and √2·x1·σ1 intercept erf(x0)·erf(x1) of the flux.
+    #[test]
+    fn gaussian_footprint_is_the_erf_product_at_normal_incidence() {
+        let sigma = [1e-4, 3e-4];
+        let beam = gaussian(sigma);
+        for (x0, e0) in ERF {
+            for (x1, e1) in ERF {
+                let half = [SQRT_2 * x0 * sigma[0], SQRT_2 * x1 * sigma[1]];
+                let slab = Slab::bulk(face(2.0 * half[0], 2.0 * half[1]));
+                let f = frame(&slab, &beam, 1.0, FRAC_PI_2).footprint().unwrap();
+                assert!(close(f, e0 * e1, 1e-14), "x {x0} {x1}: {f}");
+            }
+        }
+    }
+
+    /// A round beam on a square face: the intercepted flux does not depend
+    /// on how the square is turned, at any edge slope.
+    #[test]
+    fn gaussian_footprint_of_a_square_ignores_its_turn() {
+        let s = 1e-4;
+        let (x, e) = ERF[1];
+        let side = 2.0 * SQRT_2 * x * s;
+        for turn in [0.0, 1e-9, 0.3, FRAC_PI_4, 1.1] {
+            let axis = Vector3::new(f64::cos(turn), f64::sin(turn), 0.0);
+            let face = Face::new(Vector3::z(), axis, side, side).unwrap();
+            let f = frame(&Slab::bulk(face), &gaussian([s, s]), 1.0, FRAC_PI_2)
+                .footprint()
+                .unwrap();
+            assert!(close(f, e * e, 1e-14), "turn {turn}: {f}");
+        }
+    }
+
+    /// With the whole footprint on the face the top-hat gives 1/s_i; the
+    /// Gaussian reaches it as the face outgrows its tails, through
+    /// erf(x)²/s_i for a projected half-size of √2·x·σ.
+    #[test]
+    fn gaussian_footprint_converges_to_the_full_footprint() {
+        let s = 1e-4;
+        let alpha = 0.2;
+        let s_i = -ki().dot(&(tilt(alpha) * Vector3::z_axis()));
+        let face_for = |x: f64| face(2.0 * SQRT_2 * x * s / s_i, 2.0 * SQRT_2 * x * s);
+        let hat = Beam::top_hat(Vector3::z(), [s, s]).unwrap();
+        let full = frame(&Slab::bulk(face_for(1.0)), &hat, 1.0, alpha);
+        assert!(close(full.footprint().unwrap(), 1.0 / s_i, 1e-15));
+        for (x, e) in ERF.into_iter().chain([(REACH / SQRT_2, 1.0), (20.0, 1.0)]) {
+            let f = frame(&Slab::bulk(face_for(x)), &gaussian([s, s]), 1.0, alpha);
+            let f = f.footprint().unwrap();
+            assert!(close(f * s_i, e * e, 1e-14), "x {x}: {f}");
+        }
+    }
+
+    /// At grazing incidence the footprint outgrows the face along the beam
+    /// and F saturates at L times the peak line density across the face:
+    /// L/w for a top-hat, L/(√(2π)σ) for a Gaussian, one value at
+    /// w = √(2π)σ. The Gaussian's gap is y²/6 − O(y⁴), y = L s_i/(2σ).
+    #[test]
+    fn gaussian_footprint_saturates_at_the_top_hat_limit() {
+        let (l, s) = (0.01, 1e-4);
+        let w = TAU.sqrt() * s;
+        // 1 m across: no spill sideways
+        let slab = Slab::bulk(face(l, 1.0));
+        let hat = Beam::top_hat(Vector3::z(), [w, s]).unwrap();
+        let limit = l / w;
+        let mut gap = f64::INFINITY;
+        for alpha in [1e-2, 1e-3, 1e-4, 1e-5] {
+            let s_i = -ki().dot(&(tilt(alpha) * Vector3::z_axis()));
+            let h = frame(&slab, &hat, 1.0, alpha).footprint().unwrap();
+            assert!(close(h, limit, 1e-12), "α {alpha}: top-hat {h}");
+            let g = frame(&slab, &gaussian([s, s]), 1.0, alpha);
+            let next = 1.0 - g.footprint().unwrap() / limit;
+            let y = l * s_i / (2.0 * s);
+            assert!(
+                next > 0.0 && next <= y * y / 5.0 && next < gap,
+                "α {alpha}: {next}"
+            );
+            gap = next;
+        }
+        assert!(gap <= 5e-8, "{gap}");
+    }
+
     #[test]
     fn clip_to_box_gives_the_exact_overlap() {
         // a square of inradius 1 turned 45° over the box of inradius 1: a
         // regular octagon of inradius 1
-        let r = std::f64::consts::SQRT_2;
+        let r = SQRT_2;
         let diamond = [[r, 0.0], [0.0, r], [-r, 0.0], [0.0, -r]];
         let oct = area(&clip_to_box(&diamond, [1.0, 1.0]));
         assert!(close(oct, 8.0 * (r - 1.0), 1e-15), "{oct}");
