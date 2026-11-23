@@ -431,6 +431,17 @@ fn solve(
         .collect()
 }
 
+/// `pick`'s and `pseudo_pick`'s `picker`.
+fn parse_picker(picker: &str) -> PyResult<hklrs::Picker> {
+    match picker {
+        "closest" => Ok(hklrs::Picker::Closest),
+        "first" => Ok(hklrs::Picker::First),
+        other => Err(PyValueError::new_err(format!(
+            "picker must be \"closest\" or \"first\", got {other:?}"
+        ))),
+    }
+}
+
 /// One solution: `picker` "closest" (nearest to `current`) or "first" (the
 /// first the search reached). Arguments and errors as for `solve`.
 #[pyfunction]
@@ -444,15 +455,7 @@ fn pick(
     current: Vec<f64>,
     picker: &str,
 ) -> PyResult<Vec<f64>> {
-    let picker = match picker {
-        "closest" => hklrs::Picker::Closest,
-        "first" => hklrs::Picker::First,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "picker must be \"closest\" or \"first\", got {other:?}"
-            )));
-        }
-    };
+    let picker = parse_picker(picker)?;
     let geometry = mode.geometry.try_borrow(py)?;
     let geo = &geometry.0;
     let ie = |e| inverse_error::to_py(py, geo, e);

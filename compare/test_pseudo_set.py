@@ -499,3 +499,24 @@ def test_mode_and_pseudo_mode_raise_one_type_per_error(error):
             f()
         raised.append(type(e.value))
     assert raised == [getattr(hklrs, error)] * 2
+
+
+def test_pick_and_pseudo_pick_read_picker_alike():
+    """"closest" is the first of solve's list, "first" one of them, anything
+    else one ValueError from both."""
+    g = hklrs.Geometry.preset("E4CV")
+    sample = hklrs.Sample("picker", hklrs.Lattice(*LATTICE))
+    current = [30.0, 10.0, 20.0, 60.0]
+    mode, pseudo = hklrs.Mode(g, "bissector"), hklrs.PseudoMode(g, "q", [2.0])
+    calls = [(hklrs.solve, hklrs.pick, (mode, sample, [1.0, 1.0, 1.0], WL, current)),
+             (hklrs.pseudo_solve, hklrs.pseudo_pick, (pseudo, WL, current))]
+    messages = []
+    for solve, pick, args in calls:
+        every = solve(*args)
+        assert pick(*args) == pick(*args, picker="closest") == every[0]
+        assert pick(*args, picker="first") in every
+        with pytest.raises(ValueError) as e:
+            pick(*args, picker="nearest")
+        assert not isinstance(e.value, hklrs.InverseError)
+        messages.append(str(e.value))
+    assert messages[0] == messages[1]

@@ -8,7 +8,7 @@ use hklrs::nalgebra::{Matrix3, Vector3};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::{PyGeometry, PySample, err, inverse_error};
+use crate::{PyGeometry, PySample, err, inverse_error, parse_picker};
 
 /// An engine and its pseudo values, rad and Å⁻¹.
 #[derive(Clone, Copy)]
@@ -301,15 +301,7 @@ fn pseudo_pick(
     hkl0: Option<[f64; 3]>,
     picker: &str,
 ) -> PyResult<Vec<f64>> {
-    let picker = match picker {
-        "closest" => hklrs::Picker::Closest,
-        "first" => hklrs::Picker::First,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "picker must be \"closest\" or \"first\", got {other:?}"
-            )));
-        }
-    };
+    let picker = parse_picker(picker)?;
     mode.with_request(
         py,
         wavelength,
