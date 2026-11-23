@@ -1,7 +1,28 @@
 //! Geometry presets ported from hkl (`hkl/hkl-engine-*.c`), lab frame x
 //! along the beam and z up, axis order as hkl lists it.
 
-use crate::{Error, Geometry, Rad};
+use crate::{Error, Geometry, Rad, Wavelength};
+
+/// P08 LISA sample-detector distance, metres (`D_SD`).
+pub const LISA_SD: f64 = 0.5;
+/// P08 LISA monochromator spacings, Å (`D_Si111`, `D_Si220`).
+const LISA_D_SI111: f64 = 3.136;
+const LISA_D_SI220: f64 = 1.920;
+
+/// Incident-beam deflection of P08 LISA at `wavelength`, for the `tilt` axis:
+/// 2(asin(λ/2d₂₂₀) − asin(λ/2d₁₁₁)), hkl `_alpha_max`. k̂ᵢ = R_y(α)·x̂ =
+/// (cos α, 0, −sin α), hkl's ki before the source holder.
+pub fn lisa_tilt(wavelength: Wavelength) -> Result<Rad, Error> {
+    let bragg = |d: f64| {
+        let ratio = wavelength.angstrom() / (2.0 * d);
+        if ratio > 1.0 {
+            Err(Error::BraggImpossible { ratio })
+        } else {
+            Ok(ratio.asin())
+        }
+    };
+    Ok(Rad(2.0 * (bragg(LISA_D_SI220)? - bragg(LISA_D_SI111)?)))
+}
 
 /// Kappa arm tilt of the hkl kappa presets.
 pub const KAPPA_ALPHA_DEG: f64 = 50.0;
@@ -31,6 +52,7 @@ pub const PRESETS: &[&str] = &[
     "PETRA3 P23 4C",
     "PETRA3 P23 6C",
     "PYFAI",
+    "PETRA3 P08 LISA",
 ];
 
 const X: [f64; 3] = [1.0, 0.0, 0.0];
@@ -241,6 +263,19 @@ pub fn preset(name: &str) -> Result<Geometry, Error> {
             .detector_translation("poni1", Z)
             .detector_translation("poni2", Y)
             .detector_translation("sdd", X)
+            .build(),
+        // hkl 7be4f79 hkl-engine-petra3-p08-lisa.c (not registered upstream).
+        // The source stack is mchi (not a sample axis) then `tilt`, the
+        // monochromator deflection: set it to `lisa_tilt(wavelength)`.
+        // drot turns about (0.5, 0, 0), so the detector point to use is
+        // (0.5, 0, 0), as hkl's kf does.
+        "PETRA3 P08 LISA" => b
+            .source_rotation("mchi", X)
+            .source_rotation("tilt", Y)
+            .sample_rotation("sphi", Z)
+            .detector_rotation("dtth", MZ)
+            .detector_translation("dh", Z)
+            .detector_rotation_about("drot", MY, [LISA_SD, 0.0, 0.0])
             .build(),
         _ => Err(Error::UnknownPreset {
             name: name.to_owned(),

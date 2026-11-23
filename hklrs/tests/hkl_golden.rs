@@ -16,6 +16,23 @@ use serde_json::Value;
 /// Translations that move the detector point off its ray from the sample.
 const OFF_RAY: &[(&str, &str)] = &[("PYFAI", "poni1"), ("PYFAI", "poni2")];
 
+/// Axes hklrs adds that hkl does not list: P08 LISA's `tilt`, the
+/// wavelength-dependent monochromator deflection (`presets::lisa_tilt`).
+const EXTRA_AXES: &[(&str, &str)] = &[("PETRA3 P08 LISA", "tilt")];
+
+/// Detector point of a golden case, metres: hkl's kf for LISA is the full
+/// detector transform of (D_SD, 0, 0); the others use 1 m along the beam.
+fn detector_point(name: &str, geo: &hklrs::Geometry) -> hklrs::nalgebra::Point3<f64> {
+    if name == "PETRA3 P08 LISA" {
+        hklrs::nalgebra::Point3::new(presets::LISA_SD, 0.0, 0.0)
+    } else {
+        PixelDetector::point(geo.beam_direction(), 1.0)
+            .unwrap()
+            .pixel(0, 0)
+            .unwrap()
+    }
+}
+
 /// Presets hkl has no "hkl" engine for: the axis table only.
 const NO_ENGINE: &[&str] = &["TwoC"];
 
@@ -62,10 +79,19 @@ fn presets_match_hkl_axis_tables() {
         let axes = g["geometries"][name]["axes"]
             .as_array()
             .unwrap_or_else(|| panic!("{name} not in golden"));
-        let ours: Vec<_> = geo.axes().iter().map(|a| a.name()).collect();
+        let ours: Vec<_> = geo
+            .axes()
+            .iter()
+            .map(|a| a.name())
+            .filter(|n| !EXTRA_AXES.contains(&(name, n)))
+            .collect();
         let theirs: Vec<_> = axes.iter().map(|a| a["name"].as_str().unwrap()).collect();
         assert_eq!(ours, theirs, "{name} axis order");
-        for (a, h) in geo.axes().iter().zip(axes) {
+        let listed = geo
+            .axes()
+            .iter()
+            .filter(|a| !EXTRA_AXES.contains(&(name, a.name())));
+        for (a, h) in listed.zip(axes) {
             let v = match a.kind() {
                 AxisKind::Rotation { axis } | AxisKind::RotationAbout { axis, .. } => {
                     Some(axis.into_inner())
@@ -136,11 +162,15 @@ fn forward_hkl_matches_hkl_engine() {
             assert!(ub_err < 1e-12, "{ctx}: UB differs by {ub_err}");
         }
 
+        let wl = Wavelength::new(f(&case["wavelength"])).unwrap();
         // golden canonical values are degrees and millimetres
         let user: Vec<f64> = geo
             .axes()
             .iter()
             .map(|a| {
+                if EXTRA_AXES.contains(&(name, a.name())) {
+                    return hklrs::Deg::from(presets::lisa_tilt(wl).unwrap()).0;
+                }
                 let v = f(&case["axes_canonical_deg_mm"][a.name()]);
                 if is_off_ray(name, a.name()) {
                     0.0
@@ -155,9 +185,7 @@ fn forward_hkl_matches_hkl_engine() {
             })
             .collect();
         let values = geo.values_from_degrees(&user).unwrap();
-        let det = PixelDetector::point(geo.beam_direction(), 1.0).unwrap();
-        let wl = Wavelength::new(f(&case["wavelength"])).unwrap();
-        let out = forward(&geo, &sample, &values, wl, &det.pixel(0, 0).unwrap()).unwrap();
+        let out = forward(&geo, &sample, &values, wl, &detector_point(name, &geo)).unwrap();
         let expect = vec3(&case["hkl"]);
         let via_hkl_ub = hkl_ub.lu().solve(&out.q_sample).unwrap();
         let err = (via_hkl_ub - expect).abs().max();

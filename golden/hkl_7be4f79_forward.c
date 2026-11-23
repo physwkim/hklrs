@@ -65,7 +65,10 @@ static size_t axis_names(const Geo *g, HklGeometry *geo, const char *const **out
 
 static HklGeometry *new_geo(const Geo *g, const HklFactory **fac)
 {
-	if (g->lisa) return hkl_geometry_new_petra3_p08_lisa(NULL);
+	/* hkl_geometry_new ignores its ops for a NULL factory (readonly geometry),
+	 * so LISA, unregistered upstream, gets a stand-in factory */
+	static const HklFactory lisa = {.name = "PETRA3 P08 LISA", .description = ""};
+	if (g->lisa) return hkl_geometry_new_petra3_p08_lisa(&lisa);
 	*fac = hkl_factory_get_by_name(g->name, NULL);
 	return hkl_factory_create_new_geometry(*fac);
 }
