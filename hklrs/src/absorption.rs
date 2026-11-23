@@ -41,6 +41,12 @@ pub enum Masked {
     /// No polarisation factor: the beam's field allows no scattering
     /// towards the pixel.
     Extinct,
+    /// The detector's own mask: a dead pixel, a module gap, a user mask.
+    Detector,
+    /// The flat field has no usable gain here.
+    BadFlat,
+    /// A raw count that is NaN or infinite.
+    BadCount,
 }
 
 /// A per-pixel weight, positive and finite by construction, so the

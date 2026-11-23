@@ -1123,18 +1123,24 @@ fn masked_code(m: Masked) -> u8 {
         Masked::Opaque => 4,
         Masked::EdgeOn => 5,
         Masked::Extinct => 6,
+        Masked::Detector => 7,
+        Masked::BadFlat => 8,
+        Masked::BadCount => 9,
     }
 }
 
 /// Every reason, for the Python enum; a new variant fails to compile in
 /// `masked_code` first.
-const MASKED: [Masked; 6] = [
+const MASKED: [Masked; 9] = [
     Masked::Unlit,
     Masked::GrazingExit,
     Masked::ThroughBulk,
     Masked::Opaque,
     Masked::EdgeOn,
     Masked::Extinct,
+    Masked::Detector,
+    Masked::BadFlat,
+    Masked::BadCount,
 ];
 
 type WeightArrays<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<u8>>);
