@@ -382,7 +382,7 @@ def tag_defects(c):
     if "naz" in cons and "No code yet" in err and num:
         ids.append("DC-1")
     if "naz" in cons and any(k in cons for k in ("betain", "betaout", "bin_eq_bout")) and \
-            n["returned"] == 0 and "pseudo-angle" in err and num:
+            n["returned"] == 0 and num:
         ids.append("DC-2")
     if "bisect" in cons and any(abs(x["constraint_residual_deg"].get("bisect", 0)) > TOL_CON
                                 for x in dc["solutions"]):

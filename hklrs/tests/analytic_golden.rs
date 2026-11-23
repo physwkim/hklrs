@@ -505,10 +505,11 @@ fn dc1_naz_with_samples_or_bisect_is_solved() {
 
 /// DC-2: diffcalc solves `naz` on the surface normal and filters on the
 /// reference vector, so it returns nothing; `naz` is on the reference
-/// vector here and the numeric solve's full set comes back.
+/// vector here and the numeric solve's full set comes back. In c111 its χ
+/// solve already finds no root, so diffcalc fails at calc.py:378 instead.
 #[test]
 fn dc2_naz_is_on_the_reference_vector() {
-    for (case, tally) in dc_cases("DC-2", 10) {
+    for (case, tally) in dc_cases("DC-2", 11) {
         assert_eq!(case["counts"]["returned"], 0);
         assert!(tally.numeric_matched > 0, "{}", case["id"]);
     }
