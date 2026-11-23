@@ -3,7 +3,7 @@
 
 mod normalise;
 
-use hklrs::absorption::Masked;
+use hklrs::absorption::{Absorber, Beam, DetectorPath, Face, Layer, Masked, Slab};
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -1212,6 +1212,128 @@ fn polarisation<'py>(
     weight_arrays(py, w)
 }
 
+fn face(normal: [f64; 3], axis: [f64; 3], length: f64, width: f64) -> PyResult<Face> {
+    Face::new(normal.into(), axis.into(), length, width).map_err(err)
+}
+
+/// A flat sample: its entrance face, `normal` pointing out of the sample,
+/// `length` along the part of `axis` in the face plane and `width` across it
+/// (sample frame, centred on the sample position), and `thickness` along the
+/// normal; metres.
+#[pyclass(name = "Slab", frozen)]
+struct PySlab(Slab);
+
+#[pymethods]
+impl PySlab {
+    #[new]
+    fn new(
+        normal: [f64; 3],
+        axis: [f64; 3],
+        length: f64,
+        width: f64,
+        thickness: f64,
+    ) -> PyResult<Self> {
+        Slab::new(face(normal, axis, length, width)?, thickness)
+            .map(Self)
+            .map_err(err)
+    }
+
+    /// A crystal too thick for the beam to leave through the back.
+    #[staticmethod]
+    fn bulk(normal: [f64; 3], axis: [f64; 3], length: f64, width: f64) -> PyResult<Self> {
+        Ok(Self(Slab::bulk(face(normal, axis, length, width)?)))
+    }
+}
+
+/// Beam profile across the incident beam with unit total flux, centred on
+/// the sample position. Its first size lies along `axis` (lab frame)
+/// projected across the beam, the second across both; metres.
+#[pyclass(name = "Beam", frozen)]
+struct PyBeam(Beam);
+
+#[pymethods]
+impl PyBeam {
+    /// Uniform over a `width[0]` x `width[1]` rectangle.
+    #[staticmethod]
+    fn top_hat(axis: [f64; 3], width: [f64; 2]) -> PyResult<Self> {
+        Beam::top_hat(axis.into(), width).map(Self).map_err(err)
+    }
+
+    /// Gaussian with full widths at half maximum `fwhm`.
+    #[staticmethod]
+    fn gaussian_fwhm(axis: [f64; 3], fwhm: [f64; 2]) -> PyResult<Self> {
+        Beam::gaussian_fwhm(axis.into(), fwhm)
+            .map(Self)
+            .map_err(err)
+    }
+}
+
+fn per_metre(mu: f64) -> PyResult<hklrs::PerMetre> {
+    hklrs::PerMetre::new(mu).map_err(err)
+}
+
+fn layer(layer: Option<(f64, f64)>) -> PyResult<Option<Layer>> {
+    layer
+        .map(|(mu, thickness)| Layer::new(per_metre(mu)?, thickness).map_err(err))
+        .transpose()
+}
+
+/// What absorbs: the sample `slab` of linear attenuation `mu` (1/m) lit by
+/// `beam`, and on the way to each pixel `air` (1/m), a `window` transmitted
+/// and a `sensor` absorbed, each (mu 1/m, thickness m along the detector
+/// normal). An absent term weighs 1. Every mu is the same at all energies.
+#[pyclass(name = "Absorber", frozen)]
+struct PyAbsorber(Absorber<hklrs::PerMetre>);
+
+#[pymethods]
+impl PyAbsorber {
+    #[new]
+    #[pyo3(signature = (slab, beam, mu, air=None, window=None, sensor=None))]
+    fn new(
+        slab: &PySlab,
+        beam: &PyBeam,
+        mu: f64,
+        air: Option<f64>,
+        window: Option<(f64, f64)>,
+        sensor: Option<(f64, f64)>,
+    ) -> PyResult<Self> {
+        Ok(Self(Absorber {
+            slab: slab.0,
+            beam: beam.0,
+            sample: per_metre(mu)?,
+            detector: DetectorPath {
+                air: air.map(per_metre).transpose()?,
+                window: layer(window)?,
+                sensor: layer(sensor)?,
+            },
+        }))
+    }
+}
+
+/// Absorption weight of every pixel at `axes`, arguments as for `q_map`:
+/// the sample's effective path (m) times the detector path's transmission,
+/// by which the correction divides. Values and reasons as for
+/// `solid_angle`; where the sample and the detector path both mask, the
+/// pixel carries the sample's reason. A window or sensor needs a detector
+/// with a pixel area.
+#[pyfunction]
+fn absorption<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+    absorber: &PyAbsorber,
+) -> PyResult<WeightArrays<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
+    let wl = hklrs::Wavelength::new(wavelength).map_err(err)?;
+    let w = py
+        .detach(|| hklrs::absorption(geo, &values, wl, det, &absorber.0).map(split))
+        .map_err(err)?;
+    weight_arrays(py, w)
+}
+
 #[pyfunction]
 fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
@@ -1281,6 +1403,9 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySample>()?;
     m.add_class::<PyMode>()?;
     m.add_class::<PyPixelDetector>()?;
+    m.add_class::<PySlab>()?;
+    m.add_class::<PyBeam>()?;
+    m.add_class::<PyAbsorber>()?;
     submodule(m, "xu", |xu| {
         xu.add_class::<PyXuArea>()?;
         xu.add_class::<PyXuLinear>()
@@ -1311,6 +1436,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detector_positions, m)?)?;
     m.add_function(wrap_pyfunction!(solid_angle, m)?)?;
     m.add_function(wrap_pyfunction!(polarisation, m)?)?;
+    m.add_function(wrap_pyfunction!(absorption, m)?)?;
     let members: Vec<(String, u8)> = MASKED
         .iter()
         .map(|&r| (format!("{r:?}"), masked_code(r)))
