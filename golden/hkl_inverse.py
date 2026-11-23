@@ -11,7 +11,8 @@ The C solver restarts with libc rand(); srand() is seeded per call through
 ctypes so the output is reproducible.
 Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c (E4CV, E4CH and
 SOLEIL MARS), -e6c.c, -k4c.c,
--k6c.c, -zaxis.c, -aps-04id-polar.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
+-k6c.c, -zaxis.c, -aps-04id-polar.c, -petra3-p09-eh2.c,
+hkl-pseudoaxis-common-hkl.c (_double_diffraction,
 _psi_constant_*, _emergence_fixed_func), -soleil-sixs-med.c; the ESRF BM28
 and ID01 PSIC modes only hold axes. SOLEIL SIXS MED2+3, and MED2+3 v2 with
 its engine-list parameter eta_a_rotation = 1, refit eta_a after the solve
@@ -43,7 +44,7 @@ TOL = 1e-6
 GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
               "ESRF ID01 PSIC", "SOLEIL SIXS MED2+2", "SOLEIL SIXS MED1+2",
               "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS",
-              "APS POLAR"]
+              "APS POLAR", "PETRA3 P09 EH2"]
 # Engine-list parameter sets run per geometry; [] where the list has none.
 LIST_PARAMS = {"SOLEIL SIXS MED2+3 v2": [[0.0], [1.0]]}
 PARAM_MODES = ("double_diffraction", "psi_constant", "psi constant",
@@ -260,8 +261,12 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable, fitted)
         r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])
     if g == "APS POLAR" and mode == "4-circles bissecting horizontal":
         r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # aps-04id-polar.c:157
-    if mode == "zaxis + alpha=beta":
+    if g == "APS POLAR" and mode == "zaxis + alpha=beta":
         r["tau-delta"] = wrap(n["tau"] - n["delta"])  # aps-04id-polar.c:123
+    if g == "PETRA3 P09 EH2" and mode == "4-circles bissecting horizontal":
+        r["delta-2*omega"] = wrap(n["delta"] - 2 * n["omega"])  # petra3-p09-eh2.c:110
+    if g == "PETRA3 P09 EH2" and mode == "zaxis + alpha=beta":
+        r["mu-gamma"] = wrap(n["mu"] - n["gamma"])  # petra3-p09-eh2.c:75
     if mode == "bissector_horizontal":
         r["omega mod 180"] = wrap(om, 180.0)  # e6c.c:50, k6c.c:70
         r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # e6c.c:51, k6c.c:80
