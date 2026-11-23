@@ -515,6 +515,29 @@ fn dc6_backscatter_is_degenerate() {
     }
 }
 
+/// c376, c377 and c381, which diffcalc refuses, are modes here: from the
+/// detector on the beam the numeric search reaches their four sample
+/// positions, each at both detector arms, and every position checks.
+#[test]
+fn refused_modes_reach_four_sample_positions() {
+    let geo = preset("E6C").unwrap();
+    for case in load()["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        if !["c376", "c377", "c381"].contains(&id) {
+            continue;
+        }
+        check(case, &mut Tally::default()).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let solutions = pose(&geo, case).unwrap().solve(case).unwrap();
+        let mut samples: Vec<&[f64]> = Vec::new();
+        for s in &solutions {
+            if !samples.iter().any(|t| distance(t, &s[..4]) < MATCH) {
+                samples.push(&s[..4]);
+            }
+        }
+        assert_eq!((samples.len(), solutions.len()), (4, 8), "{id}");
+    }
+}
+
 /// Of the golden's "unsupported" constraint sets, which diffcalc refuses,
 /// the two with two and four constraints are no mode of six circles; the
 /// others are modes, which `analytic`'s own tests keep off its closed form.
