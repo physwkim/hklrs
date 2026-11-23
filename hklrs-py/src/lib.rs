@@ -555,9 +555,10 @@ impl PyPixelDetector {
     /// when no pixel is.
     #[getter]
     fn mask<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyArray2<bool>>>> {
-        self.0
-            .mask()
-            .map(|m| PyArray1::from_slice(py, m).reshape(self.0.shape()))
+        let mask = self.0.mask();
+        mask.data()
+            .contains(&true)
+            .then(|| PyArray1::from_slice(py, mask.data()).reshape(mask.shape()))
             .transpose()
     }
 

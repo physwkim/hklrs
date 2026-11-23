@@ -210,15 +210,11 @@ impl Region {
         let binned = detector
             .roi(self.slow.clone(), self.fast.clone())?
             .bin(self.bin.0, self.bin.1)?;
-        let mask = match binned.mask() {
-            Some(m) => Image::new(binned.shape(), m.to_vec())?,
-            None => Image::from_fn(binned.shape(), |_, _| false),
-        };
         let reducer = Reducer {
             raw_shape: detector.shape(),
             start: (self.slow.start, self.fast.start),
             bin: self.bin,
-            mask,
+            mask: binned.mask().clone(),
         };
         Ok((binned, reducer))
     }
@@ -230,7 +226,7 @@ pub struct Reducer {
     raw_shape: (usize, usize),
     start: (usize, usize),
     bin: (usize, usize),
-    /// The binned detector's mask, all false where it has none.
+    /// The binned detector's mask.
     mask: Image<bool>,
 }
 

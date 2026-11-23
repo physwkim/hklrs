@@ -269,14 +269,7 @@ fn every_row_is_a_pixel_detector_with_its_mask() {
     for det in Detector::ALL {
         let pd = det.pixel_detector();
         assert_eq!(pd.shape(), det.shape(), "{}", det.name());
-        let mask = det.mask();
-        let mask = mask.data();
-        assert_eq!(
-            pd.mask(),
-            mask.contains(&true).then_some(mask),
-            "{}",
-            det.name()
-        );
+        assert_eq!(pd.mask(), &det.mask(), "{}", det.name());
         let modules = match det {
             Detector::MerlinMedipix3RxQuad512 => 4,
             Detector::Cirpad => 20,
