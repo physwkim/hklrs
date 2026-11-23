@@ -17,7 +17,7 @@ use std::ops::Range;
 use hklrs::frame_map::{FrameMap, MappedFrame};
 use hklrs::grid::{Binning, Bounds, Cube};
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, PixelFields, RawFrame, Region};
+use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
 use hklrs::{Image, PixelDetector, Wavelength};
@@ -93,7 +93,7 @@ fn scan() -> Scan {
             let raw: Vec<f64> = (0..shape.0 * shape.1)
                 .map(|i| image(frame, i) * weight(frame))
                 .collect();
-            let raw = RawFrame::new(shape, raw).unwrap();
+            let raw = Image::new(shape, raw).unwrap();
             map.map(&deg, wavelength, &raw, &FrameScalars::new())
                 .unwrap()
         })

@@ -8,10 +8,10 @@
 pub mod common;
 
 use common::{f, load};
-use hklrs::PixelDetector;
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, RawFrame, Region};
+use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, Region};
 use hklrs::{Error, absorption::Masked};
+use hklrs::{Image, PixelDetector};
 use serde_json::Value;
 
 const TOL: f64 = 1e-12;
@@ -60,7 +60,7 @@ fn detector((h, w): (usize, usize)) -> PixelDetector {
 /// What xu is given, rebuilt for hklrs: per frame, `(raw, scalars)` and
 /// the normaliser. `Err` is the first frame-level error.
 struct Case {
-    frames: Vec<RawFrame>,
+    frames: Vec<Image<f64>>,
     scalars: Vec<Result<FrameScalars, Error>>,
     normaliser: Normaliser,
 }
@@ -69,9 +69,9 @@ fn build(case: &Value) -> Case {
     let shape = shape(case);
     let size = shape.0 * shape.1;
     let raw = flat(&case["raw"]);
-    let frames: Vec<RawFrame> = raw
+    let frames: Vec<Image<f64>> = raw
         .chunks(size)
-        .map(|f| RawFrame::new(shape, f.to_vec()).unwrap())
+        .map(|f| Image::new(shape, f.to_vec()).unwrap())
         .collect();
     let n = frames.len();
     let per_frame = |key: &str| case[key].as_array().map(|_| flat(&case[key]));
@@ -105,12 +105,12 @@ fn build(case: &Value) -> Case {
     let mut fields = PixelFields::new(shape);
     if case["dark"].is_array() {
         fields = fields
-            .dark_rate(RawFrame::new(shape, flat(&case["dark"])).unwrap())
+            .dark_rate(Image::new(shape, flat(&case["dark"])).unwrap())
             .unwrap();
     }
     if case["flat"].is_array() {
         fields = fields
-            .flat(RawFrame::new(shape, flat(&case["flat"])).unwrap())
+            .flat(Image::new(shape, flat(&case["flat"])).unwrap())
             .unwrap();
     }
     let (_, r) = Region::new(0..shape.0, 0..shape.1, (1, 1))

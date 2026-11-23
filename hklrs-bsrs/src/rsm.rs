@@ -19,10 +19,10 @@ use bsrs::engine::DocumentCallback;
 use bsrs::event_model::{
     Document, EventDescriptor, StreamDatum, StreamResource, unpack_event_page,
 };
-use hklrs::Wavelength;
 use hklrs::frame_map::{FrameMap, MappedFrame};
 use hklrs::grid::Cube;
-use hklrs::normalise::{FrameScalars, RawFrame};
+use hklrs::normalise::FrameScalars;
+use hklrs::{Image, Wavelength};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -48,7 +48,7 @@ pub trait FrameReader: Send + Sync {
     /// Frame `index` of `resource`: the whole raw image in the shape it
     /// was read in, which [`FrameMap::map`] refuses unless it is the raw
     /// shape.
-    fn read(&self, resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError>;
+    fn read(&self, resource: &StreamResource, index: u64) -> Result<Image<f64>, ReadError>;
 }
 
 /// Why a [`FrameReader`] has no frame. The reader only says which kind of
@@ -561,7 +561,11 @@ impl Frame {
     /// Reads the frame again every [`POLL`] while it is not readable yet,
     /// until `deadline` after it was ready. The worker reads nothing else
     /// meanwhile, so the frames behind it keep their order.
-    fn read(&self, reader: &dyn FrameReader, deadline: Duration) -> Result<RawFrame, FrameFailure> {
+    fn read(
+        &self,
+        reader: &dyn FrameReader,
+        deadline: Duration,
+    ) -> Result<Image<f64>, FrameFailure> {
         loop {
             let reason = match reader.read(&self.resource, self.index) {
                 Ok(raw) => return Ok(raw),

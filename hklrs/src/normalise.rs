@@ -133,10 +133,6 @@ impl FrameScalars {
     }
 }
 
-/// A whole raw detector image: a frame, or the dark rate or flat field of
-/// [`PixelFields`].
-pub type RawFrame = Image<f64>;
-
 /// The detector's per-pixel fields, on the whole raw frame, before any
 /// roi or binning.
 #[derive(Clone, Debug, PartialEq)]
@@ -158,7 +154,7 @@ impl PixelFields {
     }
 
     /// Dark counts per second over the raw shape.
-    pub fn dark_rate(self, rate: RawFrame) -> Result<Self, Error> {
+    pub fn dark_rate(self, rate: Image<f64>) -> Result<Self, Error> {
         rate.check("dark field", self.shape)?;
         let rate = rate.into_data();
         if let Some(index) = rate.iter().position(|r| !r.is_finite()) {
@@ -172,7 +168,7 @@ impl PixelFields {
 
     /// Relative gain over the raw shape. The mean is taken over the usable
     /// pixels (finite and above [`FLAT_MIN`]); the others are masked.
-    pub fn flat(self, gain: RawFrame) -> Result<Self, Error> {
+    pub fn flat(self, gain: Image<f64>) -> Result<Self, Error> {
         gain.check("flat field", self.shape)?;
         let gain = gain.into_data();
         let usable = |g: f64| g.is_finite() && g > FLAT_MIN;
@@ -332,7 +328,7 @@ impl Normaliser {
     /// has no counts to subtract.
     pub fn normalise(
         &self,
-        raw: &RawFrame,
+        raw: &Image<f64>,
         scalars: &FrameScalars,
         weights: &[&Weights],
     ) -> Result<NormalisedFrame, Error> {
@@ -419,7 +415,7 @@ mod tests {
             .flat_map(|s| (0..11).map(move |f| (s, f)))
             .map(|(s, f)| value(raw_det.pixel(s, f).unwrap()))
             .collect();
-        let frame = RawFrame::new((7, 11), frame).unwrap();
+        let frame = Image::new((7, 11), frame).unwrap();
         for (slow, fast, bin) in [
             (0..7, 0..11, (3, 3)),
             (0..6, 1..10, (3, 3)),
@@ -708,7 +704,7 @@ mod tests {
     #[test]
     fn a_raw_image_of_another_shape_is_refused() {
         assert_eq!(
-            RawFrame::new((2, 3), vec![1.0; 5]),
+            Image::new((2, 3), vec![1.0; 5]),
             Err(Error::PixelCount {
                 what: "image",
                 len: 5,
