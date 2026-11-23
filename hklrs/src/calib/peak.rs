@@ -51,8 +51,6 @@ pub enum Reject {
     /// The pseudo-Voigt fit did not converge, left its window, or has an
     /// unidentifiable position.
     FitFailed,
-    /// The frame's ray misses every detector module within its pixels.
-    RayOutside,
     /// The frame's ray meets the detector only behind the sample.
     RayBehind,
     /// The frame's ray is parallel to the detector.

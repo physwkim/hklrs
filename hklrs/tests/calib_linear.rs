@@ -126,3 +126,91 @@ fn the_direction_is_found_among_the_four_perpendicular_to_the_beam() {
     let fit = calibrate_linear(&m, &frames(case), &[start(Param::free(1.0))]).unwrap();
     assert_eq!(fit.value().dir, "z+".parse().unwrap());
 }
+
+/// xorshift64* and Box–Muller: enough for a coverage count, no dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn unit(&mut self) -> f64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn normal(&mut self) -> f64 {
+        let (u, v) = (self.unit().max(1e-300), self.unit());
+        (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()
+    }
+}
+
+#[test]
+fn sigma_covers_the_truth_over_200_noise_seeds() {
+    let m = model();
+    let mut truth = hklrs::xu::Linear::new("z+".parse().unwrap(), 300.3, 1000, 1.0, 2.0e-4);
+    truth.tilt = hklrs::Deg(2.0);
+    let detector = truth.detector(m.geometry.beam_direction()).unwrap();
+    let mut layout = Rng(99);
+    let angles: Vec<f64> = (0..30).map(|_| (2.0 * layout.unit() - 1.0) * 1.5).collect();
+    let exact: Vec<f64> = angles
+        .iter()
+        .map(|&a| {
+            let poses = m
+                .geometry
+                .poses(&m.geometry.values_from_degrees(&[a]).unwrap())
+                .unwrap();
+            let ki = poses.source * m.geometry.beam_direction();
+            let to_arm = poses.detector.inverse();
+            detector
+                .locate(
+                    to_arm * poses.sample_position(),
+                    to_arm.rotation * ki.into_inner(),
+                )
+                .unwrap()[1]
+        })
+        .collect();
+    let sigma = 0.05;
+    let (mut inside, mut rms) = ([0usize; 3], 0.0);
+    for seed in 1..=200u64 {
+        let mut rng = Rng(0x9E37_79B9 ^ seed.wrapping_mul(0x1000_0000_01B3));
+        let fs: Vec<CalFrame> = angles
+            .iter()
+            .zip(&exact)
+            .enumerate()
+            .map(|(i, (&a, &c))| {
+                CalFrame::new(
+                    i,
+                    vec![a],
+                    Peak1 {
+                        pos: c + sigma * rng.normal(),
+                        sigma,
+                    }
+                    .into(),
+                    FrameKind::PrimaryBeam,
+                )
+                .unwrap()
+            })
+            .collect();
+        let fit = calibrate_linear(&m, &fs, &[start(Param::free(1.0))]).unwrap();
+        let l = fit.value();
+        for (k, (id, got, want)) in [
+            (ParamId::Cch2, l.cch, 300.3),
+            (ParamId::Pwidth2, l.pwidth, 2.0e-4),
+            (ParamId::Tilt, l.tilt.0, 2.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if (got - want).abs() <= fit.sigma(id).unwrap() {
+                inside[k] += 1;
+            }
+        }
+        rms += fit.rms();
+    }
+    for (k, n) in inside.iter().enumerate() {
+        let frac = *n as f64 / 200.0;
+        assert!((0.58..=0.79).contains(&frac), "parameter {k}: {frac}");
+    }
+    let mean = rms / 200.0;
+    assert!((0.9..=1.05).contains(&mean), "mean rms {mean}");
+}

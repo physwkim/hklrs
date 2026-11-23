@@ -90,7 +90,10 @@ impl<'a> Rig<'a> {
         self.geometry.poses(&values)
     }
 
-    /// The fractional pixel (slow, fast) where `frame` lands on `detector`.
+    /// The fractional pixel (slow, fast) where `frame` lands on the plane of
+    /// the module that holds its observed peak, whether or not that is on
+    /// the chip: the residual geometry is the plane's linear index mapping,
+    /// not the chip's extent. `None` when the peak is outside the image.
     pub fn locate(
         &self,
         detector: &PixelDetector,
@@ -111,17 +114,18 @@ impl<'a> Rig<'a> {
                 }
                 // the sample frame is where UB·hkl lives; the sample holder
                 // carries it into the lab
-                let ub = self.ub.expect("checked in Rig::new");
+                let ub = sample_tilt(v) * self.ub.expect("checked in Rig::new");
                 let q_lab = poses.sample.rotation * (ub * hkl);
                 (TAU / lambda) * ki.into_inner() + q_lab
             }
         };
         let to_arm = poses.detector.inverse();
         let origin: Point3<f64> = to_arm * poses.sample_position();
+        let (slow, fast) = cell(frame.peak().pos).ok_or(Reject::NoRay)?;
+        let module = detector.module(slow, fast).map_err(|_| Reject::NoRay)?;
         detector
-            .locate(origin, to_arm.rotation * direction)
+            .locate_on(module, origin, to_arm.rotation * direction)
             .map_err(|e| match e {
-                Error::RayOutside => Reject::RayOutside,
                 Error::RayBehind => Reject::RayBehind,
                 Error::RayParallel => Reject::RayParallel,
                 _ => Reject::NoRay,
@@ -144,6 +148,21 @@ impl<'a> Rig<'a> {
             .map(|a| (at[a] - peak.pos[a]) / peak.sigma[a])
             .collect())
     }
+}
+
+/// xu's sample misorientation `Rz(azimuth) · Ry(tilt)` (`sample_align.py`
+/// `U1`); the identity at tilt 0 and azimuth 0.
+fn sample_tilt(v: &Values) -> Matrix3<f64> {
+    let (sp, cp) = v.get(ParamId::SampleAzimuth).to_radians().sin_cos();
+    let (sc, cc) = v.get(ParamId::SampleTilt).to_radians().sin_cos();
+    Matrix3::new(cp * cc, -sp, cp * sc, sp * cc, cp, sp * sc, -sc, 0.0, cc)
+}
+
+/// The image pixel (slow, fast) a peak position rounds to; `None` for a
+/// position below the first pixel.
+pub(crate) fn cell(pos: [f64; 2]) -> Option<(usize, usize)> {
+    let r = |x: f64| (x >= -0.5).then(|| x.round() as usize);
+    Some((r(pos[0])?, r(pos[1])?))
 }
 
 /// Residuals per axis with a finite σ in `frame`.
