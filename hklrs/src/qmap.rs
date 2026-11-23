@@ -134,6 +134,38 @@ impl Weights {
         assert!(slow < self.shape.0 && fast < self.shape.1);
         self.data[slow * self.shape.1 + fast]
     }
+
+    /// Weights given as numbers, row-major over `shape`: where `reasons`
+    /// has a [`Masked`] the pixel has that reason, elsewhere its value,
+    /// which must be positive and finite or the pixel is [`Masked::Opaque`].
+    pub fn from_values(
+        shape: (usize, usize),
+        values: &[f64],
+        reasons: &[Option<Masked>],
+    ) -> Result<Self, Error> {
+        let expected = shape.0 * shape.1;
+        for (what, len) in [
+            ("weight values", values.len()),
+            ("weight reasons", reasons.len()),
+        ] {
+            if len != expected {
+                return Err(Error::PixelCount {
+                    what,
+                    len,
+                    expected,
+                });
+            }
+        }
+        let data = values
+            .iter()
+            .zip(reasons)
+            .map(|(&v, r)| match r {
+                Some(m) => Err(*m),
+                None => Weight::new(v, Masked::Opaque),
+            })
+            .collect();
+        Ok(Self { shape, data })
+    }
 }
 
 /// Every pixel overwrites it.
