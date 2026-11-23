@@ -35,7 +35,9 @@ impl Diffractometer {
 
     /// ψ of the device's psi mode, degrees, as `{name}_psi`. A set holds
     /// the hkl setpoint and replaces the mode's ψ, so later h, k, l moves
-    /// keep it; the readback is ψ about the mode's reference. Outside a psi
+    /// keep it; the readback is ψ about the mode's reference. The setpoint
+    /// is kept as given and the readback is taken on its branch, within
+    /// 180° of it: a set to 200° reads back 200°, not −160°. Outside a psi
     /// mode the axis refuses to move or be located.
     pub fn psi_axis(self: &Arc<Self>) -> PseudoAxis {
         PseudoAxis {

@@ -264,6 +264,32 @@ async fn a_psi_set_holds_hkl_and_later_hkl_sets_keep_psi() {
 }
 
 #[tokio::test]
+async fn psi_reads_back_on_the_branch_its_setpoint_names() {
+    async fn set(psi: f64) -> (Arc<Diffractometer>, DynLocation) {
+        let dx = e4cv(soft(AT_001));
+        let [h, ..] = dx.hkl_axes();
+        h.set_dyn(1.0).await.await.unwrap();
+        dx.set_mode(psi_constant(60.0)).unwrap();
+        let axis = dx.psi_axis();
+        axis.set_dyn(psi).await.await.unwrap();
+        let location = axis.locate_dyn().await.unwrap();
+        let read = axis.read_dyn().await.unwrap()["e4cv_psi"].value.clone();
+        assert_eq!(read, json!(location.readback));
+        (dx, location)
+    }
+    for (psi, principal) in [(200.0, -160.0), (-200.0, 160.0)] {
+        let (dx, DynLocation { setpoint, readback }) = set(psi).await;
+        assert!((setpoint - psi).abs() < 1e-9, "{setpoint}");
+        assert!((readback - psi).abs() < 1e-9, "{readback}");
+        // one ψ, two names: the same reals as its principal value
+        let (same, location) = set(principal).await;
+        assert!((location.readback - principal).abs() < 1e-9, "{location:?}");
+        let at = dx.positions().await.unwrap();
+        assert_close(&at, &same.positions().await.unwrap(), 1e-9);
+    }
+}
+
+#[tokio::test]
 async fn an_unreachable_psi_keeps_the_mode_the_setpoint_and_the_reals() {
     let dx = e4cv(soft(AT_001));
     let [h, ..] = dx.hkl_axes();

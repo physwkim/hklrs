@@ -2,6 +2,7 @@
 //! wavelength and the samples, read as one reading set with h, k, l.
 
 use std::collections::{BTreeMap, HashMap};
+use std::f64::consts::{PI, TAU};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_trait::async_trait;
@@ -157,11 +158,14 @@ impl State {
                 let (reference, setpoint) = self.psi()?;
                 let values = self.geometry.values_from_degrees(current)?;
                 let ub = self.samples.current().sample.ub();
-                let readback = hklrs::inverse::psi(&self.geometry, &ub, &reference, &values)
+                let principal = hklrs::inverse::psi(&self.geometry, &ub, &reference, &values)
                     .map_err(|source| DiffError::Psi {
                         reference: reference.into(),
                         source,
                     })?;
+                // on the setpoint's branch: within half a turn of it
+                let turn = (principal - setpoint).rem_euclid(TAU);
+                let readback = setpoint + if turn > PI { turn - TAU } else { turn };
                 Ok(DynLocation {
                     setpoint: setpoint.to_degrees(),
                     readback: readback.to_degrees(),
