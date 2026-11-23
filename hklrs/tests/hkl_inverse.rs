@@ -403,4 +403,6 @@ golden! {
     k6c_double_diffraction_horizontal: "K6C" "double_diffraction_horizontal",
     k6c_psi_constant_vertical: "K6C" "psi_constant_vertical",
     k6c_constant_incidence: "K6C" "constant_incidence",
+    k4cv_constant_chi: "K4CV" "constant_chi",
+    k6c_constant_chi_vertical: "K6C" "constant_chi_vertical",
 }
