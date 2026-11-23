@@ -216,7 +216,8 @@ impl PyGeometry {
     }
 
     /// (min, max) of axis `name`, units as for `set_limits`; unbounded,
-    /// (-inf, inf), unless set.
+    /// (-inf, inf), unless set. A rotation's limits are kept in radians, so
+    /// the degrees read back can differ from those set in the last bit.
     fn limits(&self, name: &str) -> PyResult<(f64, f64)> {
         let axis = self.axis(name)?;
         let (lo, hi) = axis.limits();
@@ -235,6 +236,7 @@ impl PyGeometry {
     }
 
     /// The cut point of rotation `name`, degrees; None for any other axis.
+    /// Kept in radians, so it can differ from the one set in the last bit.
     fn cut_point(&self, name: &str) -> PyResult<Option<f64>> {
         let axis = self.axis(name)?;
         Ok(axis.cut_point().map(|c| user_value(axis, c)))
