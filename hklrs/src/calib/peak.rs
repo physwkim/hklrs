@@ -411,6 +411,10 @@ fn lowest_median<const N: usize>(strips: [Vec<f64>; N]) -> Option<f64> {
 }
 
 /// Centre of mass of a frame in a window re-centred until it settles.
+///
+/// Limit, untested: the ring mean cancels a background level or a gradient
+/// that is linear across the ring. A step or curvature inside the ring leaves
+/// a residual that can pass `min_snr` on a signal-free frame.
 pub fn find_peak(img: &Image, opts: &PeakOptions) -> Result<Peak, PeakError> {
     let (ns, nf) = img.shape;
     validate(img, ns, nf)?;
