@@ -1,6 +1,6 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
 //! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C, the SOLEIL SIXS MED
-//! presets, SOLEIL MARS, APS POLAR and PETRA3 P09 EH2 but their
+//! presets, SOLEIL MARS, PETRA3 P23 4C, APS POLAR and PETRA3 P09 EH2 but their
 //! "zaxis + beta-fixed", which hkl solves over other axes (see
 //! `aps_04id_polar::zaxis_beta_fixed`).
 //!
@@ -23,7 +23,7 @@ mod inverse_check;
 
 use hklrs::inverse::{
     aps_04id_polar as polar, e4c, e6c, esrf_bm28_psic, k4c, k6c, petra3_p09_eh2 as p09,
-    soleil_sixs_med, zaxis,
+    petra3_p23_4c as p23_4c, soleil_sixs_med, zaxis,
 };
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
@@ -60,6 +60,7 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
     let kappa = case["geometry"] == "K4CV";
     let k6c = case["geometry"] == "K6C";
     let p09 = case["geometry"] == "PETRA3 P09 EH2";
+    let p23_4c = case["geometry"] == "PETRA3 P23 4C";
     let mode = match case["mode"].as_str().unwrap() {
         "bissector_vertical" if k6c => k6c::bissector_vertical(geo),
         "constant_omega_vertical" if k6c => k6c::constant_omega_vertical(geo, rad("omega")),
@@ -88,6 +89,11 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         "constant_phi" if kappa => k4c::constant_phi(geo, rad("phi")),
         "double_diffraction" if kappa => k4c::double_diffraction(geo, hkl2()),
         "psi_constant" if kappa => k4c::psi_constant(geo, hkl2(), psi()),
+        "bissector_vertical" if p23_4c => p23_4c::bissector_vertical(geo),
+        "lifting_detector_omega_t" if p23_4c => p23_4c::lifting_detector_omega_t(geo),
+        "lifting_detector_mu" if p23_4c => p23_4c::lifting_detector_mu(geo),
+        "bissector_horizontal" if p23_4c => p23_4c::bissector_horizontal(geo),
+        "psi_constant" if p23_4c => p23_4c::psi_constant(geo, hkl2(), psi()),
         "bissector" => e4c::bissector(geo),
         "constant_omega" => e4c::constant_omega(geo),
         "constant_chi" => e4c::constant_chi(geo),
@@ -514,4 +520,9 @@ golden! {
     p09_lifting_detector_omega: "PETRA3 P09 EH2" "lifting detector omega",
     p09_lifting_detector_chi: "PETRA3 P09 EH2" "lifting detector chi",
     p09_lifting_detector_phi: "PETRA3 P09 EH2" "lifting detector phi",
+    p23_4c_bissector_vertical: "PETRA3 P23 4C" "bissector_vertical",
+    p23_4c_lifting_detector_omega_t: "PETRA3 P23 4C" "lifting_detector_omega_t",
+    p23_4c_lifting_detector_mu: "PETRA3 P23 4C" "lifting_detector_mu",
+    p23_4c_bissector_horizontal: "PETRA3 P23 4C" "bissector_horizontal",
+    p23_4c_psi_constant: "PETRA3 P23 4C" "psi_constant",
 }
