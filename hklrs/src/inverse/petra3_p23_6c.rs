@@ -6,5 +6,5 @@ pub use super::e6c::{
     bissector_horizontal, bissector_vertical, constant_chi_vertical, constant_mu_horizontal,
     constant_omega_vertical, constant_phi_vertical, double_diffraction_horizontal,
     double_diffraction_vertical, lifting_detector_mu, lifting_detector_omega, lifting_detector_phi,
-    psi_constant_horizontal, psi_constant_vertical,
+    psi_constant_horizontal, psi_constant_vertical, psi_vertical,
 };

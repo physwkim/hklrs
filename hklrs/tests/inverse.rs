@@ -7,6 +7,7 @@ mod inverse_check;
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use hklrs::inverse::kappa::Branch;
 use hklrs::inverse::{
     self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, petra3_p09_eh2,
     soleil_sixs_med, zaxis,
@@ -261,11 +262,29 @@ fn mode_construction_errors() {
         Mode::new(&geo, "m", &[0, 1, 1], vec![]),
         Err(InverseError::WrittenTwice { name: "chi".into() })
     );
+    // The count is the request's: the target gives three equations, or
+    // none for a detector target.
+    let four = Mode::new(&geo, "m", &[0, 1, 2, 3], vec![]).unwrap();
+    let values = current(&geo);
+    let counted = |target| {
+        InverseRequest {
+            target,
+            ..request(&four, Vector3::new(1.0, 0.0, 0.0), &values)
+        }
+        .solve()
+    };
     assert_eq!(
-        Mode::new(&geo, "m", &[0, 1, 2, 3], vec![]),
+        counted(Target::Hkl(Vector3::new(1.0, 0.0, 0.0))),
         Err(InverseError::EquationCount {
             written: 4,
             equations: 3
+        })
+    );
+    assert_eq!(
+        counted(Target::Detector),
+        Err(InverseError::EquationCount {
+            written: 4,
+            equations: 0
         })
     );
     assert_eq!(
@@ -356,6 +375,86 @@ fn kappa_twin_is_admitted_unless_it_moves_a_held_axis() {
     let solutions = request(&mode, hkl, &current).solve().unwrap();
     for s in &solutions {
         assert_solution(&mode, &hkl, &current, s);
+    }
+}
+
+/// The arm alone written, an eulerians target turns it to both kappa
+/// images of the target's rotation: each reads back to the target on its
+/// branch and every other axis stays. chi counts modulo 2π (HKL-19: hkl
+/// takes 350°, −300° and 450° as they are).
+#[test]
+fn eulerians_target_turns_the_arm_to_both_kappa_images() {
+    for name in ["K4CV", "K6C"] {
+        let geo = preset(name).unwrap();
+        let arm = ["komega", "kappa", "kphi"].map(|n| geo.axis_index(n).unwrap());
+        let mode = Mode::new_kappa(&geo, "eulerians", arm, &arm, vec![]).unwrap();
+        let kappa = mode.kappa().unwrap().arm();
+        let current: Vec<f64> = (0..geo.axes().len())
+            .map(|i| 0.2 + 0.1 * i as f64)
+            .collect();
+        let solve = |eulerians| {
+            InverseRequest {
+                target: Target::Eulerians(eulerians),
+                ..request(&mode, Vector3::x(), &current)
+            }
+            .solve()
+        };
+        let (omega, phi) = (0.7, -2.2);
+        for chi_deg in [-80.0, 35.0, 350.0, -300.0, 450.0] {
+            let chi = f64::to_radians(chi_deg);
+            let solutions = solve([omega, chi, phi]).unwrap();
+            assert_eq!(solutions.len(), 2, "{name} {chi_deg}: {solutions:?}");
+            let mut branches = Vec::new();
+            for s in &solutions {
+                let at = arm.map(|i| s[i]);
+                let branch = [Branch::Same, Branch::Opposite]
+                    .into_iter()
+                    .find(|&b| {
+                        let back = kappa.to_eulerian(at, b);
+                        back.iter()
+                            .zip([omega, chi, phi])
+                            .all(|(a, b)| wrap(a - b).abs() <= 1e-12)
+                    })
+                    .unwrap_or_else(|| panic!("{name} {chi_deg}: {s:?} reads back to neither"));
+                branches.push(branch);
+                for (i, (v, c)) in s.iter().zip(&current).enumerate() {
+                    assert!(arm.contains(&i) || v == c, "{name}: axis {i} moved");
+                }
+            }
+            branches.sort_by_key(|b| *b == Branch::Opposite);
+            assert_eq!(
+                branches,
+                [Branch::Same, Branch::Opposite],
+                "{name} {chi_deg}"
+            );
+        }
+        // HKL-19 at the request: chi modulo 2π is one target.
+        let (a, b) = [350.0, -10.0]
+            .map(|c| solve([omega, f64::to_radians(c), phi]).unwrap())
+            .into();
+        assert!(
+            a.len() == b.len()
+                && a.iter()
+                    .zip(&b)
+                    .all(|(x, y)| x.iter().zip(y).all(|(u, v)| (u - v).abs() <= 1e-12)),
+            "{a:?} vs {b:?}"
+        );
+        assert_eq!(
+            solve([omega, 2.0, phi]),
+            Err(InverseError::ChiOutOfReach {
+                chi: 2.0,
+                reach: 2.0 * KAPPA_ALPHA_DEG.to_radians()
+            })
+        );
+        let plain = Mode::new(&geo, "m", &arm, vec![]).unwrap();
+        assert_eq!(
+            InverseRequest {
+                target: Target::Eulerians([omega, 0.3, phi]),
+                ..request(&plain, Vector3::x(), &current)
+            }
+            .solve(),
+            Err(InverseError::NoKappaArm)
+        );
     }
 }
 

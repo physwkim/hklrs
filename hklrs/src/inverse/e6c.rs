@@ -121,6 +121,17 @@ pub fn psi_constant_vertical(
     })
 }
 
+/// hkl's psi engine, as [`super::e4c::psi`].
+pub fn psi_vertical(
+    geometry: &Geometry,
+    reference: Vector3<f64>,
+    psi: f64,
+) -> Result<Mode<'_>, InverseError> {
+    Mode::named(geometry, "psi_vertical", &VERTICAL, |_| {
+        vec![Equation::PsiConstant { reference, psi }]
+    })
+}
+
 /// As [`psi_constant_vertical`], writing gamma instead of delta.
 pub fn psi_constant_horizontal(
     geometry: &Geometry,

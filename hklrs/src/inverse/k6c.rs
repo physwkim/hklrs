@@ -142,6 +142,32 @@ pub fn psi_constant_vertical(
     })
 }
 
+/// hkl's psi engine, as [`super::e4c::psi`].
+pub fn psi_vertical(
+    geometry: &Geometry,
+    reference: Vector3<f64>,
+    psi: f64,
+) -> Result<Mode<'_>, InverseError> {
+    Mode::named_kappa(geometry, "psi_vertical", &VERTICAL, |_| {
+        vec![Equation::PsiConstant { reference, psi }]
+    })
+}
+
+/// hkl's SOLEIL SIRIUS KAPPA psi engine: [`psi_vertical`] writing gamma
+/// instead of delta.
+pub fn psi_vertical_soleil_sirius_kappa(
+    geometry: &Geometry,
+    reference: Vector3<f64>,
+    psi: f64,
+) -> Result<Mode<'_>, InverseError> {
+    Mode::named_kappa(
+        geometry,
+        "psi_vertical_soleil_sirius_kappa",
+        &["komega", "kappa", "kphi", "gamma"],
+        |_| vec![Equation::PsiConstant { reference, psi }],
+    )
+}
+
 /// The surface `normal` (sample-holder frame) at `incidence` and `azimuth`
 /// rad ([`Equation::Incidence`], [`Equation::Azimuth`]). hkl's init step
 /// takes its normal as the lab direction at the init geometry: the

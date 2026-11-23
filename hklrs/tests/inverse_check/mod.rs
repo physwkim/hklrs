@@ -4,7 +4,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use hklrs::inverse::kappa::Branch;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
-use hklrs::{Equation, Eulerian, Geometry, Mode, Wavelength, scattering};
+use hklrs::{Equation, Eulerian, Geometry, Mode, Scattering, Wavelength, pseudo, scattering};
 
 /// Largest hkl miss and mode-equation miss (rad, or relative to k²) allowed.
 pub const ROUND_TRIP: f64 = 1e-10;
@@ -102,6 +102,12 @@ pub fn residuals(
             let (kf, ki) = (poses.detector.rotation * beam, poses.source * beam);
             wrap(beam_azimuth(&(kf - ki), &ki) - qaz)
         }
+        // hkl's forward engines on `scattering`, not the solver's jets.
+        Equation::Tth { tth } => wrap(pseudo::tth2(&s).0.0 - tth),
+        Equation::QNorm { q } => (s.q - q) / k,
+        Equation::QSigned { q } => (pseudo::q_signed(&s) - q) / k,
+        Equation::Qper { surface, qper } => (per_par(geo, &s, surface, values).0 - qper) / k,
+        Equation::Qpar { surface, qpar } => (per_par(geo, &s, surface, values).1 - qpar) / k,
         Equation::Naz { normal, naz } => {
             let (n, ki) = surface(geo, normal, values);
             wrap(beam_azimuth(&n, &ki) - naz)
@@ -172,6 +178,12 @@ pub fn check(
         within(miss, || format!("{values:?} misses the slits by {miss:e}"))?;
     }
     Ok(())
+}
+
+/// (qper, qpar) of `surface` at `values`.
+fn per_par(geo: &Geometry, s: &Scattering, surface: &Vector3<f64>, values: &[f64]) -> (f64, f64) {
+    let sample = geo.poses(values).unwrap().sample.rotation;
+    pseudo::qper_qpar(s, &sample, surface).unwrap()
 }
 
 /// The lab surface normal and k̂i at `values`.

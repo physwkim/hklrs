@@ -90,15 +90,20 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> SolutionSet<'a> {
 }
 
 /// The written values `start` with one axis at a time turned so that k̂f
-/// makes the target's 2θ with k̂i, at both roots, for every axis that turns
-/// k̂f·k̂i.
+/// makes the 2θ with k̂i that the goal, or else an extra equation, fixes, at
+/// both roots, for every axis that turns k̂f·k̂i; none where nothing fixes
+/// 2θ.
 /// Where `start` holds k̂f = ±k̂i, the direction of Q, and with it qaz, ψ
 /// and the scattering plane, is undefined at every sector image of it.
 fn bragg(system: &System, start: &[f64]) -> Vec<Vec<f64>> {
+    let Some(cos_2theta) = std::iter::once(None)
+        .chain(system.extra().iter().map(Some))
+        .find_map(|e| system.cos_two_theta(e))
+    else {
+        return Vec::new();
+    };
     let geometry = system.geometry();
     let beam = geometry.beam_direction().into_inner();
-    // |Q| = 2 sin θ in units of k.
-    let cos_2theta = 1.0 - system.q().norm_squared() / 2.0;
     let mut out = Vec::new();
     for i in 0..start.len() {
         let at = |v: f64| {
@@ -204,6 +209,7 @@ fn levenberg_marquardt(system: &System, seed: &[f64]) -> Vec<f64> {
 mod tests {
     use nalgebra::{Matrix3, Vector3};
 
+    use super::super::system::Goal;
     use super::*;
     use crate::inverse::{Equation, Eulerian, Mode};
     use crate::presets::preset;
@@ -217,7 +223,7 @@ mod tests {
         let mode = Mode::new_kappa(&geo, "m", [0, 1, 2], &[0, 1, 2, 3], held).unwrap();
         let current = [0.2, -0.9, 0.5, 0.7];
         let q = Vector3::new(0.3, -0.2, 0.4);
-        let system = System::new(&mode, Matrix3::identity(), q, &current);
+        let system = System::new(&mode, Matrix3::identity(), Goal::Q(q), 1.0, &current);
         let mut s = Search {
             system: &system,
             set: SolutionSet::new(&system),

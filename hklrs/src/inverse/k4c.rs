@@ -61,3 +61,14 @@ pub fn psi_constant(
         vec![Equation::PsiConstant { reference, psi }]
     })
 }
+
+/// hkl's psi engine, as [`super::e4c::psi`].
+pub fn psi(
+    geometry: &Geometry,
+    reference: Vector3<f64>,
+    psi: f64,
+) -> Result<Mode<'_>, InverseError> {
+    Mode::named_kappa(geometry, "psi", &ALL, |_| {
+        vec![Equation::PsiConstant { reference, psi }]
+    })
+}
