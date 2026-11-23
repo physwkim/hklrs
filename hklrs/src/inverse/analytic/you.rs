@@ -98,6 +98,30 @@ pub(super) fn cos_eq(a: f64, c: f64) -> Roots {
     Roots::Two([x, -x])
 }
 
+/// x with α + β cos x + γ sin x = 0.
+pub(super) fn harmonic([alpha, beta, gamma]: [f64; 3]) -> Roots {
+    let base = gamma.atan2(beta);
+    match cos_eq(beta.hypot(gamma), -alpha) {
+        Roots::Two([x, y]) => Roots::Two([base + x, base + y]),
+        other => other,
+    }
+}
+
+/// α, β, γ of (R_axis(x)·p)·w − target = α + β cos x + γ sin x.
+pub(super) fn component_terms(
+    axis: &Vector3<f64>,
+    p: &Vector3<f64>,
+    w: &Vector3<f64>,
+    target: f64,
+) -> [f64; 3] {
+    let along = axis * axis.dot(p);
+    [
+        along.dot(w) - target,
+        (p - along).dot(w),
+        axis.cross(p).dot(w),
+    ]
+}
+
 /// x with (R_axis(x)·p)·w = target.
 pub(super) fn solve_component(
     axis: &Vector3<f64>,
@@ -105,15 +129,7 @@ pub(super) fn solve_component(
     w: &Vector3<f64>,
     target: f64,
 ) -> Roots {
-    let along = axis * axis.dot(p);
-    let a = (p - along).dot(w);
-    let b = axis.cross(p).dot(w);
-    let h = a.hypot(b);
-    let base = b.atan2(a);
-    match cos_eq(h, target - along.dot(w)) {
-        Roots::Two([x, y]) => Roots::Two([base + x, base + y]),
-        other => other,
-    }
+    harmonic(component_terms(axis, p, w, target))
 }
 
 /// x with R_axis(x)·from along `to` in the plane normal to `axis`; free when

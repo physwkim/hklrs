@@ -351,6 +351,16 @@ fn samp_3() {
     run("3samp");
 }
 
+#[test]
+fn naz_2samp() {
+    run("naz+2samp");
+}
+
+#[test]
+fn naz_bisect() {
+    run("naz+bisect");
+}
+
 /// The golden cases citing defect `id`, each checked; `count` of them.
 fn dc_cases(id: &str, count: usize) -> Vec<(Value, Tally)> {
     let golden = load();
@@ -367,6 +377,21 @@ fn dc_cases(id: &str, count: usize) -> Vec<(Value, Tally)> {
         .collect();
     assert_eq!(cases.len(), count, "{id}");
     cases
+}
+
+/// DC-1: diffcalc-core documents `naz` with two sample circles or bisect
+/// and raises "No code yet"; every isolated numeric position comes back.
+#[test]
+fn dc1_naz_with_samples_or_bisect_is_solved() {
+    for (case, tally) in dc_cases("DC-1", 18) {
+        assert_eq!(case["counts"]["returned"], 0);
+        let numeric = case["counts"]["numeric_isolated"].as_u64().unwrap();
+        assert!(
+            numeric > 0 && tally.numeric_matched as u64 == numeric,
+            "{}",
+            case["id"]
+        );
+    }
 }
 
 /// DC-2: diffcalc solves `naz` on the surface normal and filters on the

@@ -9,6 +9,8 @@ use super::you::{
 };
 use super::{Bisect, Constraints, Detector, Error, Reference, TOL};
 
+mod naz;
+
 /// The reflection to reach: Q̂ and θ, with the reference vector n and the
 /// surface normal s, all unit vectors in the φ frame.
 pub(super) struct Problem {
@@ -75,6 +77,8 @@ impl Problem {
     pub(super) fn candidates(&self, constraints: &Constraints) -> Vec<(Angles, Free)> {
         match constraints {
             Constraints::DetRefSample(d, r, h) => self.det_ref_sample(d, r, &h.known()),
+            Constraints::DetSamples(Detector::Naz(naz), h) => self.naz_samples(*naz, &h.known()),
+            Constraints::DetBisect(Detector::Naz(naz), b) => self.naz_bisect(*naz, b),
             Constraints::DetSamples(d, h) => self.det_samples(d, &h.known()),
             Constraints::DetBisect(d, b) => self.det_bisect(d, b),
             Constraints::RefSamples(r, h) => self.ref_samples(r, &h.known()),
@@ -87,8 +91,8 @@ impl Problem {
         Vector3::new(self.ct * qaz.sin(), -self.st, self.ct * qaz.cos())
     }
 
-    /// Every Q̂ in the lab the detector constraint allows; `Naz` does not fix
-    /// the detector and has none.
+    /// Every Q̂ in the lab the detector constraint allows. `Naz` leaves Q̂ free
+    /// about the beam, so every caller routes it apart.
     fn detector(&self, d: &Detector) -> Vec<(Vector3<f64>, Free)> {
         let c2 = 1.0 - 2.0 * self.st * self.st;
         let q = |nu: f64, delta: f64| {
@@ -106,7 +110,7 @@ impl Problem {
                 .map(|(delta, f)| (q(nu, delta), f))
                 .collect(),
             Detector::Qaz(qaz) => vec![(self.at_qaz(qaz), None)],
-            Detector::Naz(_) => Vec::new(),
+            Detector::Naz(_) => unreachable!("naz fixes no lab Q̂"),
         }
     }
 

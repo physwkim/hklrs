@@ -11,6 +11,7 @@
 
 mod sample;
 mod solve;
+mod trig;
 mod you;
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -196,10 +197,8 @@ impl Constraints {
             (&[d], &[r], &[h], false, &[]) => Ok(Constraints::DetRefSample(d, r, Held::new([h])?)),
             (&[], &[r], &[g, h], false, &[]) => Ok(Constraints::RefSamples(r, Held::new([g, h])?)),
             (&[], &[], &[a, b, c], false, &[]) => Ok(Constraints::Samples(Held::new([a, b, c])?)),
-            (&[d], &[], &[g, h], false, &[]) if !matches!(d, Detector::Naz(_)) => {
-                Ok(Constraints::DetSamples(d, Held::new([g, h])?))
-            }
-            (&[d], &[], held, true, omega) if !matches!(d, Detector::Naz(_)) => {
+            (&[d], &[], &[g, h], false, &[]) => Ok(Constraints::DetSamples(d, Held::new([g, h])?)),
+            (&[d], &[], held, true, omega) => {
                 let b = match (held, omega) {
                     (&[], &[w]) => Bisect::Omega(w),
                     (&[(Circle::Mu, v)], &[]) => Bisect::Mu(v),
