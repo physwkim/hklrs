@@ -115,11 +115,12 @@ def test_parse_reads_pyfai_s_own_files(entry, lab):
     """Each field as pyFAI read the file back, and every pixel where
     pyFAI's Geometry.load of it puts it."""
     f, wavelength = read(entry["file"])
-    assert (f.version, f.detector, f.parallax) == (entry["version"], entry["detector"],
+    assert (f.version, f.detector_name, f.parallax) == (entry["version"], entry["detector"],
                                                    entry["parallax"])
     assert (f.pixel1, f.pixel2) == (entry["pixel1"], entry["pixel2"])
     assert (f.orientation or 3) == entry["orientation"]
-    assert (f.binning, f.splinefile) == ((1, 1), None)
+    # no binning key: the class's default instance keeps its own
+    assert (f.binning, f.splinefile) == (None, None)
     for k in ("dist", "poni1", "poni2"):
         assert getattr(f, k) == entry[k], k
     for k in ("rot1", "rot2", "rot3"):
@@ -133,15 +134,15 @@ def test_parse_reads_pyfai_s_own_files(entry, lab):
         with pytest.raises(ValueError, match="parallax"):
             f.poni()
         return
-    if f.detector == "Detector":
+    if f.detector_name == "Detector":
         assert f.max_shape == (tuple(entry["max_shape"]) if entry["max_shape"] else None)
     else:
         # pyFAI's class gives a named detector its shape, not the file
         assert f.max_shape is None
-        with pytest.raises(ValueError, match=f.detector):
+        with pytest.raises(ValueError, match=f.detector_name):
             f.poni()
     if f.max_shape is None:
-        if f.detector == "Detector":
+        if f.detector_name == "Detector":
             # version 1 has no shape, which orientation 3 does not need
             with pytest.raises(ValueError, match="max_shape"):
                 f.poni()

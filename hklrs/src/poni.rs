@@ -5,15 +5,19 @@
 //! with `p = pixel · (physical index + ½)` and `R = R3(rot3)·R2(rot2)·R1(rot1)`
 //! (`Geometry.rotation_matrix`). The orientation maps the image index to
 //! the physical index (`Detector._reorder_indexes_from_orientation`).
-//! [`PoniFile`] reads pyFAI's `.poni` text.
+//! [`PoniFile`] reads pyFAI's `.poni` text, and [`PoniFile::detector`]
+//! builds the pyFAI detector class it names.
 
-use std::collections::HashMap;
+mod detectors;
+
+use std::collections::{BTreeMap, HashMap};
 
 use nalgebra::{Matrix3, Unit, Vector3};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{Error, PixelAxis, PixelDetector, Rad, Wavelength};
+use crate::{Error, Module, PixelAxis, PixelDetector, Rad, Wavelength};
+use detectors::{Class, Grid, Layout};
 
 /// Smallest sine of the angle between `up` and the beam for them to define
 /// pyFAI's axis 1.
@@ -41,6 +45,23 @@ pub enum PoniError {
     Missing(&'static str),
     #[error("pyFAI detector {0:?} takes its pixel layout from pyFAI, not the file")]
     NamedDetector(String),
+    #[error("pyFAI 2026.9.0 has no detector {0:?}")]
+    UnknownDetector(String),
+    #[error("pyFAI detector {class} is not supported: {reason}")]
+    UnsupportedDetector {
+        class: &'static str,
+        reason: &'static str,
+    },
+    #[error("pyFAI detector {class}: its Detector_config {key} is not the class's own")]
+    DetectorConfig { class: &'static str, key: String },
+    #[error(
+        "pyFAI detector {class} binned {binning:?}: its mask over {max_shape:?} does not bin, and pyFAI's Detector.mask raises"
+    )]
+    MaskBinning {
+        class: &'static str,
+        binning: (u64, u64),
+        max_shape: (usize, usize),
+    },
     #[error("pyFAI's {0} moves the pixels in a way a PONI importer does not model")]
     Unsupported(&'static str),
     #[error("a PONI holds one module of uniform pixels with extent along both axes")]
@@ -60,17 +81,22 @@ pub enum Orientation {
 }
 
 impl Orientation {
+    /// Whether the image runs against pyFAI's slow and fast axis.
+    fn flips(self) -> [bool; 2] {
+        match self {
+            Orientation::TopLeft => [true, true],
+            Orientation::TopRight => [true, false],
+            Orientation::BottomRight => [false, false],
+            Orientation::BottomLeft => [false, true],
+        }
+    }
+
     /// For the slow and the fast axis: the physical index step per image
     /// index (−1 where the image runs against pyFAI's axis) and the physical
     /// index of image index 0. In f64 so that a zero shape reaches
     /// `PixelDetector::new`'s check.
     fn index_map(self, shape: (usize, usize)) -> [(f64, f64); 2] {
-        let (flip1, flip2) = match self {
-            Orientation::TopLeft => (true, true),
-            Orientation::TopRight => (true, false),
-            Orientation::BottomRight => (false, false),
-            Orientation::BottomLeft => (false, true),
-        };
+        let [flip1, flip2] = self.flips();
         let map = |flip: bool, n: usize| {
             if flip {
                 (-1.0, n as f64 - 1.0)
@@ -254,10 +280,6 @@ impl Poni {
     }
 }
 
-/// Name of pyFAI's generic flat detector, the one whose layout a PONI file
-/// gives in full; `Detector.factory` also finds it by its lower-case name.
-const GENERIC: &str = "detector";
-
 /// A `.poni` file as pyFAI 2026.9.0 reads it (`io/ponifile.py`
 /// `PoniFile.read_from_file` and `read_from_dict`). Lengths in metres.
 #[derive(Clone, Debug, PartialEq)]
@@ -286,6 +308,7 @@ pub struct PoniFile {
 pub struct DetectorConfig {
     /// pyFAI detector name; `Detector` is the generic flat one.
     pub name: String,
+    /// 0 for a null, which pyFAI's constructors take as they take a 0.
     pub pixel1: Option<f64>,
     pub pixel2: Option<f64>,
     /// Never in a version 1 file, nor for a named detector of the shape
@@ -293,8 +316,12 @@ pub struct DetectorConfig {
     pub max_shape: Option<(usize, usize)>,
     /// `None` where the file has none or 0: the detector class's default.
     pub orientation: Option<Orientation>,
-    pub binning: (u64, u64),
+    /// `None` where the file has none or 0, which `Detector.factory` does
+    /// not apply.
+    pub binning: Option<(u64, u64)>,
     pub splinefile: Option<String>,
+    /// The other non-null `Detector_config` entries, keys lower-cased.
+    pub other: BTreeMap<String, Value>,
 }
 
 fn syntax(key: &str, value: impl ToString) -> PoniError {
@@ -328,11 +355,12 @@ impl DetectorConfig {
             pixel2: pixel("pixelsize2")?,
             max_shape: None,
             orientation: None,
-            binning: (1, 1),
+            binning: None,
             splinefile: keys
                 .get("splinefile")
                 .filter(|s| s.to_lowercase() != "none")
                 .map(|s| s.to_string()),
+            other: BTreeMap::new(),
         })
     }
 
@@ -347,13 +375,10 @@ impl DetectorConfig {
             Some(_) => return Err(syntax("detector_config", json.unwrap_or_default())),
         };
         let get = |key: &str| config.get(key).filter(|v| !v.is_null());
-        // Detector.__init__: a zero pitch is no pitch
-        let pixel = |key: &str| match get(key) {
+        let pixel = |key: &str| match config.get(key) {
             None => Ok(None),
-            Some(v) => match v.as_f64() {
-                Some(x) => Ok((x != 0.0).then_some(x)),
-                None => Err(syntax(key, v)),
-            },
+            Some(Value::Null) => Ok(Some(0.0)),
+            Some(v) => v.as_f64().map(Some).ok_or_else(|| syntax(key, v)),
         };
         let max_shape = match get("max_shape") {
             None => None,
@@ -373,15 +398,15 @@ impl DetectorConfig {
         };
         // Detector.factory applies a binning only when it is truthy
         let binning = match get("binning") {
-            None => (1, 1),
-            Some(v) if v.is_array() => pair("binning", v)?,
+            None => None,
+            Some(v) if v.is_array() => Some(pair("binning", v)?),
             Some(v) => match count("binning", v)? {
-                0 => (1, 1),
-                n => (n, n),
+                0 => None,
+                n => Some((n, n)),
             },
         };
-        if binning.0 == 0 || binning.1 == 0 {
-            return Err(syntax("binning", format!("{binning:?}")));
+        if let Some(b @ ((0, _) | (_, 0))) = binning {
+            return Err(syntax("binning", format!("{b:?}")));
         }
         let splinefile = match get("splinefile") {
             None => None,
@@ -391,6 +416,14 @@ impl DetectorConfig {
                     .to_string(),
             ),
         };
+        const READ: [&str; 6] = [
+            "pixel1",
+            "pixel2",
+            "max_shape",
+            "orientation",
+            "binning",
+            "splinefile",
+        ];
         Ok(Self {
             name: name.to_string(),
             pixel1: pixel("pixel1")?,
@@ -399,6 +432,11 @@ impl DetectorConfig {
             orientation,
             binning,
             splinefile,
+            other: config
+                .iter()
+                .filter(|(k, v)| !v.is_null() && !READ.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         })
     }
 }
@@ -470,23 +508,49 @@ impl PoniFile {
         })
     }
 
-    /// The PONI of pyFAI's generic flat detector. A named detector's pitch,
-    /// shape and default orientation come from pyFAI's class, so the caller
-    /// builds its [`Poni`] from these fields and that layout.
-    pub fn poni(&self) -> Result<Poni, PoniError> {
+    /// The class pyFAI builds for the file (`PoniFile.read_from_dict`):
+    /// version 1's pixel sizes give the generic detector unless the named
+    /// class takes them both or is a `NexusDetector`.
+    fn class(&self) -> Result<&'static Class, PoniError> {
         let d = &self.detector;
-        if d.name.to_lowercase() != GENERIC {
-            return Err(PoniError::NamedDetector(d.name.clone()));
+        let class =
+            Class::resolve(&d.name).ok_or_else(|| PoniError::UnknownDetector(d.name.clone()))?;
+        let (p1, p2) = (d.pixel1.is_some(), d.pixel2.is_some());
+        if self.version == 1.0
+            && (p1 || p2)
+            && !(class.force_pixel && p1 && p2)
+            && class.name != "NexusDetector"
+        {
+            return Ok(Class::generic());
         }
+        Ok(class)
+    }
+
+    /// The PONI of pyFAI's generic flat detector. A named class's pitch,
+    /// shape and mask come from pyFAI; [`PoniFile::detector`] builds it.
+    pub fn poni(&self) -> Result<Poni, PoniError> {
+        match self.class()?.layout {
+            Layout::Generic => self.generic(),
+            _ => Err(PoniError::NamedDetector(self.detector.name.clone())),
+        }
+    }
+
+    fn generic(&self) -> Result<Poni, PoniError> {
+        let d = &self.detector;
         if d.splinefile.is_some() {
             return Err(PoniError::Unsupported("spline file"));
         }
         if self.parallax {
             return Err(PoniError::Unsupported("parallax correction"));
         }
-        if d.binning != (1, 1) {
+        if d.binning.is_some_and(|b| b != (1, 1)) {
             return Err(PoniError::Unsupported("binning"));
         }
+        // Detector.__init__ takes a 0 pitch as none; version 1 sets it as given
+        let pitch = |key, p: Option<f64>| {
+            p.filter(|&p| self.version == 1.0 || p != 0.0)
+                .ok_or(PoniError::Missing(key))
+        };
         Ok(Poni {
             dist: self.dist,
             poni1: self.poni1,
@@ -494,11 +558,154 @@ impl PoniFile {
             rot1: self.rot1,
             rot2: self.rot2,
             rot3: self.rot3,
-            pixel1: d.pixel1.ok_or(PoniError::Missing("pixel1"))?,
-            pixel2: d.pixel2.ok_or(PoniError::Missing("pixel2"))?,
+            pixel1: pitch("pixel1", d.pixel1)?,
+            pixel2: pitch("pixel2", d.pixel2)?,
             shape: d.max_shape.ok_or(PoniError::Missing("max_shape"))?,
             orientation: d.orientation.unwrap_or(Orientation::BottomRight),
         })
+    }
+
+    /// The detector pyFAI builds from the file, in the lab where `lab`
+    /// places pyFAI's axes: the generic one as [`PoniFile::poni`] gives it,
+    /// a named class with the pitch or chip edges, shape, default
+    /// orientation and mask of pyFAI's default instance, binned as the
+    /// file's `binning` key bins it. An ImXPad image is
+    /// flipped as pyFAI flips it over the whole image, not as it places
+    /// pixels by index, which flips them back.
+    pub fn detector(&self, lab: &LabAxes) -> Result<PixelDetector, PoniError> {
+        let class = self.class()?;
+        match class.layout {
+            Layout::Generic => self.generic()?.detector(lab),
+            Layout::Unsupported(reason) => Err(PoniError::UnsupportedDetector {
+                class: class.name,
+                reason,
+            }),
+            Layout::Uniform(grid, rule) => {
+                let (poni, grid) = self.named(class, grid)?;
+                let det = poni.detector(lab)?;
+                let Some(rule) = rule else { return Ok(det) };
+                let mask = rule.mask(&grid).ok_or(PoniError::MaskBinning {
+                    class: class.name,
+                    binning: grid.binning,
+                    max_shape: grid.max_shape,
+                })?;
+                Ok(det.with_mask(mask)?)
+            }
+            Layout::Edges(grid, chips) => {
+                let (poni, grid) = self.named(class, grid)?;
+                let det = poni.edges_detector(chips.edges(&grid), lab)?;
+                Ok(det.with_mask(chips.mask(grid.shape))?)
+            }
+        }
+    }
+
+    /// The geometry of the instance of `class` this file gives, and its
+    /// grid.
+    fn named(&self, class: &Class, grid: Grid) -> Result<(Poni, Grid), PoniError> {
+        let (grid, orientation) = self.instance(class, grid)?;
+        if self.parallax {
+            return Err(PoniError::Unsupported("parallax correction"));
+        }
+        let poni = Poni {
+            dist: self.dist,
+            poni1: self.poni1,
+            poni2: self.poni2,
+            rot1: self.rot1,
+            rot2: self.rot2,
+            rot3: self.rot3,
+            pixel1: grid.pixel.0,
+            pixel2: grid.pixel.1,
+            shape: grid.shape,
+            orientation,
+        };
+        Ok((poni, grid))
+    }
+
+    /// The grid and orientation of the class `Detector.factory` builds from
+    /// the file's `Detector_config` on the default instance `grid`: each
+    /// other entry the constructor takes must be the default's own, a 0 or
+    /// null pitch where the class takes it as the default's, pyFAI's choice
+    /// for another null, or a `sensor`, which only parallax reads, and a
+    /// binning other than the default's is one the class bins by
+    /// `Detector.binning`'s rule.
+    fn instance(&self, class: &Class, grid: Grid) -> Result<(Grid, Orientation), PoniError> {
+        let d = &self.detector;
+        let takes = |key: &str| class.args.contains(&key);
+        let differs = |key: &str| PoniError::DetectorConfig {
+            class: class.name,
+            key: key.to_string(),
+        };
+        // version 1 sets the spline on whatever class it built
+        if d.splinefile.is_some() && (self.version == 1.0 || takes("splinefile")) {
+            return Err(PoniError::Unsupported("spline file"));
+        }
+        for (key, given, own) in [
+            ("pixel1", d.pixel1, grid.pixel.0),
+            ("pixel2", d.pixel2, grid.pixel.1),
+        ] {
+            let own = match given {
+                None => true,
+                Some(0.0) => grid.zero_pitch_default,
+                Some(p) => p == own,
+            };
+            if takes(key) && !own {
+                return Err(differs(key));
+            }
+        }
+        if takes("max_shape") && d.max_shape.is_some_and(|s| s != grid.max_shape) {
+            return Err(differs("max_shape"));
+        }
+        // the factory bins whatever class it built, after the constructor
+        let binned = match d.binning {
+            Some(b) if b != grid.binning && grid.binnable => grid.binned(b),
+            Some(b) if b != grid.binning => return Err(differs("binning")),
+            _ => grid,
+        };
+        for (key, value) in &d.other {
+            let own = match (key.as_str(), grid.module_size) {
+                ("sensor", _) => true,
+                ("module_size", Some(m)) => pair(key, value).ok() == Some((m.0 as u64, m.1 as u64)),
+                _ => false,
+            };
+            if takes(key) && !own {
+                return Err(differs(key));
+            }
+        }
+        let orientation = match d.orientation.filter(|_| takes("orientation")) {
+            Some(o) => o,
+            None => Orientation::try_from(grid.orientation)?,
+        };
+        Ok((binned, orientation))
+    }
+}
+
+impl Poni {
+    /// The detector of pixel `edges` along pyFAI's axes 1 and 2, metres
+    /// from pyFAI's edge 0, in place of the pitches and shape; the image
+    /// runs against an axis the orientation flips.
+    fn edges_detector(
+        &self,
+        edges: [Vec<f64>; 2],
+        lab: &LabAxes,
+    ) -> Result<PixelDetector, PoniError> {
+        let r = lab.axes * rotation(self.rot1.0, self.rot2.0, self.rot3.0);
+        // pyFAI's edge at the image's edge 0, and the image's axis
+        let axis = |k: usize, e: &[f64], flip: bool| -> Result<(f64, PixelAxis), Error> {
+            let n = e.len() - 1;
+            let (start, sign) = if flip { (e[n], -1.0) } else { (e[0], 1.0) };
+            let image = (0..=n)
+                .map(|j| sign * (e[if flip { n - j } else { j }] - start))
+                .collect();
+            let dir = Unit::new_normalize(r.column(k) * sign);
+            Ok((start, PixelAxis::edges(dir, image)?))
+        };
+        let [flip1, flip2] = self.orientation.flips();
+        let (start1, slow) = axis(0, &edges[0], flip1)?;
+        let (start2, fast) = axis(1, &edges[1], flip2)?;
+        let corner = r * Vector3::new(start1 - self.poni1, start2 - self.poni2, self.dist);
+        let shape = (slow.pixel_count(), fast.pixel_count());
+        let module = Module::new((0, 0), corner.into(), slow, fast)?;
+        Ok(PixelDetector::from_modules(shape, vec![module])?)
     }
 }
 
@@ -509,7 +716,6 @@ mod tests {
     use nalgebra::Point3;
 
     use super::*;
-    use crate::Module;
 
     #[test]
     fn orientation_numbers_are_1_to_4() {
@@ -784,7 +990,7 @@ mod tests {
              \"pixel2\": 2e-4, \"max_shape\": [10, 20], \"binning\": [2, 2]}\n",
         )
         .unwrap();
-        assert_eq!(f.detector.binning, (2, 2));
+        assert_eq!(f.detector.binning, Some((2, 2)));
         assert_eq!(f.poni(), Err(PoniError::Unsupported("binning")));
     }
 

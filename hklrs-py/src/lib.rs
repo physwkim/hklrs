@@ -965,8 +965,8 @@ impl PyPoni {
 }
 
 /// A `.poni` file as pyFAI reads it, lengths in metres and rotations in
-/// degrees. `detector` is pyFAI's detector name; `orientation` is None where
-/// the file gives none, which is 3 for pyFAI's generic `Detector`.
+/// degrees. `detector_name` is pyFAI's detector name; `orientation` is None
+/// where the file gives none, which is 3 for pyFAI's generic `Detector`.
 #[pyclass(name = "PoniFile", module = "hklrs.poni", frozen)]
 struct PyPoniFile(poni::PoniFile);
 
@@ -974,9 +974,22 @@ struct PyPoniFile(poni::PoniFile);
 impl PyPoniFile {
     /// The PONI of pyFAI's generic flat detector. A named detector takes its
     /// pixels, shape and default orientation from pyFAI, so it is a
-    /// ValueError here, as are a spline, parallax and binning.
+    /// ValueError here (`detector` builds it), as are a spline, parallax and
+    /// binning.
     fn poni(&self) -> PyResult<PyPoni> {
         self.0.poni().map(PyPoni).map_err(poni_err)
+    }
+
+    /// The detector pyFAI builds from the file, axis 3 along `beam` and axis
+    /// 1 along the part of `up` normal to it: the generic one as `poni`
+    /// gives it, or a named class with pyFAI's pixels, shape, orientation
+    /// and mask, binned by the file's `binning`. A class or configuration
+    /// hklrs does not model, or that pyFAI cannot build, is a ValueError.
+    fn detector(&self, beam: [f64; 3], up: [f64; 3]) -> PyResult<PyPixelDetector> {
+        self.0
+            .detector(&lab_axes(beam, up)?)
+            .map(PyPixelDetector)
+            .map_err(poni_err)
     }
 
     /// `poni_version` as pyFAI raises it from the file's contents.
@@ -986,7 +999,7 @@ impl PyPoniFile {
     }
 
     #[getter]
-    fn detector(&self) -> &str {
+    fn detector_name(&self) -> &str {
         &self.0.detector.name
     }
 
@@ -1011,7 +1024,7 @@ impl PyPoniFile {
     }
 
     #[getter]
-    fn binning(&self) -> (u64, u64) {
+    fn binning(&self) -> Option<(u64, u64)> {
         self.0.detector.binning
     }
 
