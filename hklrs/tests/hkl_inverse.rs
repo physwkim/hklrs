@@ -1,9 +1,9 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
 //! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C, the SOLEIL SIXS MED
 //! presets, SOLEIL MARS, PETRA3 P23 4C, PETRA3 P23 6C (through the E6C arms,
-//! which `petra3_p23_6c` re-exports), SOLEIL SIRIUS TURRET, APS POLAR and
-//! PETRA3 P09 EH2 but their "zaxis + beta-fixed", which hkl solves over other
-//! axes (see `aps_04id_polar::zaxis_beta_fixed`).
+//! which `petra3_p23_6c` re-exports), SOLEIL SIRIUS TURRET, SOLEIL NANOSCOPIUM
+//! ROBOT, APS POLAR and PETRA3 P09 EH2 but their "zaxis + beta-fixed", which
+//! hkl solves over other axes (see `aps_04id_polar::zaxis_beta_fixed`).
 //!
 //! Per case: the mode writes hkl's axes, its slits hkl's fitted axis; every
 //! hkl solution within VIOLATION
@@ -24,7 +24,8 @@ mod inverse_check;
 
 use hklrs::inverse::{
     aps_04id_polar as polar, e4c, e6c, esrf_bm28_psic, k4c, k6c, petra3_p09_eh2 as p09,
-    petra3_p23_4c as p23_4c, soleil_sirius_turret, soleil_sixs_med, zaxis,
+    petra3_p23_4c as p23_4c, soleil_nanoscopium_robot as nanoscopium, soleil_sirius_turret,
+    soleil_sixs_med, zaxis,
 };
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
@@ -126,6 +127,9 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         "delta_fixed" => soleil_sixs_med::delta_fixed(geo),
         "gamma_fixed" => soleil_sixs_med::gamma_fixed(geo),
         "lifting_detector_thetah" => soleil_sirius_turret::lifting_detector_thetah(geo),
+        "lifting detector rz" => nanoscopium::lifting_detector_rz(geo),
+        "lifting detector rs" => nanoscopium::lifting_detector_rs(geo),
+        "lifting detector rx" => nanoscopium::lifting_detector_rx(geo),
         "zaxis + alpha-fixed" if p09 => p09::zaxis_alpha_fixed(geo),
         "zaxis + alpha=beta" if p09 => p09::zaxis_alpha_eq_beta(geo),
         "4-circles bissecting horizontal" if p09 => p09::bissecting_horizontal(geo),
@@ -541,4 +545,7 @@ golden! {
     p23_6c_psi_constant_horizontal: "PETRA3 P23 6C" "psi_constant_horizontal",
     p23_6c_constant_mu_horizontal: "PETRA3 P23 6C" "constant_mu_horizontal",
     sirius_turret_lifting_detector_thetah: "SOLEIL SIRIUS TURRET" "lifting_detector_thetah",
+    nanoscopium_lifting_detector_rz: "SOLEIL NANOSCOPIUM ROBOT" "lifting detector rz",
+    nanoscopium_lifting_detector_rs: "SOLEIL NANOSCOPIUM ROBOT" "lifting detector rs",
+    nanoscopium_lifting_detector_rx: "SOLEIL NANOSCOPIUM ROBOT" "lifting detector rx",
 }
