@@ -17,7 +17,7 @@ pub mod xu;
 
 pub use detector::PixelDetector;
 pub use error::Error;
-pub use forward::{Forward, Scattering, angle_between, forward, scattering};
+pub use forward::{Forward, Scattering, angle_between, forward, scattering, scattering_at};
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
 pub use inverse::{Equation, Eulerian, InverseError, InverseRequest, Mode, Picker, Slits, Target};
 pub use lattice::Lattice;
