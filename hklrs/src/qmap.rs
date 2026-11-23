@@ -14,13 +14,12 @@ use crate::{
     scattered_direction, scattering_at,
 };
 
-/// Three contiguous f64 planes (x, y, z), row-major (slow, fast).
+/// Three contiguous f64 planes (x, y, z) of one shape.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Planes {
-    shape: (usize, usize),
-    pub x: Vec<f64>,
-    pub y: Vec<f64>,
-    pub z: Vec<f64>,
+    x: Image<f64>,
+    y: Image<f64>,
+    z: Image<f64>,
 }
 
 /// Q in the sample frame per pixel, Å⁻¹ with 2π.
@@ -28,14 +27,32 @@ pub type QMap = Planes;
 
 impl Planes {
     pub fn shape(&self) -> (usize, usize) {
-        self.shape
+        self.x.shape()
+    }
+
+    pub fn x(&self) -> &Image<f64> {
+        &self.x
+    }
+
+    pub fn y(&self) -> &Image<f64> {
+        &self.y
+    }
+
+    pub fn z(&self) -> &Image<f64> {
+        &self.z
+    }
+
+    pub fn into_planes(self) -> [Image<f64>; 3] {
+        [self.x, self.y, self.z]
     }
 
     /// The vector at pixel (slow, fast); panics outside the shape.
     pub fn get(&self, slow: usize, fast: usize) -> Vector3<f64> {
-        assert!(slow < self.shape.0 && fast < self.shape.1);
-        let i = slow * self.shape.1 + fast;
-        Vector3::new(self.x[i], self.y[i], self.z[i])
+        Vector3::new(
+            self.x.get(slow, fast),
+            self.y.get(slow, fast),
+            self.z.get(slow, fast),
+        )
     }
 }
 
@@ -55,10 +72,14 @@ fn fill<T: Copy + Send, const N: usize>(
     detector: &PixelDetector,
     blank: T,
     f: impl Fn(At, &Vector3<f64>) -> Result<[T; N], Error> + Sync,
-) -> Result<[Vec<T>; N], Error> {
+) -> Result<[Image<T>; N], Error> {
     let (slow, fast) = detector.shape();
-    let mut planes: [Vec<T>; N] = std::array::from_fn(|_| vec![blank; slow * fast]);
-    let mut chunks: Vec<_> = planes.iter_mut().map(|p| p.chunks_mut(fast)).collect();
+    let mut planes: [Image<T>; N] =
+        std::array::from_fn(|_| Image::from_fn((slow, fast), |_, _| blank));
+    let mut chunks: Vec<_> = planes
+        .iter_mut()
+        .map(|p| p.data_mut().chunks_mut(fast))
+        .collect();
     let rows: Vec<[&mut [T]; N]> = (0..slow)
         .map(|_| std::array::from_fn(|k| chunks[k].next().expect("one chunk per row")))
         .collect();
@@ -86,8 +107,8 @@ fn fill<T: Copy + Send, const N: usize>(
     Ok(planes)
 }
 
-fn planes3(shape: (usize, usize), [x, y, z]: [Vec<f64>; 3]) -> Planes {
-    Planes { shape, x, y, z }
+fn planes3([x, y, z]: [Image<f64>; 3]) -> Planes {
+    Planes { x, y, z }
 }
 
 /// Q in the sample frame for every pixel at axis `values` (axis order,
@@ -104,7 +125,7 @@ pub fn q_map(
             .q_sample
             .into())
     })?;
-    Ok(planes3(detector.shape(), planes))
+    Ok(planes3(planes))
 }
 
 /// Pixel positions relative to the sample, lab frame, metres: the
@@ -117,29 +138,14 @@ pub fn detector_positions(
 ) -> Result<Planes, Error> {
     let poses = geometry.poses(values)?;
     let planes = fill(&poses, detector, 0.0, |_, p| Ok((*p).into()))?;
-    Ok(planes3(detector.shape(), planes))
+    Ok(planes3(planes))
 }
 
-/// One weight per pixel, row-major (slow, fast): a positive finite
-/// [`Weight`], or the reason the pixel has none, so a masked pixel holds no
-/// number to read.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Weights {
-    shape: (usize, usize),
-    pub data: Vec<Result<Weight, Masked>>,
-}
+/// One weight per pixel: a positive finite [`Weight`], or the reason the
+/// pixel has none, so a masked pixel holds no number to read.
+pub type Weights = Image<Result<Weight, Masked>>;
 
 impl Weights {
-    pub fn shape(&self) -> (usize, usize) {
-        self.shape
-    }
-
-    /// The weight at pixel (slow, fast); panics outside the shape.
-    pub fn get(&self, slow: usize, fast: usize) -> Result<Weight, Masked> {
-        assert!(slow < self.shape.0 && fast < self.shape.1);
-        self.data[slow * self.shape.1 + fast]
-    }
-
     /// Weights given as numbers: where `reasons`, of the shape of `values`,
     /// has a [`Masked`] the pixel has that reason, elsewhere its value,
     /// which must be positive and finite or the pixel is [`Masked::Opaque`].
@@ -148,28 +154,17 @@ impl Weights {
         reasons: &Image<Option<Masked>>,
     ) -> Result<Self, Error> {
         reasons.check("weight reasons", values.shape())?;
-        let data = values
-            .data()
-            .iter()
-            .zip(reasons.data())
-            .map(|(&v, r)| match r {
-                Some(m) => Err(*m),
-                None => Weight::new(v, Masked::Opaque),
-            })
-            .collect();
-        Ok(Self {
-            shape: values.shape(),
-            data,
-        })
+        Ok(Image::from_fn(values.shape(), |s, f| {
+            match reasons.get(s, f) {
+                Some(m) => Err(m),
+                None => Weight::new(values.get(s, f), Masked::Opaque),
+            }
+        }))
     }
 }
 
 /// Every pixel overwrites it.
 const BLANK: Result<Weight, Masked> = Err(Masked::Opaque);
-
-fn weights(shape: (usize, usize), [data]: [Vec<Result<Weight, Masked>>; 1]) -> Weights {
-    Weights { shape, data }
-}
 
 /// Solid angle of each pixel, sr: `|A · k̂f| / |p|²`, with `A` the pixel's
 /// area vector (its widths along the module axes times `slow × fast`)
@@ -186,14 +181,14 @@ pub fn solid_angle(
         return Err(Error::NoPixelArea);
     }
     let poses = geometry.poses(values)?;
-    let data = fill(&poses, detector, BLANK, |at, p| {
+    let [weights] = fill(&poses, detector, BLANK, |at, p| {
         let kf = scattered_direction(p)?;
         let (ls, lf) = at.local;
         let area = modules[at.module].area(ls, lf);
         let omega = (poses.detector.rotation * area).dot(&kf).abs() / p.norm_squared();
         Ok([Weight::new(omega, Masked::EdgeOn)])
     })?;
-    Ok(weights(detector.shape(), data))
+    Ok(weights)
 }
 
 /// Polarisation factor of the scattered intensity for a beam whose electric
@@ -231,13 +226,13 @@ pub fn polarisation(
     }
     let e = e / norm;
     let across = ki.cross(&e);
-    let data = fill(&poses, detector, BLANK, |_, p| {
+    let [weights] = fill(&poses, detector, BLANK, |_, p| {
         let kf = scattered_direction(p)?.into_inner();
         let p = 0.5 * (1.0 + f) * (1.0 - e.dot(&kf).powi(2))
             + 0.5 * (1.0 - f) * (1.0 - across.dot(&kf).powi(2));
         Ok([Weight::new(p, Masked::Extinct)])
     })?;
-    Ok(weights(detector.shape(), data))
+    Ok(weights)
 }
 
 /// Absorption weight per pixel (design §5.1): the sample slab's times the
@@ -270,13 +265,13 @@ pub fn absorption<A: Attenuation>(
         .iter()
         .map(|m| path.oriented(m.normal().map(|n| poses.detector.rotation * n)))
         .collect::<Result<Vec<_>, _>>()?;
-    let data = fill(&poses, detector, BLANK, |at, p| {
+    let [weights] = fill(&poses, detector, BLANK, |at, p| {
         let kf = scattered_direction(p)?;
         Ok([sample
             .weight(&kf)
             .and_then(|a| a.times(paths[at.module].weight(&kf, p.norm())?))])
     })?;
-    Ok(weights(detector.shape(), data))
+    Ok(weights)
 }
 
 #[cfg(test)]
@@ -567,7 +562,7 @@ mod tests {
         )
         .unwrap();
         let w = solid_angle(&g, &[0.0], &d).unwrap();
-        assert!(w.data.iter().all(|w| *w == Err(Masked::EdgeOn)), "{w:?}");
+        assert!(w.data().iter().all(|w| *w == Err(Masked::EdgeOn)), "{w:?}");
     }
 
     fn per_metre(v: f64) -> PerMetre {
@@ -636,7 +631,7 @@ mod tests {
         let (g, d) = (geometry(), detector());
         let every = |a: &Absorber<PerMetre>, want: Masked| {
             let w = absorption(&g, &VALUES, wavelength(), &d, a).unwrap();
-            assert!(w.data.iter().all(|r| *r == Err(want)), "{want:?}: {w:?}");
+            assert!(w.data().iter().all(|r| *r == Err(want)), "{want:?}: {w:?}");
         };
         let lit = Slab::new(face([0.0, 1.0, 0.0]), 1e-4).unwrap();
         let unlit = Slab::new(face([0.0, -1.0, 0.0]), 1e-4).unwrap();
@@ -739,7 +734,7 @@ mod tests {
         for d in [point_at([1.0, -0.03, -0.07]), row] {
             assert!(d.modules().iter().all(|m| m.normal().is_none()));
             let w = absorption(&g, &VALUES, wavelength(), &d, &air).unwrap();
-            assert!(w.data.iter().all(Result::is_ok), "{w:?}");
+            assert!(w.data().iter().all(Result::is_ok), "{w:?}");
             for detector in [
                 DetectorPath {
                     window: Some(Layer::new(per_metre(1e3), 25e-6).unwrap()),
@@ -788,7 +783,7 @@ mod tests {
         for angstrom in [1.54, 1.0] {
             let wl = Wavelength::new(angstrom).unwrap();
             let w = absorption(&g, &VALUES, wl, &d, &a).unwrap();
-            assert!(w.data.iter().all(Result::is_ok), "{w:?}");
+            assert!(w.data().iter().all(Result::is_ok), "{w:?}");
             want.extend([wl.energy().kev(); 4]);
         }
         assert_eq!(*r.0.borrow(), want);

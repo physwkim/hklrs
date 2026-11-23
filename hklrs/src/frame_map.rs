@@ -100,7 +100,7 @@ impl FrameMap {
         scalars: &FrameScalars,
     ) -> Result<MappedFrame, Error> {
         let values = self.geometry.values_from_degrees(readbacks)?;
-        let pixels = self.normaliser.normalise(raw, scalars, &[])?.data;
+        let pixels = self.normaliser.normalise(raw, scalars, &[])?.into_data();
         let points =
             self.projection
                 .project(&self.geometry, &values, wavelength, &self.detector)?;

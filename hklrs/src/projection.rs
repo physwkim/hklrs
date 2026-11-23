@@ -12,7 +12,7 @@ use nalgebra::{Unit, Vector3};
 
 use crate::grid::Projected;
 use crate::{
-    Error, Geometry, Orientation, PixelDetector, Planes, Sample, Wavelength, angle_between,
+    Error, Geometry, Image, Orientation, PixelDetector, Planes, Sample, Wavelength, angle_between,
     detector_positions, q_map,
 };
 
@@ -68,7 +68,7 @@ impl Projection {
             }
             Self::QSample => {
                 let q = q_map(geometry, values, wavelength, detector)?;
-                vec![q.x, q.y, q.z]
+                q.into_planes().map(Image::into_data).into()
             }
             Self::Hkl(sample) => {
                 // U once per frame, not per pixel; hkl() is forward's kernel
@@ -107,8 +107,9 @@ impl Projection {
 
 /// `f` of every pixel's vector, one plane per output coordinate.
 fn map<const N: usize>(planes: &Planes, f: impl Fn(Vector3<f64>) -> [f64; N]) -> Vec<Vec<f64>> {
-    let mut out: Vec<Vec<f64>> = (0..N).map(|_| Vec::with_capacity(planes.x.len())).collect();
-    for ((&x, &y), &z) in planes.x.iter().zip(&planes.y).zip(&planes.z) {
+    let [x, y, z] = [planes.x(), planes.y(), planes.z()].map(Image::data);
+    let mut out: Vec<Vec<f64>> = (0..N).map(|_| Vec::with_capacity(x.len())).collect();
+    for ((&x, &y), &z) in x.iter().zip(y).zip(z) {
         for (plane, v) in out.iter_mut().zip(f(Vector3::new(x, y, z))) {
             plane.push(v);
         }

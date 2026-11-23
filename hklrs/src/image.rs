@@ -65,6 +65,14 @@ impl<T> Image<T> {
     }
 }
 
+impl<T: Copy> Image<T> {
+    /// The value at pixel (slow, fast); panics outside the shape.
+    pub fn get(&self, slow: usize, fast: usize) -> T {
+        assert!(slow < self.shape.0 && fast < self.shape.1);
+        self.data[slow * self.shape.1 + fast]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +109,14 @@ mod tests {
             image,
             Image::new((2, 3), vec![0, 1, 2, 10, 11, 12]).unwrap()
         );
+        assert_eq!(image.get(1, 2), 12);
+    }
+
+    /// (0, 3) is the fourth value of a (2, 3) image, but outside its shape.
+    #[test]
+    #[should_panic]
+    fn get_outside_the_shape_panics() {
+        Image::from_fn((2, 3), |s, f| 10 * s + f).get(0, 3);
     }
 
     #[test]
