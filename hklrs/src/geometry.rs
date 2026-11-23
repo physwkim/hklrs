@@ -2,6 +2,8 @@
 //! stack of indices into it. An axis listed in both stacks (hkl ZAXIS `mu`,
 //! PETRA3 P23 `omega_t`) is one definition with one value.
 
+use std::f64::consts::{PI, TAU};
+
 use nalgebra::{Isometry3, Point3, Translation3, Unit, UnitQuaternion, Vector3};
 
 use crate::{Error, units::Deg};
@@ -25,6 +27,10 @@ pub enum AxisKind {
 pub struct Axis {
     name: String,
     kind: AxisKind,
+    min: f64,
+    max: f64,
+    /// Some exactly for a rotation.
+    cut: Option<f64>,
 }
 
 impl Axis {
@@ -41,6 +47,38 @@ impl Axis {
             self.kind,
             AxisKind::Rotation { .. } | AxisKind::RotationAbout { .. }
         )
+    }
+
+    /// Inclusive range `(min, max)`, an infinite end unbounded; unbounded by
+    /// default.
+    pub fn limits(&self) -> (f64, f64) {
+        (self.min, self.max)
+    }
+
+    pub fn within_limits(&self, value: f64) -> bool {
+        self.min <= value && value <= self.max
+    }
+
+    /// A rotation's values are represented in [cut, cut + 2π); −π by
+    /// default. `None` for any other axis.
+    pub fn cut_point(&self) -> Option<f64> {
+        self.cut
+    }
+
+    /// The equivalent of `value` in this rotation's cut window, `value`
+    /// itself when already there or when the axis is not a rotation.
+    pub fn wrap(&self, value: f64) -> f64 {
+        let Some(cut) = self.cut else {
+            return value;
+        };
+        let end = cut + TAU;
+        if (cut..end).contains(&value) {
+            return value;
+        }
+        // Monotonic rounding keeps cut + r in [cut, end]; it reaches end
+        // only for a value a rounding below the cut.
+        let w = cut + (value - cut).rem_euclid(TAU);
+        if w < end { w } else { cut }
     }
 
     /// The rigid motion this axis applies at `value`.
@@ -136,10 +174,15 @@ impl GeometryBuilder {
                 return self;
             }
             None => {
-                self.axes.push(Axis {
+                let mut axis = Axis {
                     name: name.to_owned(),
                     kind,
-                });
+                    min: f64::NEG_INFINITY,
+                    max: f64::INFINITY,
+                    cut: None,
+                };
+                axis.cut = axis.is_rotation().then_some(-PI);
+                self.axes.push(axis);
                 self.axes.len() - 1
             }
         };
@@ -281,6 +324,42 @@ impl Geometry {
             .ok_or_else(|| Error::UnknownAxis {
                 name: name.to_owned(),
             })
+    }
+
+    /// Limits axis `name` to `[min, max]` (rad or m; an infinite end is
+    /// unbounded). The inverse rejects a solution that takes a written axis
+    /// outside its limits, after wrapping it to its cut point.
+    pub fn set_limits(&mut self, name: &str, min: f64, max: f64) -> Result<(), Error> {
+        let i = self.axis_index(name)?;
+        if min.is_nan() || max.is_nan() || min > max {
+            return Err(Error::AxisLimits {
+                name: name.to_owned(),
+                min,
+                max,
+            });
+        }
+        (self.axes[i].min, self.axes[i].max) = (min, max);
+        Ok(())
+    }
+
+    /// Represents rotation `name` in [cut, cut + 2π) rad.
+    pub fn set_cut_point(&mut self, name: &str, cut: f64) -> Result<(), Error> {
+        let i = self.axis_index(name)?;
+        if !cut.is_finite() {
+            return Err(Error::CutPoint {
+                name: name.to_owned(),
+                cut,
+            });
+        }
+        match &mut self.axes[i].cut {
+            Some(c) => {
+                *c = cut;
+                Ok(())
+            }
+            None => Err(Error::NoCutPoint {
+                name: name.to_owned(),
+            }),
+        }
     }
 
     /// Sample stack, outermost first, as indices into [`Geometry::axes`].
@@ -516,6 +595,75 @@ mod tests {
             })
         );
         assert_eq!(g.poses(&[f64::NAN]), Err(Error::NonFinite { index: 0 }));
+    }
+
+    fn rotation_and_translation() -> Geometry {
+        Geometry::builder("t")
+            .sample_rotation("r", [0.0, 0.0, 1.0])
+            .sample_translation("t", [1.0, 0.0, 0.0])
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn wrap_is_the_identity_on_the_window_and_half_open() {
+        let mut g = rotation_and_translation();
+        let r = &g.axes()[0];
+        assert_eq!(r.cut_point(), Some(-PI));
+        assert_eq!(r.wrap(-PI), -PI);
+        assert_eq!(r.wrap(PI), -PI);
+        let inside = 0.1 + 1e-17;
+        assert_eq!(r.wrap(inside).to_bits(), inside.to_bits());
+        assert!((r.wrap(3.5) - (3.5 - TAU)).abs() <= 1e-15);
+        assert!((r.wrap(-7.0) - (-7.0 + TAU)).abs() <= 1e-15);
+        // One ulp below the cut must not land on the open end.
+        let below = f64::from_bits((-PI).to_bits() + 1);
+        assert!(below < -PI);
+        let w = r.wrap(below);
+        assert!((-PI..PI).contains(&w), "{w}");
+        g.set_cut_point("r", 0.0).unwrap();
+        let r = &g.axes()[0];
+        assert_eq!(r.wrap(0.0), 0.0);
+        assert_eq!(r.wrap(TAU), 0.0);
+        assert!((r.wrap(-0.5) - (TAU - 0.5)).abs() <= 1e-15);
+        let t = &g.axes()[1];
+        assert_eq!(t.cut_point(), None);
+        assert_eq!(t.wrap(9.0), 9.0);
+    }
+
+    #[test]
+    fn limits_are_inclusive_and_checked() {
+        let mut g = rotation_and_translation();
+        assert_eq!(g.axes()[0].limits(), (f64::NEG_INFINITY, f64::INFINITY));
+        g.set_limits("t", -0.5, 0.5).unwrap();
+        let t = &g.axes()[1];
+        assert!(t.within_limits(-0.5) && t.within_limits(0.5));
+        assert!(!t.within_limits(f64::from_bits(0.5f64.to_bits() + 1)));
+        g.set_limits("r", 1.0, 1.0).unwrap();
+        g.set_limits("r", f64::NEG_INFINITY, 2.0).unwrap();
+        assert!(g.axes()[0].within_limits(-1e300));
+        for (min, max) in [(1.0, 0.0), (f64::NAN, 1.0), (0.0, f64::NAN)] {
+            assert!(matches!(
+                g.set_limits("r", min, max),
+                Err(Error::AxisLimits { .. })
+            ));
+        }
+        assert_eq!(g.axes()[0].limits(), (f64::NEG_INFINITY, 2.0));
+        assert_eq!(
+            g.set_limits("x", 0.0, 1.0),
+            Err(Error::UnknownAxis { name: "x".into() })
+        );
+        for cut in [f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                g.set_cut_point("r", cut),
+                Err(Error::CutPoint { .. })
+            ));
+        }
+        assert_eq!(
+            g.set_cut_point("t", 0.0),
+            Err(Error::NoCutPoint { name: "t".into() })
+        );
+        assert_eq!(g.axes()[0].cut_point(), Some(-PI));
     }
 
     #[test]

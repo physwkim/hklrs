@@ -4,10 +4,12 @@
 //! from the same angles with the correct B.
 
 mod common;
+mod lattice_check;
 
-use common::{canonical_to_user, f, hkl_b_correct, lattice, load, mat, vec3};
+use common::{canonical_to_user, f, load, mat, vec3};
 use hklrs::nalgebra::{Matrix3, Point3};
 use hklrs::{Geometry, Orientation, Reflection, Sample, Wavelength, presets};
+use lattice_check::{hkl_b_correct, lattice};
 use serde_json::Value;
 
 /// hkl's solver stops at this residual, so U recovered from its angles is

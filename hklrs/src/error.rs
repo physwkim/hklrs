@@ -38,4 +38,10 @@ pub enum Error {
     BraggImpossible { ratio: f64 },
     #[error("unknown geometry preset {name:?}")]
     UnknownPreset { name: String },
+    #[error("axis {name:?} limits [{min}, {max}] are not ordered numbers")]
+    AxisLimits { name: String, min: f64, max: f64 },
+    #[error("axis {name:?} cut point {cut} is not finite")]
+    CutPoint { name: String, cut: f64 },
+    #[error("axis {name:?} is not a rotation and has no cut point")]
+    NoCutPoint { name: String },
 }

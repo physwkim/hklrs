@@ -10,12 +10,14 @@
 //! along the ray (CRISTAL K4C `dtx`, PYFAI `sdd`) changes nothing in either.
 
 mod common;
+mod lattice_check;
 
-use common::{canonical_to_user, f, hkl_b_correct, lattice, load, mat, vec3};
+use common::{canonical_to_user, f, load, mat, vec3};
 use hklrs::nalgebra::Vector3;
 use hklrs::{
     AxisKind, Orientation, PixelDetector, Sample, Wavelength, forward, presets, scattering,
 };
+use lattice_check::{hkl_b_correct, lattice};
 use serde_json::Value;
 
 /// Translations that move the detector point off its ray from the sample.

@@ -10,7 +10,10 @@ forward hkl, and the residuals of the mode's own constraint.
 The C solver restarts with libc rand(); srand() is seeded per call through
 ctypes so the output is reproducible.
 Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c, -e6c.c, -k4c.c,
--k6c.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction, _psi_constant_*).
+-k6c.c, -zaxis.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
+_psi_constant_*); the ESRF BM28 and ID01 PSIC modes only hold axes. Only
+hkl's own GError is recorded as a case error; a failure of the recording
+itself raises.
 """
 import ctypes
 import json
@@ -22,7 +25,7 @@ import gi
 import numpy as np
 
 gi.require_version("Hkl", "5.0")
-from gi.repository import Hkl  # noqa: E402
+from gi.repository import GLib, Hkl  # noqa: E402
 
 SEED = 20260301
 USER = Hkl.UnitEnum.USER
@@ -33,7 +36,8 @@ WL = 1.54
 N_TARGETS = 40
 N_UNREACH = 4
 TOL = 1e-6
-GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C"]
+GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
+              "ESRF ID01 PSIC"]
 PARAM_MODES = ("double_diffraction", "psi_constant", "constant_incidence")
 UNIT = {"Degree": ("rot", 1.0), "Milli Radian": ("rot", math.pi / 180.0 * 1000.0),
         "Milli Meter": ("trans", 1.0), "Meter": ("trans", 1e-3)}
@@ -77,7 +81,8 @@ class Ctx:
         self.el = self.fac.create_new_engine_list()
         self.el.init(self.geo, self.det, self.smp)
         self.eng = self.el.engine_get_by_name("hkl")
-        self.psi_eng = self.el.engine_get_by_name("psi")
+        engines = [e.name_get() for e in self.el.engines_get()]
+        self.psi_eng = self.el.engine_get_by_name("psi") if "psi" in engines else None
         self.ub = np.array(mat(self.smp.UB_get()))
         self.ranges = {n: [v / UNIT[u][1] for v in self.geo.axis_get(n).min_max_get(USER)]
                        for n, u in zip(self.names, self.units)}
@@ -202,12 +207,14 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable):
     if kappa:
         om, chi, phi = kappa_derived([n["komega"], n["kappa"], n["kphi"]])
     else:
-        om, chi, phi = n["omega"], n["chi"], n["phi"]
+        om, chi, phi = (n.get(a) for a in ("omega", "chi", "phi"))
     pv = dict(zip(ctx.eng.parameters_names_get(), par))
     horiz = mode.endswith("horizontal")
     tth = n["tth"] if g in ("E4CV", "E4CH", "K4CV") else n["delta"]
     if mode in ("bissector", "bissector_vertical"):
         r["tth-2*omega"] = wrap(tth - 2 * om)  # e4c.c:38, e6c.c:61, k4c.c:68, k6c.c:204
+    if mode == "reflectivity":
+        r["mu-gamma"] = n["mu"] - n["gamma"]  # zaxis.c:60, unwrapped as hkl solves it
     if mode == "bissector_horizontal":
         r["omega mod 180"] = wrap(om, 180.0)  # e6c.c:50, k6c.c:70
         r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # e6c.c:51, k6c.c:80
@@ -255,23 +262,24 @@ def one_case(ctx, mode, params, target, start, unreachable, c_seed):
         case["writable_axes"] = list(ctx.eng.axis_names_get(Hkl.EngineAxisNamesGet.WRITE))
         LIBC.srand(c_seed)
         sols = ctx.eng.pseudo_axis_values_set([float(x) for x in target], USER)
-        items = sols.items() if sols is not None else []
-        case["n_solutions"] = len(items)
-        out = []
-        for it in items:
-            gs = it.geometry_get().copy()
-            canon = ctx.to_canon(list(gs.axis_values_get(USER)))
-            ent = {"axes": named(ctx, canon)}
-            ent["hkl_engine"] = ctx.forward_hkl(canon)
-            ent["hkl_numpy"] = ctx.forward_numpy(gs)
-            ent["hkl_miss"] = float(np.abs(np.array(ent["hkl_engine"]) - np.array(target)).max())
-            ent["constraint_resid"] = constraints(ctx, mode, params, start, canon, gs, init_geo, case["writable_axes"])
-            out.append(ent)
-        case["solutions"] = out
-    except Exception as e:  # recorded, never dropped
-        case["error"] = f"{type(e).__name__}: {e}"
+    except GLib.Error as e:  # recorded, never dropped
+        case["error"] = f"GError: {e}"
         case["n_solutions"] = 0
         case["solutions"] = []
+        return case
+    items = sols.items() if sols is not None else []
+    case["n_solutions"] = len(items)
+    out = []
+    for it in items:
+        gs = it.geometry_get().copy()
+        canon = ctx.to_canon(list(gs.axis_values_get(USER)))
+        ent = {"axes": named(ctx, canon)}
+        ent["hkl_engine"] = ctx.forward_hkl(canon)
+        ent["hkl_numpy"] = ctx.forward_numpy(gs)
+        ent["hkl_miss"] = float(np.abs(np.array(ent["hkl_engine"]) - np.array(target)).max())
+        ent["constraint_resid"] = constraints(ctx, mode, params, start, canon, gs, init_geo, case["writable_axes"])
+        out.append(ent)
+    case["solutions"] = out
     return case
 
 
