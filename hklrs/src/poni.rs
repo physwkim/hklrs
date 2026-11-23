@@ -31,8 +31,6 @@ pub enum PoniError {
     Orientation(u32),
     #[error("the up direction is along the beam (sin of their angle = {sin:e})")]
     UpAlongBeam { sin: f64 },
-    #[error("a PONI needs two pixels along each axis to read the pitch, got {slow}x{fast}")]
-    TooFewPixels { slow: usize, fast: usize },
     #[error("the pixel axes are not perpendicular (cos of their angle = {cos:e})")]
     Skewed { cos: f64 },
     #[error("{key}: {value:?} is not what pyFAI reads there")]
@@ -209,24 +207,17 @@ impl Poni {
     /// The PONI of `detector` read with `orientation`; [`Poni::detector`]
     /// of it gives `detector` back. rot2 comes out in [−π/2, π/2] and rot1,
     /// rot3 in [−π, π]; at rot2 = ±π/2, where rot1 and rot3 turn about one
-    /// axis, rot3 takes what rot1 leaves.
+    /// axis, rot3 takes what rot1 leaves. A single row or column exports
+    /// with the step the detector was built with; a zero step, as
+    /// [`PixelDetector::point`] has, is refused.
     pub fn from_detector(
         detector: &PixelDetector,
         orientation: Orientation,
         lab: &LabAxes,
     ) -> Result<Poni, PoniError> {
         let shape = detector.shape();
-        if shape.0 < 2 || shape.1 < 2 {
-            return Err(PoniError::TooFewPixels {
-                slow: shape.0,
-                fast: shape.1,
-            });
-        }
-        let p00 = detector.pixel(0, 0)?.coords;
-        // across the whole detector, so the rounding of the positions is
-        // divided by n − 1
-        let e_slow = (detector.pixel(shape.0 - 1, 0)?.coords - p00) / (shape.0 - 1) as f64;
-        let e_fast = (detector.pixel(0, shape.1 - 1)?.coords - p00) / (shape.1 - 1) as f64;
+        let p00 = detector.origin().coords;
+        let (e_slow, e_fast) = (detector.e_slow(), detector.e_fast());
         let (pixel1, pixel2) = (e_slow.norm(), e_fast.norm());
         positive("pixel1", pixel1)?;
         positive("pixel2", pixel2)?;
@@ -656,22 +647,34 @@ mod tests {
     }
 
     #[test]
-    fn export_needs_two_pixels_per_axis_and_perpendicular_axes() {
+    fn export_takes_one_row_and_refuses_a_zero_step_or_skewed_axes() {
         let lab = oblique();
         let o = Orientation::BottomRight;
         let x = Vector3::new(1e-4, 0.0, 0.0);
         let y = Vector3::new(0.0, 1e-4, 0.0);
         let at = Vector3::new(0.3, 0.0, 0.0);
-        for shape in [(1, 5), (5, 1)] {
-            let det = PixelDetector::new(shape, at, x, y).unwrap();
-            assert_eq!(
-                Poni::from_detector(&det, o, &lab),
-                Err(PoniError::TooFewPixels {
-                    slow: shape.0,
-                    fast: shape.1
-                })
-            );
+        for shape in [(1, 5), (5, 1), (1, 1)] {
+            let det = PixelDetector::new(shape, at, x, y * 1.72).unwrap();
+            let back = Poni::from_detector(&det, o, &lab)
+                .unwrap()
+                .detector(&lab)
+                .unwrap();
+            let d = gap(&det, &back);
+            assert!(d <= 1e-14, "{shape:?}: {d} m");
+            // the step no pixel takes comes back too
+            let step = (back.e_slow() - x)
+                .norm()
+                .max((back.e_fast() - y * 1.72).norm());
+            assert!(step <= 1e-18, "{shape:?}: {step} m");
         }
+        let point = PixelDetector::point(Vector3::x_axis(), 0.3).unwrap();
+        assert_eq!(
+            Poni::from_detector(&point, o, &lab),
+            Err(PoniError::Core(Error::NotPositive {
+                what: "pixel1",
+                value: 0.0
+            }))
+        );
         let skewed = PixelDetector::new((5, 5), at, x, y + x * 1e-6).unwrap();
         assert!(matches!(
             Poni::from_detector(&skewed, o, &lab),
