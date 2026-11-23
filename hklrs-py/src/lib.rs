@@ -403,10 +403,11 @@ fn request<'a>(
 /// Every solution for `hkl` within the axis limits, nearest to `current`
 /// first. `current` and the results are all axes in geometry order, degrees
 /// / metres; written rotations are wrapped to their cut points and held
-/// axes are returned as given. Raises `Unreachable` when
-/// |Q| > 4π/λ·(1 + 1e-12), `NoSolution` when the mode has none, its
-/// subclass `NoSolutionInLimits` when every one is outside the limits, and
-/// the `InverseError` subclass named after any other failure.
+/// axes are returned as given, to the last bit of the degree to radian round
+/// trip. Raises `Unreachable` when |Q| > 4π/λ·(1 + 1e-12), `NoSolution` when
+/// the mode has none, its subclass `NoSolutionInLimits` when every one is
+/// outside the limits, and the `InverseError` subclass named after any other
+/// failure.
 #[pyfunction]
 fn solve(
     py: Python<'_>,
