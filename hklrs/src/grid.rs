@@ -1,5 +1,7 @@
-//! Gridding (design §7): per-pixel projection coordinates and intensities
-//! summed into a cube of photons and contributions.
+//! Gridding (design §7): per-pixel projection coordinates and normalised
+//! pixels summed into a cube of Σcounts, Σweight and contributions per bin,
+//! the sums a bin of a cut holds ([`crate::cut::Bin`]). A bin's intensity
+//! is their ratio Σcounts/Σweight ([`Cube::intensity`]).
 //!
 //! The one bin rule: on a dimension binned with width `step` from `anchor`,
 //! a value v falls in global bin k = ⌊(v − anchor)/step⌋, the half-open
@@ -9,11 +11,11 @@
 //! resolution whose edges go to the even neighbour.
 
 use crate::Error;
-use crate::absorption::{Masked, Weight};
+use crate::absorption::Masked;
+use crate::normalise::Normalised;
 
-/// Per-pixel weights as [`crate::Weights::data`] holds them: the intensity
-/// is divided by the weight, and a masked pixel contributes nothing.
-pub type PixelWeights<'a> = &'a [Result<Weight, Masked>];
+#[cfg(feature = "hdf5")]
+pub mod hdf5;
 
 /// The bin lattice of one dimension: width and the edge every other edge
 /// is an integer number of widths from.
@@ -200,64 +202,48 @@ fn check_len(what: &'static str, len: usize, expected: usize) -> Result<(), Erro
     }
 }
 
-/// Weight of pixel `i`: `None` when masked, 1 without weights.
-fn weight_at(weights: Option<PixelWeights>, i: usize) -> Option<f64> {
-    match weights {
-        None => Some(1.0),
-        Some(w) => w[i].ok().map(Weight::get),
-    }
-}
-
-fn check_weights(weights: Option<PixelWeights>, pixels: usize) -> Result<(), Error> {
-    match weights {
-        Some(w) => check_len("weights", w.len(), pixels),
-        None => Ok(()),
-    }
-}
-
-/// The unmasked pixels of one frame and their global bins, flattened
-/// pixel-major. Every coordinate is checked here, before any state changes.
-fn unmasked_bins(
-    binnings: &[Binning],
+/// The unmasked pixels of one frame with their positions, each with
+/// finite counts. A masked pixel adds nothing.
+fn unmasked(
     points: &Projected,
-    weights: Option<PixelWeights>,
-) -> Result<(Vec<usize>, Vec<i64>), Error> {
-    points.check_binnings(binnings)?;
-    check_weights(weights, points.pixels())?;
-    let mut pixels = Vec::new();
-    let mut bins = Vec::new();
-    let mut k = vec![0; binnings.len()];
-    for i in 0..points.pixels() {
-        if weight_at(weights, i).is_some() {
-            points.bins(binnings, i, &mut k)?;
-            pixels.push(i);
-            bins.extend_from_slice(&k);
-        }
-    }
-    Ok((pixels, bins))
-}
-
-/// `image / weight` of each of `pixels`, all checked finite.
-fn intensities(
-    pixels: &[usize],
-    image: &[f64],
-    weights: Option<PixelWeights>,
-) -> Result<Vec<f64>, Error> {
+    pixels: &[Result<Normalised, Masked>],
+) -> Result<Vec<(usize, Normalised)>, Error> {
+    check_len("normalised frame", pixels.len(), points.pixels())?;
     pixels
         .iter()
-        .map(|&i| {
-            let w = weight_at(weights, i).expect("only unmasked pixels");
-            let intensity = image[i] / w;
-            if intensity.is_finite() {
-                Ok(intensity)
+        .enumerate()
+        .filter_map(|(i, p)| p.as_ref().ok().map(|n| (i, *n)))
+        .map(|(i, n)| {
+            if n.counts.is_finite() {
+                Ok((i, n))
             } else {
                 Err(Error::NotFinite {
-                    what: "pixel intensity",
-                    value: intensity,
+                    what: "pixel counts",
+                    value: n.counts,
                 })
             }
         })
         .collect()
+}
+
+/// The unmasked pixels of one frame and their global bins, flattened
+/// pixel-major. Every pixel is checked here, before any state changes.
+fn binned(
+    binnings: &[Binning],
+    points: &Projected,
+    pixels: &[Result<Normalised, Masked>],
+) -> Result<(Vec<Normalised>, Vec<i64>), Error> {
+    points.check_binnings(binnings)?;
+    let taken = unmasked(points, pixels)?;
+    let mut values = Vec::with_capacity(taken.len());
+    let mut bins = Vec::with_capacity(taken.len() * binnings.len());
+    let mut k = vec![0; binnings.len()];
+    for (i, n) in taken {
+        points.bins(binnings, i, &mut k)?;
+        values.push(n);
+        bins.extend_from_slice(&k);
+    }
+    Ok((values, bins))
 }
 
 /// (first, last) per dimension of flattened `bins`, `None` when empty.
@@ -299,17 +285,17 @@ impl Bounds {
     pub fn include(
         &mut self,
         points: &Projected,
-        weights: Option<PixelWeights>,
+        pixels: &[Result<Normalised, Masked>],
     ) -> Result<(), Error> {
-        if let Some(seen) = &self.seen {
-            if seen.names != points.names {
-                return Err(Error::GridMismatch {
-                    left: describe_names(seen.names, &self.binnings),
-                    right: describe_names(points.names, &self.binnings),
-                });
-            }
+        if let Some(seen) = &self.seen
+            && seen.names != points.names
+        {
+            return Err(Error::GridMismatch {
+                left: describe_names(seen.names, &self.binnings),
+                right: describe_names(points.names, &self.binnings),
+            });
         }
-        let (_, bins) = unmasked_bins(&self.binnings, points, weights)?;
+        let (_, bins) = binned(&self.binnings, points, pixels)?;
         let Some(frame) = span(self.binnings.len(), &bins) else {
             return Ok(());
         };
@@ -361,13 +347,15 @@ fn axes_over(
         .collect()
 }
 
-/// Photons and contributions per bin, row-major over `axes` (the last axis
-/// fastest). A cube without axes is the empty cube, the identity of
-/// [`Cube::merge`]; every other cube has at least one bin per axis.
+/// Σcounts (photons), Σweight and contributions per bin, row-major over
+/// `axes` (the last axis fastest). A cube without axes is the empty cube,
+/// the identity of [`Cube::merge`]; every other cube has at least one bin
+/// per axis.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cube {
     axes: Vec<Axis>,
     photons: Vec<f64>,
+    weight: Vec<f64>,
     contributions: Vec<u64>,
 }
 
@@ -378,16 +366,20 @@ impl Cube {
             .try_fold(1usize, |n, a| n.checked_mul(a.size))
             .ok_or(Error::CubeSize)?;
         let mut photons = Vec::new();
+        let mut weight = Vec::new();
         let mut contributions = Vec::new();
         photons.try_reserve_exact(n).map_err(|_| Error::CubeSize)?;
+        weight.try_reserve_exact(n).map_err(|_| Error::CubeSize)?;
         contributions
             .try_reserve_exact(n)
             .map_err(|_| Error::CubeSize)?;
         photons.resize(n, 0.0);
+        weight.resize(n, 0.0);
         contributions.resize(n, 0);
         Ok(Self {
             axes,
             photons,
+            weight,
             contributions,
         })
     }
@@ -396,12 +388,27 @@ impl Cube {
         &self.axes
     }
 
+    /// Σcounts per bin.
     pub fn photons(&self) -> &[f64] {
         &self.photons
     }
 
+    /// Σweight per bin.
+    pub fn weight(&self) -> &[f64] {
+        &self.weight
+    }
+
     pub fn contributions(&self) -> &[u64] {
         &self.contributions
+    }
+
+    /// Σcounts/Σweight per bin; `None` where Σweight is 0, a bin no pixel
+    /// reached.
+    pub fn intensity(&self) -> impl ExactSizeIterator<Item = Option<f64>> + '_ {
+        self.photons
+            .iter()
+            .zip(&self.weight)
+            .map(|(&c, &w)| (w != 0.0).then(|| c / w))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -445,28 +452,22 @@ impl Cube {
         }
     }
 
-    /// Adds every unmasked pixel, `image / weight`, to the bin it falls in.
-    /// The axes stay as they are; returns how many unmasked pixels fell
-    /// outside them and were not added. On error the cube is unchanged.
+    /// Adds every unmasked pixel of `pixels`, the normalised frame of
+    /// `points`, to the bin it falls in. The axes stay as they are; returns
+    /// how many unmasked pixels fell outside them and were not added. On
+    /// error the cube is unchanged.
     pub fn add(
         &mut self,
         points: &Projected,
-        image: &[f64],
-        weights: Option<PixelWeights>,
+        pixels: &[Result<Normalised, Masked>],
     ) -> Result<usize, Error> {
-        check_len("image", image.len(), points.pixels())?;
         if self.is_empty() {
-            check_weights(weights, points.pixels())?;
-            let pixels: Vec<usize> = (0..points.pixels())
-                .filter(|&i| weight_at(weights, i).is_some())
-                .collect();
-            return Ok(intensities(&pixels, image, weights)?.len());
+            return Ok(unmasked(points, pixels)?.len());
         }
         let binnings: Vec<Binning> = self.axes.iter().map(|a| a.binning).collect();
         self.check_grid(points.names, &binnings)?;
-        let (pixels, bins) = unmasked_bins(&binnings, points, weights)?;
-        let x = intensities(&pixels, image, weights)?;
-        Ok(self.deposit(&bins, &x))
+        let (values, bins) = binned(&binnings, points, pixels)?;
+        Ok(self.deposit(&bins, &values))
     }
 
     /// One-pass filling: widens the axes to take every unmasked pixel of
@@ -477,15 +478,12 @@ impl Cube {
         &mut self,
         binnings: &[Binning],
         points: &Projected,
-        image: &[f64],
-        weights: Option<PixelWeights>,
+        pixels: &[Result<Normalised, Masked>],
     ) -> Result<(), Error> {
         if !self.is_empty() {
             self.check_grid(points.names, binnings)?;
         }
-        check_len("image", image.len(), points.pixels())?;
-        let (pixels, bins) = unmasked_bins(binnings, points, weights)?;
-        let x = intensities(&pixels, image, weights)?;
+        let (values, bins) = binned(binnings, points, pixels)?;
         let Some(span) = span(binnings.len(), &bins) else {
             return Ok(());
         };
@@ -493,19 +491,21 @@ impl Cube {
         if axes != self.axes {
             *self = Self::zeros(axes)?.with(self);
         }
-        let outside = self.deposit(&bins, &x);
+        let outside = self.deposit(&bins, &values);
         debug_assert_eq!(outside, 0, "the axes span every unmasked pixel");
         Ok(())
     }
 
-    /// Adds one contribution per row of flattened `bins`; returns how many
-    /// rows fell outside the axes.
-    fn deposit(&mut self, bins: &[i64], intensities: &[f64]) -> usize {
+    /// Adds each of `values` to the bin of its row of flattened `bins`: its
+    /// counts, its weight and one contribution, as a bin of a cut takes a
+    /// pixel. Returns how many rows fell outside the axes.
+    fn deposit(&mut self, bins: &[i64], values: &[Normalised]) -> usize {
         let mut outside = 0;
-        for (k, &x) in bins.chunks_exact(self.axes.len()).zip(intensities) {
+        for (k, n) in bins.chunks_exact(self.axes.len()).zip(values) {
             match self.offset(k) {
                 Some(off) => {
-                    self.photons[off] += x;
+                    self.photons[off] += n.counts;
+                    self.weight[off] += n.weight.get();
                     self.contributions[off] += 1;
                 }
                 None => outside += 1,
@@ -517,16 +517,19 @@ impl Cube {
     /// `self` plus `other` bin by bin; `other`'s axes lie inside `self`'s.
     fn with(mut self, other: &Self) -> Self {
         let mut k = vec![0; other.axes.len()];
-        for (j, (&p, &c)) in other.photons.iter().zip(&other.contributions).enumerate() {
+        let sums = other.photons.iter().zip(&other.weight);
+        for (j, ((&p, &w), &c)) in sums.zip(&other.contributions).enumerate() {
             other.bins_at(j, &mut k);
             let off = self.offset(&k).expect("the axes contain the other cube");
             self.photons[off] += p;
+            self.weight[off] += w;
             self.contributions[off] += c;
         }
         self
     }
 
-    /// Sum of two cubes over the union of their axes. The empty cube is the
+    /// Sum of two cubes over the union of their axes, bin by bin: Σcounts,
+    /// Σweight and contributions. The empty cube is the
     /// identity; otherwise both need the same names and binnings in the
     /// same order.
     pub fn merge(self, other: Self) -> Result<Self, Error> {
@@ -576,6 +579,7 @@ fn union(a: &[Axis], b: &[Axis]) -> Result<Vec<Axis>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::absorption::Weight;
 
     const ONE: &[&str] = &["x"];
     const TWO: &[&str] = &["x", "y"];
@@ -591,23 +595,32 @@ mod tests {
         Projected::new(names, planes).unwrap()
     }
 
-    /// A cube filled in one pass from points and intensities.
-    fn cube(names: &'static [&'static str], coords: &[&[f64]], image: &[f64]) -> Cube {
+    fn pixel(counts: f64, weight: f64) -> Result<Normalised, Masked> {
+        Ok(Normalised {
+            counts,
+            weight: Weight::new(weight, Masked::Opaque)?,
+        })
+    }
+
+    /// Pixels of `counts`, each of weight 1.
+    fn unweighted(counts: &[f64]) -> Vec<Result<Normalised, Masked>> {
+        counts.iter().map(|&c| pixel(c, 1.0)).collect()
+    }
+
+    /// A cube filled in one pass from points and normalised pixels.
+    fn filled(
+        names: &'static [&'static str],
+        coords: &[&[f64]],
+        pixels: &[Result<Normalised, Masked>],
+    ) -> Cube {
         let mut c = Cube::default();
-        c.add_growing(
-            &vec![unit(); names.len()],
-            &points(names, coords),
-            image,
-            None,
-        )
-        .unwrap();
+        c.add_growing(&vec![unit(); names.len()], &points(names, coords), pixels)
+            .unwrap();
         c
     }
 
-    fn weights(w: &[Result<f64, Masked>]) -> Vec<Result<Weight, Masked>> {
-        w.iter()
-            .map(|w| w.and_then(|v| Weight::new(v, Masked::Opaque)))
-            .collect()
+    fn cube(names: &'static [&'static str], coords: &[&[f64]], counts: &[f64]) -> Cube {
+        filled(names, coords, &unweighted(counts))
     }
 
     /// binoculars' rule (hkl-binoculars.c:375): rint, ties to even.
@@ -669,16 +682,34 @@ mod tests {
     }
 
     fn sample_cubes() -> [Cube; 4] {
-        // dyadic intensities: every sum is exact, so associativity holds bit
-        // for bit and the test does not depend on the order of additions
+        // dyadic counts and weights: every sum is exact, so associativity
+        // holds bit for bit and the test does not depend on the order of
+        // additions
+        let px = |a: (f64, f64), b: (f64, f64)| [pixel(a.0, a.1), pixel(b.0, b.1)];
         [
-            cube(TWO, &[&[0.5, 0.5], &[2.5, 1.5]], &[1.25, 2.5]),
+            filled(
+                TWO,
+                &[&[0.5, 0.5], &[2.5, 1.5]],
+                &px((1.25, 0.5), (2.5, 2.0)),
+            ),
             // overlaps the first
-            cube(TWO, &[&[2.0, 1.0], &[3.5, -1.5]], &[0.5, 4.0]),
+            filled(
+                TWO,
+                &[&[2.0, 1.0], &[3.5, -1.5]],
+                &px((0.5, 4.0), (4.0, 1.0)),
+            ),
             // disjoint from both
-            cube(TWO, &[&[10.0, 7.0], &[11.0, 9.0]], &[8.0, 0.125]),
+            filled(
+                TWO,
+                &[&[10.0, 7.0], &[11.0, 9.0]],
+                &px((8.0, 0.25), (0.125, 8.0)),
+            ),
             // same span as the first
-            cube(TWO, &[&[0.25, 1.75], &[2.0, 0.0]], &[3.0, 0.75]),
+            filled(
+                TWO,
+                &[&[0.25, 1.75], &[2.0, 0.0]],
+                &px((3.0, 1.0), (0.75, 0.5)),
+            ),
         ]
     }
 
@@ -702,10 +733,12 @@ mod tests {
                 let ab = a.clone().merge(b.clone()).unwrap();
                 let ba = b.clone().merge(a.clone()).unwrap();
                 assert_eq!(ab, ba);
-                assert_eq!(
-                    ab.photons().iter().sum::<f64>(),
-                    a.photons().iter().sum::<f64>() + b.photons().iter().sum::<f64>()
-                );
+                let sum = |c: &Cube, f: fn(&Cube) -> &[f64]| f(c).iter().sum::<f64>();
+                for f in [Cube::photons, Cube::weight] {
+                    assert_eq!(sum(&ab, f), sum(a, f) + sum(b, f));
+                }
+                let n = |c: &Cube| c.contributions().iter().sum::<u64>();
+                assert_eq!(n(&ab), n(a) + n(b));
             }
         }
     }
@@ -743,8 +776,7 @@ mod tests {
         step.add_growing(
             &[unit(), Binning::new(0.5, 0.0).unwrap()],
             &points(TWO, &[&[0.0, 0.0]]),
-            &[1.0],
-            None,
+            &unweighted(&[1.0]),
         )
         .unwrap();
         let mut anchor = Cube::default();
@@ -752,8 +784,7 @@ mod tests {
             .add_growing(
                 &[unit(), Binning::new(1.0, 0.5).unwrap()],
                 &points(TWO, &[&[0.0, 0.0]]),
-                &[1.0],
-                None,
+                &unweighted(&[1.0]),
             )
             .unwrap();
         for other in [names, dims, step, anchor] {
@@ -770,18 +801,20 @@ mod tests {
             points(TWO, &[&[0.5, 0.5], &[2.5, 1.5], &[-4.0, 3.0]]),
             points(TWO, &[&[9.0, -2.0], &[2.0, 1.0], &[0.1, 0.2]]),
         ];
-        let images = [[1.0, 2.0, 3.0], [0.1, 0.2, 0.3]];
-        let w = weights(&[Ok(0.5), Err(Masked::Unlit), Ok(2.0)]);
+        let pixels = [
+            [pixel(1.0, 0.5), Err(Masked::Unlit), pixel(3.0, 2.0)],
+            [pixel(0.1, 0.5), Err(Masked::Unlit), pixel(0.3, 2.0)],
+        ];
         let binnings = vec![Binning::new(0.75, 0.1).unwrap(), unit()];
         let mut bounds = Bounds::new(binnings.clone());
-        for f in &frames {
-            bounds.include(f, Some(&w[..])).unwrap();
+        for (f, px) in frames.iter().zip(&pixels) {
+            bounds.include(f, px).unwrap();
         }
         let mut two = bounds.cube().unwrap();
         let mut one = Cube::default();
-        for (f, img) in frames.iter().zip(&images) {
-            assert_eq!(two.add(f, img, Some(&w[..])).unwrap(), 0);
-            one.add_growing(&binnings, f, img, Some(&w[..])).unwrap();
+        for (f, px) in frames.iter().zip(&pixels) {
+            assert_eq!(two.add(f, px).unwrap(), 0);
+            one.add_growing(&binnings, f, px).unwrap();
         }
         assert_eq!(one, two);
         assert_eq!(two.contributions().iter().sum::<u64>(), 4);
@@ -791,13 +824,17 @@ mod tests {
     fn fixed_axes_report_pixels_outside() {
         let mut c = cube(ONE, &[&[0.0], &[2.0]], &[1.0, 1.0]);
         let out = c
-            .add(&points(ONE, &[&[1.0], &[5.0], &[-1.0]]), &[1.0; 3], None)
+            .add(
+                &points(ONE, &[&[1.0], &[5.0], &[-1.0]]),
+                &unweighted(&[1.0; 3]),
+            )
             .unwrap();
         assert_eq!(out, 2);
         assert_eq!(c.contributions(), [1, 1, 1]);
+        assert_eq!(c.weight(), [1.0, 1.0, 1.0]);
         assert_eq!(
             Cube::default()
-                .add(&points(ONE, &[&[1.0]]), &[1.0], None)
+                .add(&points(ONE, &[&[1.0]]), &unweighted(&[1.0]))
                 .unwrap(),
             1
         );
@@ -806,42 +843,40 @@ mod tests {
     #[test]
     fn masked_pixels_contribute_nothing_and_do_not_widen_the_axes() {
         let p = points(ONE, &[&[0.0], &[100.0], &[1.0]]);
-        let w = weights(&[Ok(1.0), Err(Masked::GrazingExit), Ok(1.0)]);
+        let px = [pixel(1.0, 0.5), Err(Masked::GrazingExit), pixel(2.0, 4.0)];
         let mut c = Cube::default();
-        c.add_growing(&[unit()], &p, &[1.0, 1e9, 2.0], Some(&w[..]))
-            .unwrap();
+        c.add_growing(&[unit()], &p, &px).unwrap();
         assert_eq!(c.axes()[0].size(), 2);
         assert_eq!(c.photons(), [1.0, 2.0]);
+        assert_eq!(c.weight(), [0.5, 4.0]);
         assert_eq!(c.contributions(), [1, 1]);
         let mut b = Bounds::new(vec![unit()]);
-        let all = weights(&[Err(Masked::Unlit); 3]);
-        b.include(&p, Some(&all[..])).unwrap();
+        b.include(&p, &[Err(Masked::Unlit); 3]).unwrap();
         assert_eq!(b.cube().unwrap(), Cube::default());
     }
 
     #[test]
-    fn non_finite_intensity_and_length_mismatch_are_errors() {
+    fn non_finite_counts_and_length_mismatch_are_errors() {
         let p = points(ONE, &[&[0.0], &[1.0]]);
         let mut c = Cube::default();
+        let nan = unweighted(&[1.0, f64::NAN]);
         assert!(matches!(
-            c.add_growing(&[unit()], &p, &[1.0, f64::NAN], None),
+            c.add_growing(&[unit()], &p, &nan),
             Err(Error::NotFinite { .. })
         ));
+        let mut b = Bounds::new(vec![unit()]);
+        assert!(matches!(b.include(&p, &nan), Err(Error::NotFinite { .. })));
+        assert!(matches!(c.add(&p, &nan), Err(Error::NotFinite { .. })));
         assert!(matches!(
-            c.add_growing(&[unit()], &p, &[1.0], None),
-            Err(Error::PixelCount { what: "image", .. })
-        ));
-        assert!(matches!(
-            c.add_growing(&[unit(), unit()], &p, &[1.0, 1.0], None),
-            Err(Error::Dimensions { .. })
-        ));
-        let w = weights(&[Ok(1.0)]);
-        assert!(matches!(
-            c.add_growing(&[unit()], &p, &[1.0, 1.0], Some(&w[..])),
+            c.add_growing(&[unit()], &p, &unweighted(&[1.0])),
             Err(Error::PixelCount {
-                what: "weights",
+                what: "normalised frame",
                 ..
             })
+        ));
+        assert!(matches!(
+            c.add_growing(&[unit(), unit()], &p, &unweighted(&[1.0, 1.0])),
+            Err(Error::Dimensions { .. })
         ));
         assert!(matches!(
             Projected::new(TWO, vec![vec![0.0], vec![]]),
@@ -852,26 +887,42 @@ mod tests {
         let mut c = cube(ONE, &[&[0.0]], &[1.0]);
         let before = c.clone();
         let far = points(ONE, &[&[0.0], &[5.0]]);
-        assert!(c.add(&far, &[1.0, f64::INFINITY], None).is_err());
-        assert!(
-            c.add_growing(&[unit()], &far, &[1.0, f64::NAN], None)
-                .is_err()
-        );
+        assert!(c.add(&far, &unweighted(&[1.0, f64::INFINITY])).is_err());
+        assert!(c.add_growing(&[unit()], &far, &nan).is_err());
         assert_eq!(c, before);
+    }
+
+    #[test]
+    fn intensity_is_the_ratio_of_sums_and_absent_where_nothing_fell() {
+        // bin 0 takes 3 of weight 1 and 1 of weight 3: the ratio of sums is
+        // 1, the mean of their corrected values 5/3
+        let coords: &[&[f64]] = &[&[0.0], &[0.5], &[2.0]];
+        let c = filled(
+            ONE,
+            coords,
+            &[pixel(3.0, 1.0), pixel(1.0, 3.0), pixel(6.0, 4.0)],
+        );
+        assert_eq!(c.photons(), [4.0, 0.0, 6.0]);
+        assert_eq!(c.weight(), [4.0, 0.0, 4.0]);
+        assert_eq!(c.contributions(), [2, 0, 1]);
+        let ratio = |c: &Cube| c.intensity().collect::<Vec<_>>();
+        assert_eq!(ratio(&c), [Some(1.0), None, Some(1.5)]);
+        // merged cubes sum before the ratio
+        let m = c.merge(filled(ONE, &[&[2.0]], &[pixel(2.0, 4.0)])).unwrap();
+        assert_eq!(ratio(&m), [Some(1.0), None, Some(1.0)]);
     }
 
     #[test]
     fn bin4_intensity_is_never_rounded() {
         // BIN-4: binoculars' angles projection stores rint(image·w/flat)
         // (hkl-binoculars.c:378): image 1 at 0.2, 0.4, 0.6, 0.8 gives
-        // 0, 0, 1, 1 (repro d3). Here the weight divides, so 1/w = those.
-        let w = weights(&[Ok(5.0), Ok(2.5), Ok(1.0 / 0.6), Ok(1.25)]);
-        let p = points(ONE, &[&[0.0], &[1.0], &[2.0], &[3.0]]);
-        let mut c = Cube::default();
-        c.add_growing(&[unit()], &p, &[1.0; 4], Some(&w[..]))
-            .unwrap();
-        assert_eq!(c.photons(), [0.2, 0.4, 1.0 / (1.0 / 0.6), 0.8]);
-        assert!(c.photons().iter().all(|p| p.fract() != 0.0));
+        // 0, 0, 1, 1 (repro d3). Here those are the counts.
+        let c = cube(
+            ONE,
+            &[&[0.0], &[1.0], &[2.0], &[3.0]],
+            &[0.2, 0.4, 0.6, 0.8],
+        );
+        assert_eq!(c.photons(), [0.2, 0.4, 0.6, 0.8]);
     }
 
     #[test]
@@ -879,7 +930,7 @@ mod tests {
         // BIN-5: float photons stay at 16777216 after +1 while contributions
         // reach 2 (repro d3)
         let mut c = cube(ONE, &[&[0.0]], &[16_777_216.0]);
-        c.add(&points(ONE, &[&[0.0]]), &[1.0], None).unwrap();
+        c.add(&points(ONE, &[&[0.0]]), &unweighted(&[1.0])).unwrap();
         assert_eq!(c.photons(), [16_777_217.0]);
         assert_eq!(c.contributions(), [2]);
     }
@@ -896,14 +947,15 @@ mod tests {
         let b = cube(names, pb, &[1.0]);
         let mut merged = a.merge(b).unwrap();
         let mut bounds = Bounds::new(vec![unit(); 3]);
-        bounds.include(&points(names, pa), None).unwrap();
-        bounds.include(&points(names, pb), None).unwrap();
+        let one = unweighted(&[1.0]);
+        bounds.include(&points(names, pa), &one).unwrap();
+        bounds.include(&points(names, pb), &one).unwrap();
         let mut fresh = bounds.cube().unwrap();
-        fresh.add(&points(names, pa), &[1.0], None).unwrap();
-        fresh.add(&points(names, pb), &[1.0], None).unwrap();
+        fresh.add(&points(names, pa), &one).unwrap();
+        fresh.add(&points(names, pb), &one).unwrap();
         assert_eq!(merged, fresh);
         for c in [&mut merged, &mut fresh] {
-            assert_eq!(c.add(&points(names, pa), &[1.0], None).unwrap(), 0);
+            assert_eq!(c.add(&points(names, pa), &one).unwrap(), 0);
         }
         assert_eq!(merged, fresh);
         let at_a = merged.offset(&[0, 1, 2]).unwrap();

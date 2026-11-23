@@ -116,4 +116,20 @@ pub enum Error {
     RayParallel,
     #[error("a point detector has no extent for a ray to meet")]
     PointDetector,
+    #[cfg(feature = "hdf5")]
+    #[error("HDF5: {reason}")]
+    Hdf5 { reason: String },
+    #[cfg(feature = "hdf5")]
+    #[error("binoculars cube file: {reason}")]
+    CubeFile { reason: String },
+    #[cfg(feature = "hdf5")]
+    #[error(
+        "binoculars centres bin k on k·step: axis {axis:?} of step {step} is \
+         anchored at {anchor}, not at −step/2"
+    )]
+    CubeFileAnchor {
+        axis: String,
+        step: f64,
+        anchor: f64,
+    },
 }

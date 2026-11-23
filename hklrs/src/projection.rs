@@ -123,7 +123,9 @@ mod tests {
     use nalgebra::UnitQuaternion;
 
     use super::*;
+    use crate::absorption::{Masked, Weight};
     use crate::grid::{Binning, Cube};
+    use crate::normalise::Normalised;
     use crate::presets::preset;
     use crate::{Lattice, Rad, forward};
 
@@ -204,7 +206,11 @@ mod tests {
             assert_eq!(out.planes().len(), p.names().len());
             let mut cube = Cube::default();
             let binnings = vec![Binning::new(1e-3, 0.0).unwrap(); p.names().len()];
-            cube.add_growing(&binnings, &out, &vec![1.0; out.pixels()], None)
+            let one = Ok(Normalised {
+                counts: 1.0,
+                weight: Weight::new(1.0, Masked::Opaque).unwrap(),
+            });
+            cube.add_growing(&binnings, &out, &vec![one; out.pixels()])
                 .unwrap();
             let axes: Vec<&str> = cube.axes().iter().map(|a| a.name()).collect();
             assert_eq!(axes, p.names());

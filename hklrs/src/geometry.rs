@@ -122,10 +122,10 @@ pub struct Geometry {
 
 fn unit(v: [f64; 3], what: &str) -> Result<Unit<Vector3<f64>>, Error> {
     let v = Vector3::from(v);
-    if v.iter().all(|x| x.is_finite()) {
-        if let Some(u) = Unit::try_new(v, 0.0) {
-            return Ok(u);
-        }
+    if v.iter().all(|x| x.is_finite())
+        && let Some(u) = Unit::try_new(v, 0.0)
+    {
+        return Ok(u);
     }
     Err(Error::ZeroVector {
         what: what.to_owned(),
