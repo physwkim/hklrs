@@ -44,6 +44,12 @@ pub enum Error {
         fast: usize,
         shape: (usize, usize),
     },
+    #[error("{what} must be finite, got {value}")]
+    NotFinite { what: &'static str, value: f64 },
+    #[error("xrayutilities direction {text:?} is not one of x+ x- y+ y- z+ z-")]
+    XuDirection { text: String },
+    #[error("{what} are parallel")]
+    ParallelDirections { what: &'static str },
     #[error("the two reflections are parallel in {space} (sin of their angle = {sin:e})")]
     ParallelReflections { space: &'static str, sin: f64 },
     #[error("U is not a proper rotation (max |UᵀU − I| = {deviation}, or det ≤ 0)")]

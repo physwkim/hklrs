@@ -13,6 +13,7 @@ pub mod presets;
 pub mod pseudo;
 mod sample;
 mod units;
+pub mod xu;
 
 pub use detector::PixelDetector;
 pub use error::Error;
