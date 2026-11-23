@@ -203,3 +203,51 @@ def test_unreachable_raises(preset, mode):
         with pytest.raises(hklrs.Unreachable):
             hklrs.pick(m, rig.sample, h, WL, start)
 
+
+def libhkl_psi(rig, axes, ref):
+    """(psi, ok): libhkl's read-only "psi" engine for `axes` and reference `ref`
+    (degrees); ok is hkl_engine_list_get's AND over every engine."""
+    pe = rig.el.engine_get_by_name("psi")
+    rig.set_axes(axes)
+    pe.parameters_values_set([float(x) for x in ref], USER)
+    ok = rig.el.get()
+    return float(pe.pseudo_axis_values_get(USER)[0]), ok
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_psi_against_libhkl(preset):
+    rig = Rig(preset, "psi")
+    rng = random.Random(f"psi-{preset}")
+    n = 0
+    for mode in MODES:
+        for _ in range(8):
+            _, _, start, _ = case_inputs(rig, mode, rng)
+            ref = [float(rng.choice([-2, -1, 1, 2])) for _ in range(3)]
+            mine = hklrs.psi(rig.g, rig.sample, ref, start)
+            theirs, ok = libhkl_psi(rig, start, ref)
+            assert ok and abs(wrap(mine - theirs)) < 1e-9
+            n += 1
+    assert n == 8 * len(MODES)
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_psi_reference_parallel_to_q(preset):
+    """hklrs raises InverseError (not Unreachable/NoSolution). libhkl reports
+    the failure only as el.get() == False (hkl-pseudoaxis.c:775 ANDs every
+    engine's get, each called with a NULL GError): the error is dropped and
+    the stale value stays readable (0 when there is none)."""
+    rig = Rig(preset, "psi-par")
+    rng = random.Random(f"psi-par-{preset}")
+    _, _, start, _ = case_inputs(rig, "bissector", rng)
+    h = forward_hkl(rig, start)
+    for ref in (h, 2 * h, -h):
+        with pytest.raises(hklrs.InverseError) as e:
+            hklrs.psi(rig.g, rig.sample, list(ref), start)
+        assert not isinstance(e.value, (hklrs.Unreachable, hklrs.NoSolution))
+    first, ok = libhkl_psi(rig, start, h)
+    assert first == 0.0 and not ok
+    previous, ok = libhkl_psi(rig, start, [1.0, 2.0, -1.0])
+    assert ok
+    assert previous == pytest.approx(hklrs.psi(rig.g, rig.sample, [1, 2, -1], start), abs=1e-9)
+    stale, ok = libhkl_psi(rig, start, h)
+    assert stale == previous and not ok
