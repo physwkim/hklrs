@@ -428,8 +428,8 @@ fn a_frame_appended_after_its_first_read_maps() {
 }
 
 /// A datum past the frames in the file whose frame is never written:
-/// through RsmCallback, frame 3 is read again until the deadline after its
-/// first read and fails as out of range of the 3 written; the others map.
+/// through RsmCallback, frame 3 is read again until the deadline after it
+/// was paired and fails as out of range of the 3 written; the others map.
 #[test]
 fn a_frame_never_written_fails_at_the_deadline() {
     let dir = scratch("a_frame_never_written_fails_at_the_deadline");
@@ -437,6 +437,7 @@ fn a_frame_never_written_fails_at_the_deadline() {
     let deadline = Duration::from_millis(150);
     let (sender, reads) = mpsc::channel();
     let rsm = rsm(Watched(sender), deadline);
+    let fed = Instant::now();
     for doc in run(image_resource(&dir), 4) {
         rsm.document(&doc);
     }
@@ -460,7 +461,7 @@ fn a_frame_never_written_fails_at_the_deadline() {
             .iter()
             .all(|&(index, _, waiting)| index == 3 && waiting)
     );
-    assert!(failed[failed.len() - 1].1 - failed[0].1 >= deadline);
+    assert!(failed[failed.len() - 1].1 - fed >= deadline);
 }
 
 /// The superblock read while its writer rewrites it, made here by

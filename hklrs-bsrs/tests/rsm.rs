@@ -93,13 +93,13 @@ fn direct(frames: &[(f64, u64)]) -> Cube {
 }
 
 /// Synthetic frames for any resource; `fail` is unreadable for good,
-/// `late` not readable yet until `written` is set, `slow` takes a while
+/// `late` are not readable yet until `written` is set, `slow` takes a while
 /// and `transposed` is read in the (fast, slow) shape. `reads` records
 /// each read's index and time.
 #[derive(Default)]
 struct Frames {
     fail: Option<u64>,
-    late: Option<u64>,
+    late: Vec<u64>,
     written: Arc<AtomicBool>,
     slow: Option<u64>,
     transposed: Option<u64>,
@@ -117,7 +117,7 @@ impl FrameReader for Frames {
                 format!("frame {index} is unreadable").into(),
             ));
         }
-        if self.late == Some(index) && !self.written.load(Ordering::SeqCst) {
+        if self.late.contains(&index) && !self.written.load(Ordering::SeqCst) {
             return Err(ReadError::NotYet(
                 format!("frame {index} is not written").into(),
             ));
@@ -421,20 +421,21 @@ async fn a_permanent_reader_failure_fails_its_frame_unretried() {
 }
 
 /// Frame 1 is never written: it is read again until the deadline after
-/// its first read, then fails with the reader's reason; frame 2 maps
-/// after it.
+/// it was paired, then fails with the reader's reason; frame 2 maps after
+/// it.
 #[test]
 fn a_frame_never_readable_fails_at_the_deadline() {
     let deadline = Duration::from_millis(150);
     let reads = Arc::default();
     let rsm = rsm_within(
         Frames {
-            late: Some(1),
+            late: vec![1],
             reads: Arc::clone(&reads),
             ..Frames::default()
         },
         deadline,
     );
+    let fed = Instant::now();
     feed(
         &rsm,
         [
@@ -465,7 +466,67 @@ fn a_frame_never_readable_fails_at_the_deadline() {
         .map(|&(_, at)| at)
         .collect();
     assert!(late.len() >= 2, "{} reads", late.len());
-    assert!(late[late.len() - 1] - late[0] >= deadline);
+    assert!(late[late.len() - 1] - fed >= deadline);
+}
+
+/// A dead IOC: frames 0 to 3 are never written. Events 1 and 2 pair as
+/// they arrive after their datum, 100 ms apart; events 3 and 4 wait for
+/// theirs, which comes 100 ms later. Each frame's deadline runs from its
+/// pairing, also while it waits behind the others, so all four fail
+/// within one deadline of the last pairing, not one deadline after
+/// another.
+#[test]
+fn frames_never_readable_fail_within_one_deadline_of_the_last_pairing() {
+    let deadline = Duration::from_millis(400);
+    let reads = Arc::default();
+    let rsm = rsm_within(
+        Frames {
+            late: vec![0, 1, 2, 3],
+            reads: Arc::clone(&reads),
+            ..Frames::default()
+        },
+        deadline,
+    );
+    feed(
+        &rsm,
+        [
+            start(),
+            descriptor(&["delta"], &[]),
+            resource(),
+            datum(1..3, 0),
+        ],
+    );
+    let gap = deadline / 4;
+    let first = Instant::now();
+    rsm.document(&event(1, true));
+    std::thread::sleep(gap);
+    let second = Instant::now();
+    feed(&rsm, [event(2, true), event(3, true), event(4, true)]);
+    std::thread::sleep(gap);
+    let last = Instant::now();
+    feed(&rsm, [datum(3..5, 2), stop()]);
+    let map = rsm.finish().unwrap();
+    let done = last.elapsed();
+    let failed: Vec<FailedFrame> = (0..4)
+        .map(|i| FailedFrame {
+            seq_num: i + 1,
+            reason: FrameFailure::Read(format!("frame {i} is not written")),
+        })
+        .collect();
+    assert_eq!(map.failed, failed);
+    assert!(map.mapped.is_empty(), "{:?}", map.mapped);
+    let reads = reads.lock().unwrap();
+    for (index, paired) in [(0, first), (1, second), (2, last), (3, last)] {
+        let at: Vec<Instant> = reads
+            .iter()
+            .filter(|&&(i, _)| i == index)
+            .map(|&(_, at)| at)
+            .collect();
+        assert!(!at.is_empty(), "frame {index} not read");
+        assert!(at[at.len() - 1] - paired >= deadline, "frame {index}");
+    }
+    assert!(done >= deadline, "{done:?}");
+    assert!(done < deadline * 3 / 2, "{done:?}");
 }
 
 /// Frame 1 is written only after the worker has read it twice: meanwhile
@@ -475,7 +536,7 @@ fn a_frame_never_readable_fails_at_the_deadline() {
 fn frames_after_a_waiting_frame_keep_their_order() {
     let (written, reads) = (Arc::new(AtomicBool::new(false)), Arc::default());
     let rsm = rsm(Frames {
-        late: Some(1),
+        late: vec![1],
         written: Arc::clone(&written),
         reads: Arc::clone(&reads),
         ..Frames::default()

@@ -5,8 +5,9 @@
 //! bsrs runs callbacks inline, so the callback only pairs documents: one
 //! worker thread reads, maps and adds the frames in the order they are
 //! paired, and is the only writer of the map. A frame its reader cannot
-//! read yet is read again until [`RsmConfig::read_deadline`], and the
-//! frames behind it wait for it.
+//! read yet is read again until [`RsmConfig::read_deadline`] after it was
+//! paired, and the frames behind it wait for it while their own deadlines
+//! run.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -83,9 +84,11 @@ pub struct RsmConfig {
     /// The cube the frames are added to; `None` starts empty.
     pub seed: Option<Cube>,
     pub reader: Arc<dyn FrameReader>,
-    /// How long after a frame's first read it is read again while
-    /// [`ReadError::NotYet`]; then it fails with the last reason. Zero
-    /// reads each frame once.
+    /// How long after a frame is paired, its event and its datum both in,
+    /// it is read again while [`ReadError::NotYet`]; then it fails with the
+    /// last reason. Every frame is read once at least: a frame the worker
+    /// reaches after its deadline, or every frame when this is zero, is
+    /// read once.
     pub read_deadline: Duration,
 }
 
@@ -257,8 +260,8 @@ impl RsmCallback {
     }
 
     /// The whole run's map, once its Stop document has been seen and the
-    /// worker has added every frame. Each frame still not readable holds
-    /// it up to [`RsmConfig::read_deadline`], one after another.
+    /// worker has added every frame. Frames still not readable hold it up
+    /// to [`RsmConfig::read_deadline`] after the last of them was paired.
     pub fn finish(&self) -> Result<RsmMap, RsmError> {
         if !matches!(*lock(&self.phase), Phase::Stopped) {
             return Err(RsmError::NotStopped);
@@ -484,6 +487,7 @@ impl Run {
             data: pending.data,
             resource,
             index,
+            ready: Instant::now(),
         }));
     }
 
@@ -509,6 +513,10 @@ struct Frame {
     data: HashMap<String, Value>,
     resource: Arc<StreamResource>,
     index: u64,
+    /// When its event and its datum were both in: its read deadline counts
+    /// from here, not from the worker's first read, which the frames ahead
+    /// of it delay.
+    ready: Instant,
 }
 
 impl Frame {
@@ -551,17 +559,16 @@ impl Frame {
     }
 
     /// Reads the frame again every [`POLL`] while it is not readable yet,
-    /// until `deadline` after the first read. The worker reads nothing
-    /// else meanwhile, so the frames behind it keep their order.
+    /// until `deadline` after it was ready. The worker reads nothing else
+    /// meanwhile, so the frames behind it keep their order.
     fn read(&self, reader: &dyn FrameReader, deadline: Duration) -> Result<RawFrame, FrameFailure> {
-        let first = Instant::now();
         loop {
             let reason = match reader.read(&self.resource, self.index) {
                 Ok(raw) => return Ok(raw),
                 Err(ReadError::Permanent(e)) => return Err(FrameFailure::Read(e.to_string())),
                 Err(ReadError::NotYet(e)) => e,
             };
-            let left = deadline.saturating_sub(first.elapsed());
+            let left = deadline.saturating_sub(self.ready.elapsed());
             if left.is_zero() {
                 return Err(FrameFailure::Read(reason.to_string()));
             }
