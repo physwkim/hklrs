@@ -297,7 +297,7 @@ async fn psi_scan_holds_hkl_in_its_own_mode() {
     let reference = [0.0, 0.0, 1.0];
     let plan = psi_scan(
         dx.clone(),
-        "psi_constant",
+        Some("psi_constant"),
         [1.0, 0.0, 1.0],
         reference,
         [20.0, 40.0],
@@ -323,6 +323,88 @@ async fn psi_scan_holds_hkl_in_its_own_mode() {
         json!("psi_constant")
     );
     assert_eq!(dx.mode(), Some(ModeSpec::new("bissector")));
+}
+
+#[tokio::test]
+async fn psi_scan_without_a_mode_takes_the_geometrys_only_psi_mode() {
+    let given = run(psi_scan(
+        e4cv(),
+        Some("psi_constant"),
+        [1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [20.0, 40.0],
+        3,
+        [],
+    ))
+    .await;
+    let omitted = run(psi_scan(
+        e4cv(),
+        None,
+        [1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [20.0, 40.0],
+        3,
+        [],
+    ))
+    .await;
+    omitted.succeeded();
+    let extra = &omitted.start().extra;
+    assert_eq!(
+        extra["diffractometers"]["e4cv"]["mode"],
+        json!("psi_constant")
+    );
+    assert_eq!(extra["plan_args"]["mode"], json!(null));
+    let at = |run: &Run| -> Vec<[f64; 4]> {
+        let events = run.events();
+        events
+            .iter()
+            .map(|e| AXES.map(|a| e.data[a].as_f64().unwrap()))
+            .collect()
+    };
+    assert_eq!(at(&omitted), at(&given));
+}
+
+#[tokio::test]
+async fn psi_scan_without_a_mode_refuses_naming_the_candidates() {
+    let geometry = preset("E6C").unwrap();
+    let names: Vec<String> = geometry
+        .axes()
+        .iter()
+        .map(|a| a.name().to_owned())
+        .collect();
+    let reals = names
+        .iter()
+        .map(|a| {
+            (
+                a.as_str(),
+                Arc::new(SoftMotor::new(a, Some(0.0))) as Arc<dyn RealAxis>,
+            )
+        })
+        .collect();
+    let sample = Sample::new(
+        "sample",
+        Lattice::cubic(LAMBDA).unwrap(),
+        Orientation::Manual {
+            u: UnitQuaternion::identity(),
+        },
+    );
+    let source = WavelengthSource::Fixed(Wavelength::new(LAMBDA).unwrap());
+    let dx = Diffractometer::new("e6c", geometry, reals, source, sample).unwrap();
+    let plan = psi_scan(
+        Arc::new(dx),
+        None,
+        [1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [20.0, 40.0],
+        3,
+        [],
+    );
+    let message = run_fail(plan).await;
+    assert!(message.contains("psi_scan: geometry \"E6C\" "), "{message}");
+    assert!(
+        message.contains(r#"["psi_constant_vertical", "psi_constant_horizontal"]"#),
+        "{message}"
+    );
 }
 
 /// PY2-11: hklpy2's scan_zone turns and scales with the direct-lattice

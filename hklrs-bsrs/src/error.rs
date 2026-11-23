@@ -45,6 +45,11 @@ pub enum DiffError {
     },
     #[error("geometry {geometry:?} has no hkl mode")]
     NoMode { geometry: String },
+    #[error("geometry {geometry:?} has psi modes {candidates:?}, not exactly one: name the mode")]
+    PsiMode {
+        geometry: String,
+        candidates: Vec<String>,
+    },
     #[error("hkl {hkl:?}: {source}")]
     Solve {
         hkl: [f64; 3],

@@ -14,8 +14,8 @@ use futures::future::{join_all, try_join_all};
 use futures::try_join;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::{
-    AxisKind, Deg, Geometry, InverseRequest, Lattice, Mode, ModeSpec, Orientation, Picker,
-    Reflection, Sample, Target, Wavelength, forward,
+    AxisKind, Deg, Geometry, InverseRequest, Lattice, Mode, ModeParameters, ModeSpec, Orientation,
+    Picker, Reflection, Sample, Target, Wavelength, forward,
 };
 use serde_json::{Value, json};
 
@@ -163,6 +163,30 @@ pub(crate) fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
     ModeSpec::names()
         .map(ModeSpec::new)
         .find(|m| m.build(geometry).is_ok())
+}
+
+/// The one psi mode of [`ModeSpec::names`] `geometry` builds.
+pub(crate) fn psi_mode(geometry: &Geometry) -> Result<String, DiffError> {
+    // a psi mode refuses a geometry by its axes, whatever the reference
+    let builds = |name: &&str| {
+        let mode = ModeSpec {
+            psi: Some((Vector3::z(), 0.0)),
+            ..ModeSpec::new(*name)
+        };
+        mode.build(geometry).is_ok()
+    };
+    let candidates: Vec<String> = ModeSpec::names()
+        .filter(|&name| ModeSpec::parameters(name) == Some(ModeParameters::Psi))
+        .filter(builds)
+        .map(str::to_owned)
+        .collect();
+    match <[String; 1]>::try_from(candidates) {
+        Ok([one]) => Ok(one),
+        Err(candidates) => Err(DiffError::PsiMode {
+            geometry: geometry.name().to_owned(),
+            candidates,
+        }),
+    }
 }
 
 /// [`Diffractometer::set_limits`] on `geometry`.
