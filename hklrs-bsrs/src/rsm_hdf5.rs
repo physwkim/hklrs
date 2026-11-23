@@ -243,6 +243,18 @@ fn read_frame(path: &Path, dataset: &str, index: u64) -> Result<Image<f64>, Hdf5
         .ok()
         .filter(|&i| i < frames)
         .ok_or(Hdf5FrameError::IndexOutOfRange { index, frames })?;
+    // The extent is no proof a frame is written: NDFileHDF5 makes the dataset
+    // one frame long and starts SWMR before it writes frame 0
+    // (`NDFileHDF5Dataset.cpp:89`, 125, `NDFileHDF5.cpp:326`), and what no
+    // chunk in the file covers reads as fill. Asked of `ds`, whose view of
+    // the chunk index the read below uses.
+    if let Some(&[frame_chunk, slow_chunk, fast_chunk]) = ds.chunk_dims().as_deref() {
+        for row in 0..slow.div_ceil(slow_chunk) {
+            for column in 0..fast.div_ceil(fast_chunk) {
+                ds.read_chunk_raw_at(&[i / frame_chunk, row, column])?;
+            }
+        }
+    }
     let (starts, counts) = ([i, 0, 0], [1, slow, fast]);
     let data = match ds.datatype()? {
         DatatypeMessage::FloatingPoint { .. } => {
@@ -268,8 +280,9 @@ fn read_frame(path: &Path, dataset: &str, index: u64) -> Result<Image<f64>, Hdf5
 /// its first frame (LazyOpen, `host/areadetector.rs:975`), or has not
 /// started SWMR on; and, while a SWMR writer has the file, what it may yet
 /// write: a frame past those flushed, as when the datum is sent after a
-/// failed flush (`host/areadetector.rs:1933`), and metadata read
-/// mid-rewrite. What a file no writer has lacks, it lacks for good.
+/// failed flush (`host/areadetector.rs:1933`), a frame whose chunk is not in
+/// the file yet, and metadata read mid-rewrite. What a file no writer has
+/// lacks, it lacks for good.
 impl FrameReader for Hdf5FrameReader {
     fn read(&self, resource: &StreamResource, index: u64) -> Result<Image<f64>, ReadError> {
         let (path, dataset) = locate(resource).map_err(|e| ReadError::Permanent(e.into()))?;

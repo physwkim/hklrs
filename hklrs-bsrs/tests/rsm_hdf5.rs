@@ -560,6 +560,29 @@ fn what_a_closed_file_lacks_fails_at_once() {
     assert!(!not_yet(&dataset, 0));
 }
 
+/// NDFileHDF5's dataset from its creation, one frame long, until a flush
+/// puts frame 0's chunk in the file (`NDFileHDF5Dataset.cpp:89`, 125): no
+/// frame to read, not its fill, while the writer may yet write it, nor
+/// once it has closed the file.
+#[test]
+fn a_frame_whose_chunk_is_not_in_the_file_is_not_read() {
+    let dir = scratch("a_frame_whose_chunk_is_not_in_the_file_is_not_read");
+    let mut stream = images(&dir, 0);
+    let extent = [1, SHAPE.0 as u64, SHAPE.1 as u64];
+    stream.writer.set_extent(stream.ds, &extent).unwrap();
+    stream.writer.flush().unwrap();
+    let resource = image_resource(&dir);
+    let unwritten = |e: Hdf5FrameError| match e {
+        Hdf5FrameError::Hdf5(why) => why.contains("[0, 0, 0] has not been written"),
+        _ => false,
+    };
+    assert!(unwritten(Hdf5FrameReader.frame(&resource, 0).unwrap_err()));
+    assert!(not_yet(&resource, 0));
+    stream.close();
+    assert!(unwritten(Hdf5FrameReader.frame(&resource, 0).unwrap_err()));
+    assert!(!not_yet(&resource, 0));
+}
+
 // -- errors, one each ---------------------------------------------------------
 
 /// The soft detector's resource and bsrs's Hdf5FrameSink byte stream,
