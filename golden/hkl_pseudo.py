@@ -2,7 +2,7 @@
 Run: python -I hkl_pseudo.py
 
 Engines of hkl/hkl-pseudoaxis-common-q.c: "q" (E4CV, E4CH, K4CV, MARS),
-"q2" (q, alpha) and "qper_qpar" (parameters x, y, z = surface normal in the
+"q2" (q, alpha), "tth2" (tth, alpha; common-tth.c) and "qper_qpar" (parameters x, y, z = surface normal in the
 sample frame) on every other preset that carries them. Per case the axes are
 set, engine_list.get() is called and the engine's pseudo values are recorded
 in hkl's user units (alpha in degrees), with an independent numpy forward
@@ -28,7 +28,7 @@ WL = 1.54
 N_RANDOM = 40
 UNIT = {"Degree": ("rot", 1.0), "Milli Radian": ("rot", math.pi / 180.0 * 1000.0),
         "Milli Meter": ("trans", 1.0), "Meter": ("trans", 1e-3)}
-ENGINES = ("q", "q2", "qper_qpar")
+ENGINES = ("q", "q2", "qper_qpar", "tth2")
 NORMALS = [(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 0.0), (-1.0, 2.0, 1.0)]
 
 
