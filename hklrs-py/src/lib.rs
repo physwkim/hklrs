@@ -3,73 +3,20 @@
 
 mod calib;
 mod cut;
+mod inverse_error;
 mod normalise;
+mod pseudo_set;
 
 use hklrs::absorption::{Absorber, Beam, DetectorPath, Face, Layer, Masked, Slab};
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
-use pyo3::create_exception;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 fn err(e: hklrs::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
-}
-
-create_exception!(hklrs, InverseError, PyValueError, "The inverse failed.");
-create_exception!(
-    hklrs,
-    Unreachable,
-    InverseError,
-    "|Q| exceeds 4 pi / wavelength; carries q and q_max (Å⁻¹)."
-);
-create_exception!(
-    hklrs,
-    NoSolution,
-    InverseError,
-    "No axis values satisfy the mode."
-);
-create_exception!(
-    hklrs,
-    NoSolutionInLimits,
-    NoSolution,
-    "Every solution takes an axis outside its limits; carries them as \
-     solutions (degrees / metres, nearest to current first)."
-);
-
-/// `geometry` is the one the failing call solved on, for the units of
-/// `NoSolutionInLimits.solutions`.
-fn inverse_err(py: Python<'_>, geometry: &hklrs::Geometry, e: hklrs::InverseError) -> PyErr {
-    use hklrs::InverseError as E;
-    let msg = e.to_string();
-    match e {
-        E::NoSolutionInLimits(outside) => {
-            let solutions = match outside
-                .iter()
-                .map(|s| geometry.values_to_degrees(s))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(s) => s,
-                Err(e) => return err(e),
-            };
-            let err = NoSolutionInLimits::new_err(msg);
-            let _ = err.value(py).setattr("solutions", solutions);
-            err
-        }
-        E::Unreachable { q, q_max } => {
-            let err = Unreachable::new_err(msg);
-            let v = err.value(py);
-            // Plain floats cannot fail to set on a fresh exception.
-            let _ = v.setattr("q", q);
-            let _ = v.setattr("q_max", q_max);
-            err
-        }
-        E::NoSolution => NoSolution::new_err(msg),
-        E::Geometry(g) => err(g),
-        _ => InverseError::new_err(msg),
-    }
 }
 
 fn rows(m: &Matrix3<f64>) -> [[f64; 3]; 3] {
@@ -394,7 +341,7 @@ impl PyMode {
             "constant_mu_horizontal" => e6c::constant_mu_horizontal(g),
             _ => return Err(PyValueError::new_err(format!("unknown mode {name:?}"))),
         };
-        mode.map_err(|e| inverse_err(py, g, e))
+        mode.map_err(|e| inverse_error::to_py(py, g, e))
     }
 }
 
@@ -456,9 +403,11 @@ fn request<'a>(
 /// Every solution for `hkl` within the axis limits, nearest to `current`
 /// first. `current` and the results are all axes in geometry order, degrees
 /// / metres; written rotations are wrapped to their cut points and held
-/// axes are returned as given. Raises `Unreachable` when
-/// |Q| > 4π/λ·(1 + 1e-12), `NoSolution` when the mode has none and its
-/// subclass `NoSolutionInLimits` when every one is outside the limits.
+/// axes are returned as given, to the last bit of the degree to radian round
+/// trip. Raises `Unreachable` when |Q| > 4π/λ·(1 + 1e-12), `NoSolution` when
+/// the mode has none, its subclass `NoSolutionInLimits` when every one is
+/// outside the limits, and the `InverseError` subclass named after any other
+/// failure.
 #[pyfunction]
 fn solve(
     py: Python<'_>,
@@ -470,15 +419,28 @@ fn solve(
 ) -> PyResult<Vec<Vec<f64>>> {
     let geometry = mode.geometry.try_borrow(py)?;
     let geo = &geometry.0;
-    let ie = |e| inverse_err(py, geo, e);
+    let ie = |e| inverse_error::to_py(py, geo, e);
     let m = mode.build(py, geo)?;
-    let cur = geo.values_from_degrees(&current).map_err(err)?;
+    let cur = geo
+        .values_from_degrees(&current)
+        .map_err(|e| ie(e.into()))?;
     let all = request(&m, sample, hkl, wavelength, &cur)?
         .solve()
         .map_err(ie)?;
     all.iter()
         .map(|s| geo.values_to_degrees(s).map_err(err))
         .collect()
+}
+
+/// `pick`'s and `pseudo_pick`'s `picker`.
+fn parse_picker(picker: &str) -> PyResult<hklrs::Picker> {
+    match picker {
+        "closest" => Ok(hklrs::Picker::Closest),
+        "first" => Ok(hklrs::Picker::First),
+        other => Err(PyValueError::new_err(format!(
+            "picker must be \"closest\" or \"first\", got {other:?}"
+        ))),
+    }
 }
 
 /// One solution: `picker` "closest" (nearest to `current`) or "first" (the
@@ -494,20 +456,14 @@ fn pick(
     current: Vec<f64>,
     picker: &str,
 ) -> PyResult<Vec<f64>> {
-    let picker = match picker {
-        "closest" => hklrs::Picker::Closest,
-        "first" => hklrs::Picker::First,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "picker must be \"closest\" or \"first\", got {other:?}"
-            )));
-        }
-    };
+    let picker = parse_picker(picker)?;
     let geometry = mode.geometry.try_borrow(py)?;
     let geo = &geometry.0;
-    let ie = |e| inverse_err(py, geo, e);
+    let ie = |e| inverse_error::to_py(py, geo, e);
     let m = mode.build(py, geo)?;
-    let cur = geo.values_from_degrees(&current).map_err(err)?;
+    let cur = geo
+        .values_from_degrees(&current)
+        .map_err(|e| ie(e.into()))?;
     let s = request(&m, sample, hkl, wavelength, &cur)?
         .pick(picker)
         .map_err(ie)?;
@@ -523,7 +479,10 @@ fn psi(
     reference: [f64; 3],
     axes: Vec<f64>,
 ) -> PyResult<f64> {
-    let values = geometry.0.values_from_degrees(&axes).map_err(err)?;
+    let values = geometry
+        .0
+        .values_from_degrees(&axes)
+        .map_err(|e| inverse_error::to_py(py, &geometry.0, e.into()))?;
     hklrs::inverse::psi(
         &geometry.0,
         &sample.0.ub(),
@@ -531,7 +490,7 @@ fn psi(
         &values,
     )
     .map(|p| hklrs::Deg::from(hklrs::Rad(p)).0)
-    .map_err(|e| inverse_err(py, &geometry.0, e))
+    .map_err(|e| inverse_error::to_py(py, &geometry.0, e))
 }
 
 /// Forward for one detector point. `axes` in geometry axis order (degrees /
@@ -1434,18 +1393,13 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         p.add_class::<PyPoniFile>()?;
         p.add_function(wrap_pyfunction!(parse, p)?)
     })?;
-    m.add("InverseError", m.py().get_type::<InverseError>())?;
-    m.add("Unreachable", m.py().get_type::<Unreachable>())?;
-    m.add("NoSolution", m.py().get_type::<NoSolution>())?;
-    m.add(
-        "NoSolutionInLimits",
-        m.py().get_type::<NoSolutionInLimits>(),
-    )?;
+    inverse_error::register(m)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(pick, m)?)?;
     m.add_function(wrap_pyfunction!(psi, m)?)?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(pseudo, m)?)?;
+    pseudo_set::register(m)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
     m.add_function(wrap_pyfunction!(detectors, m)?)?;
     m.add_function(wrap_pyfunction!(detector, m)?)?;
