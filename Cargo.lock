@@ -449,6 +449,7 @@ dependencies = [
  "bsrs",
  "futures",
  "hklrs",
+ "rust-hdf5",
  "serde_json",
  "thiserror",
  "tokio",

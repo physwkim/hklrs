@@ -8,6 +8,8 @@ mod error;
 mod plans;
 mod pseudo;
 mod rsm;
+#[cfg(feature = "hdf5")]
+mod rsm_hdf5;
 mod samples;
 
 pub use diffractometer::{Diffractometer, RealAxis, WavelengthSource};
@@ -18,4 +20,6 @@ pub use rsm::{
     FailedFrame, FrameFailure, FrameReader, RsmCallback, RsmConfig, RsmError, RsmMap, RsmMonitor,
     RsmValue,
 };
+#[cfg(feature = "hdf5")]
+pub use rsm_hdf5::{Hdf5FrameError, Hdf5FrameReader};
 pub use samples::Measured;

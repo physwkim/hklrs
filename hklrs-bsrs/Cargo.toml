@@ -15,6 +15,11 @@ async-trait = "0.1"
 futures = "0.3"
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+rust-hdf5 = { workspace = true, optional = true }
+
+[features]
+# Hdf5FrameReader, frames from areaDetector's HDF5 files
+hdf5 = ["hklrs/hdf5", "dep:rust-hdf5"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
