@@ -1,36 +1,32 @@
-//! Closed-form candidates. For a Q goal, on the geometries that are You
-//! (1999) 4S+2D axis for axis: the constraint families solved as
-//! diffcalc-core (`059ec8a`, `src/diffcalc/hkl/calc*.py`) solves them, with
-//! its defects corrected (upstream-defects.md DC-1..DC-6). For a detector
-//! goal, the detector arms of [`detector`].
+//! Closed-form candidates. For a Q goal, on every geometry [`map`] lays
+//! onto You (1999) 4S+2D: the constraint families solved as diffcalc-core
+//! (`059ec8a`, `src/diffcalc/hkl/calc*.py`) solves them, with its defects
+//! corrected (upstream-defects.md DC-1..DC-6). For a detector goal, the
+//! detector arms of [`detector`].
 //!
 //! [`search`] is the one boundary: it maps the mode's [`System`] onto a
-//! closed form (You's constraints through [`frame`]) and offers what it
+//! closed form (You's constraints through a [`Map`]) and offers what it
 //! finds to the validator, as every generator does. Where an equation
 //! leaves an angle free the solver samples it, and the validator finds the
 //! family singular.
 
 mod detector;
+mod map;
 mod sample;
 mod solve;
 mod trig;
 mod you;
 
-use nalgebra::{Matrix3, Vector3};
+use std::f64::consts::PI;
+
+use nalgebra::Vector3;
 
 use super::Equation;
 use super::kappa::Branch;
 use super::system::{Goal, System};
 use super::validate::SolutionSet;
-use crate::{AxisKind, Geometry};
+use map::{Arm, Circle, Map};
 use sample::Known;
-
-/// hklrs's E6C lab (beam +x, `mu` and `gamma` about z) as You's lab (beam
-/// +y, μ and ν about x): x → y, y → z, z → x. Lab and sample-frame vectors
-/// map by `frame() * v`.
-fn frame() -> Matrix3<f64> {
-    Matrix3::new(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-}
 
 /// Fixes the detector, or with `Naz` the azimuth about the beam of a unit
 /// vector in the φ frame.
@@ -90,55 +86,37 @@ enum Constraints {
     Samples(Known),
 }
 
-/// You's circle of each axis in geometry order, where the geometry is
-/// You's under [`frame`]: four sample rotations about MU, ETA, CHI, PHI's
-/// axes and two detector rotations about NU, DELTA's, outermost first, no
-/// source axis, and the beam along +y.
-fn layout(geometry: &Geometry) -> Option<[usize; 6]> {
-    let r = frame();
-    let (sample, detector) = (geometry.sample_stack(), geometry.detector_stack());
-    if geometry.axes().len() != 6
-        || sample.len() != 4
-        || detector.len() != 2
-        || !geometry.source_stack().is_empty()
-        || r * geometry.beam_direction().into_inner() != Vector3::y()
-    {
+/// The mode as You's constraints on `map`: the circles it holds, at
+/// `current` through their axes or fixed, and its equations, which must
+/// make one family. Every written axis must be the map's.
+fn constraints(system: &System, map: &Map) -> Option<Constraints> {
+    if !system.written().iter().all(|&i| map.carries(i)) {
         return None;
     }
-    let mut out = [None; 6];
-    for (c, &i) in sample.iter().chain(detector).enumerate() {
-        let AxisKind::Rotation { axis } = geometry.axes()[i].kind() else {
-            return None;
-        };
-        if r * axis.into_inner() != you::axis(c) || out[i].is_some() {
-            return None;
-        }
-        out[i] = Some(c);
-    }
-    Some(out.map(Option::unwrap))
-}
-
-/// The mode as You's constraints: the axes it holds at `current` and its
-/// equations, which must make one family.
-fn constraints(system: &System, layout: &[usize; 6]) -> Option<Constraints> {
-    let unit = |v: &Vector3<f64>| (frame() * v).try_normalize(0.0);
-    let (mut det, mut refs, mut known) = (Vec::new(), Vec::new(), [None; 4]);
+    let unit = |v: &Vector3<f64>| (map.phi * v).try_normalize(0.0);
+    let fixed = |c: &Circle| match c.axis {
+        Some(i) if system.is_written(i) => None,
+        Some(i) => Some(c.angle(system.current()[i])),
+        None => Some(c.offset),
+    };
+    let (mut det, mut refs, known) = (Vec::new(), Vec::new(), map.sample.map(|c| fixed(&c)));
     let (mut bisect, mut omega) = (false, None);
-    for (i, &c) in layout.iter().enumerate() {
-        if system.is_written(i) {
-            continue;
+    match &map.arm {
+        Arm::Circles([nu, delta]) => {
+            det.extend(fixed(nu).map(Detector::Nu));
+            det.extend(fixed(delta).map(Detector::Delta));
         }
-        let v = system.current()[i];
-        match c {
-            you::NU => det.push(Detector::Nu(v)),
-            you::DELTA => det.push(Detector::Delta(v)),
-            c => known[c] = Some(v),
-        }
+        // You's detector constraints are on NU and DELTA alone.
+        Arm::Own(own) if own.iter().all(|&i| system.is_written(i)) => {}
+        Arm::Own(_) => return None,
     }
+    let chi = |axis: usize| map.sample[you::CHI].axis == Some(axis);
     for e in system.extra() {
         match *e {
-            Equation::Qaz { qaz } => det.push(Detector::Qaz(qaz)),
-            Equation::Naz { normal, naz } => det.push(Detector::Naz(unit(&normal)?, naz)),
+            Equation::Qaz { qaz } => det.push(Detector::Qaz(qaz + map.azimuth?)),
+            Equation::Naz { normal, naz } => {
+                det.push(Detector::Naz(unit(&normal)?, naz + map.azimuth?))
+            }
             Equation::Incidence { normal, incidence } => {
                 refs.push(Reference::Incidence(unit(&normal)?, incidence))
             }
@@ -151,13 +129,14 @@ fn constraints(system: &System, layout: &[usize; 6]) -> Option<Constraints> {
             Equation::PsiConstant { reference, psi } => {
                 refs.push(Reference::Psi(unit(&(system.ub() * reference))?, psi))
             }
-            Equation::InScatteringPlane { axis } if layout[axis] == you::CHI && !bisect => {
-                bisect = true
-            }
-            Equation::VirtualOmega { axis, omega: w }
-                if layout[axis] == you::CHI && omega.is_none() =>
-            {
-                omega = Some(w)
+            Equation::InScatteringPlane { axis } if chi(axis) && !bisect => bisect = true,
+            Equation::VirtualOmega { axis, omega: w } if chi(axis) && omega.is_none() => {
+                // The χ axis turned the other way is π from the axis's.
+                omega = Some(if map.sample[you::CHI].sign < 0.0 {
+                    w + PI
+                } else {
+                    w
+                })
             }
             _ => return None,
         }
@@ -223,25 +202,44 @@ fn arm_search<'a>(system: &'a System<'a>, eulerians: &[f64; 3]) -> Option<Soluti
 }
 
 /// [`search`] by You's solution, where the geometry and the mode are
-/// You's. The reach gate has passed: `q` is nonzero and no longer than 2k.
+/// You's under a [`Map`]. The reach gate has passed: `q` is nonzero and no
+/// longer than 2k.
 fn you_search<'a>(system: &'a System<'a>, q: &Vector3<f64>) -> Option<SolutionSet<'a>> {
-    let layout = layout(system.geometry())?;
-    let constraints = constraints(system, &layout)?;
+    let map = Map::new(system.geometry())?;
+    let constraints = constraints(system, &map)?;
+    let own = match map.arm {
+        Arm::Own(own) => Some((detector::Pair::new(system.geometry(), own)?, own)),
+        Arm::Circles(_) => None,
+    };
     let mut set = SolutionSet::new(system);
-    for a in solve::Problem::new(&(frame() * q)).candidates(&constraints) {
-        if set.is_degenerate() {
-            break;
+    for a in solve::Problem::new(&(map.phi * q)).candidates(&constraints) {
+        let mut values = system.current().to_vec();
+        for (c, circle) in map.circles() {
+            if let Some(i) = circle.axis.filter(|&i| system.is_written(i)) {
+                values[i] = circle.value(a[c]);
+            }
         }
-        let values: Vec<f64> = (0..6)
-            .map(|i| {
-                if system.is_written(i) {
-                    a[layout[i]]
-                } else {
-                    system.current()[i]
-                }
-            })
-            .collect();
-        set.offer(&values);
+        let positions = match &own {
+            None => vec![values],
+            Some((pair, [outer, inner])) => {
+                let kf = map.lab.transpose() * you::kout(&a);
+                pair.reach(&values, &kf)
+                    .into_iter()
+                    .map(|[v1, v2]| {
+                        let mut values = values.clone();
+                        values[*outer] = v1;
+                        values[*inner] = v2;
+                        values
+                    })
+                    .collect()
+            }
+        };
+        for image in positions.into_iter().flat_map(|v| system.slit_images(v)) {
+            if set.is_degenerate() {
+                return Some(set);
+            }
+            set.offer(&image);
+        }
     }
     Some(set)
 }
@@ -255,63 +253,388 @@ mod tests {
         InverseError, InverseRequest, Mode, Target, e6c, esrf_bm28_psic, solve as numeric, wrap,
     };
     use super::*;
-    use crate::Wavelength;
     use crate::presets::{PRESETS, preset};
+    use crate::{Geometry, Wavelength};
+    use nalgebra::Matrix3;
+    use std::f64::consts::FRAC_PI_2;
 
-    /// Of every preset, E6C and ESRF BM28 PSIC are You's geometry, each axis
-    /// on its circle in stack order.
-    #[test]
-    fn layout_maps_e6c_and_bm28_psic() {
-        assert_eq!(frame().determinant(), 1.0);
-        let mapped: Vec<_> = PRESETS
-            .iter()
-            .filter_map(|&name| layout(&preset(name).unwrap()).map(|l| (name, l)))
-            .collect();
-        let you = [you::MU, you::ETA, you::CHI, you::PHI, you::NU, you::DELTA];
-        assert_eq!(mapped, [("E6C", you), ("ESRF BM28 PSIC", you)]);
+    fn same_sets(a: &[Vec<f64>], b: &[Vec<f64>]) -> bool {
+        let within = |x: &[Vec<f64>], y: &[Vec<f64>]| {
+            x.iter().all(|x| {
+                y.iter()
+                    .any(|y| x.iter().zip(y).all(|(u, v)| wrap(u - v).abs() < 1e-6))
+            })
+        };
+        a.len() == b.len() && within(a, b) && within(b, a)
     }
 
-    /// Every hkl mode of the two presets is one of You's families but the
-    /// bissector and double-diffraction modes.
+    /// hklrs's E6C lab (beam +x, `mu` and `gamma` about z) as You's lab
+    /// (beam +y, μ and ν about x): x → y, y → z, z → x.
+    fn frame() -> Matrix3<f64> {
+        Matrix3::new(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    }
+
+    /// Every preset lays onto You's circles but the kappa ones, P23 6C (five
+    /// sample rotations), PYFAI (three detector rotations) and LISA (a
+    /// source axis): E6C and BM28 PSIC as they are, E4CH turned, ID01 with
+    /// χ fixed at π/2, ZAXIS through a detector arm of its own.
     #[test]
-    fn preset_modes_map_but_bissector_and_double_diffraction() {
-        let (e, b) = (preset("E6C").unwrap(), preset("ESRF BM28 PSIC").unwrap());
-        let (h, psi) = (Vector3::new(0.3, -0.2, 1.0), 0.4);
-        let modes = [
-            (e6c::bissector_vertical(&e), false),
-            (e6c::constant_omega_vertical(&e), true),
-            (e6c::constant_chi_vertical(&e), true),
-            (e6c::constant_phi_vertical(&e), true),
-            (e6c::lifting_detector_phi(&e), true),
-            (e6c::lifting_detector_omega(&e), true),
-            (e6c::lifting_detector_mu(&e), true),
-            (e6c::double_diffraction_vertical(&e, h), false),
-            (e6c::bissector_horizontal(&e), false),
-            (e6c::double_diffraction_horizontal(&e, h), false),
-            (e6c::psi_constant_vertical(&e, h, psi), true),
-            (e6c::psi_constant_horizontal(&e, h, psi), true),
-            (e6c::constant_mu_horizontal(&e), true),
-            (esrf_bm28_psic::constant_nu_coplanar(&b), true),
-            (esrf_bm28_psic::constant_delta_coplanar(&b), true),
-            (esrf_bm28_psic::constant_eta_noncoplanar(&b), true),
+    fn map_lays_presets_on_you() {
+        let unmapped: Vec<_> = PRESETS
+            .iter()
+            .filter(|&&name| Map::new(&preset(name).unwrap()).is_none())
+            .collect();
+        assert_eq!(
+            unmapped,
+            [
+                &"K4CV",
+                &"K6C",
+                &"SOLEIL SIRIUS KAPPA",
+                &"SOLEIL CRISTAL K4C",
+                &"PETRA3 P23 6C",
+                &"PYFAI",
+                &"PETRA3 P08 LISA"
+            ]
+        );
+        let fixed = |offset| Circle {
+            axis: None,
+            sign: 1.0,
+            offset,
+        };
+        let map = |name| {
+            let geo = preset(name).unwrap();
+            let on = move |axis, sign| Circle {
+                axis: Some(geo.axis_index(axis).unwrap()),
+                sign,
+                offset: 0.0,
+            };
+            (Map::new(&preset(name).unwrap()).unwrap(), on)
+        };
+        for name in ["E6C", "ESRF BM28 PSIC"] {
+            let (map, _) = map(name);
+            assert_eq!(map.lab, frame());
+            assert_eq!(map.phi, frame());
+            let you = [0, 1, 2, 3, 4, 5].map(|i| Circle {
+                axis: Some(i),
+                sign: 1.0,
+                offset: 0.0,
+            });
+            assert_eq!(map.sample, you[..4]);
+            assert_eq!(map.arm, Arm::Circles([you[4], you[5]]));
+            assert_eq!(map.azimuth, Some(0.0));
+        }
+        let (e4ch, on) = map("E4CH");
+        let turn = Matrix3::new(0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0);
+        assert_eq!(e4ch.lab, turn);
+        let sample = [fixed(0.0), on("omega", 1.0), on("chi", 1.0), on("phi", 1.0)];
+        assert_eq!(e4ch.sample, sample);
+        assert_eq!(e4ch.arm, Arm::Circles([fixed(0.0), on("tth", 1.0)]));
+        assert_eq!(e4ch.azimuth, Some(FRAC_PI_2));
+        let (id01, on) = map("ESRF ID01 PSIC");
+        assert_eq!(id01.lab, frame());
+        let sample = [
+            on("mu", -1.0),
+            on("eta", 1.0),
+            fixed(FRAC_PI_2),
+            on("phi", 1.0),
         ];
-        let current = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
-        for (mode, maps) in modes {
-            let mode = mode.unwrap();
-            let system = System::new(
-                &mode,
-                Matrix3::identity(),
-                Goal::Q(Vector3::z()),
-                1.0,
-                &current,
-            );
-            let layout = layout(mode.geometry()).unwrap();
-            assert_eq!(
-                constraints(&system, &layout).is_some(),
-                maps,
-                "{}",
-                mode.name()
-            );
+        assert_eq!(id01.sample, sample);
+        assert_eq!(id01.arm, Arm::Circles([on("nu", -1.0), on("delta", 1.0)]));
+        let (zaxis, on) = map("ZAXIS");
+        let sample = [on("mu", 1.0), on("omega", 1.0), fixed(0.0), fixed(0.0)];
+        assert_eq!(zaxis.sample, sample);
+        let own = ["delta", "gamma"].map(|a| preset("ZAXIS").unwrap().axis_index(a).unwrap());
+        assert_eq!(zaxis.arm, Arm::Own(own));
+    }
+
+    /// Every hkl "hkl" engine mode of preset `name`, labelled, its
+    /// parameters arbitrary; MED2+3's also with the slit fit.
+    fn hkl_modes<'g>(name: &str, geo: &'g Geometry) -> Vec<(String, Mode<'g>)> {
+        use super::super::{
+            aps_04id_polar as polar, e4c, petra3_p09_eh2 as p09, petra3_p23_4c as p23,
+            soleil_nanoscopium_robot as robot, soleil_sirius_turret as turret,
+            soleil_sixs_med as med, zaxis,
+        };
+        let (h2, reference, psi) = (
+            Vector3::new(1.0, -1.0, 0.5),
+            Vector3::new(0.2, 0.3, 1.0),
+            0.4,
+        );
+        let surface = Vector3::new(0.1, 1.0, 0.2);
+        let modes = match name {
+            "TwoC" => vec![],
+            "E4CV" | "E4CH" | "SOLEIL MARS" => vec![
+                e4c::bissector(geo),
+                e4c::constant_omega(geo),
+                e4c::constant_chi(geo),
+                e4c::constant_phi(geo),
+                e4c::double_diffraction(geo, h2),
+                e4c::psi_constant(geo, reference, psi),
+            ],
+            "E6C" => vec![
+                e6c::bissector_vertical(geo),
+                e6c::constant_omega_vertical(geo),
+                e6c::constant_chi_vertical(geo),
+                e6c::constant_phi_vertical(geo),
+                e6c::lifting_detector_phi(geo),
+                e6c::lifting_detector_omega(geo),
+                e6c::lifting_detector_mu(geo),
+                e6c::double_diffraction_vertical(geo, h2),
+                e6c::bissector_horizontal(geo),
+                e6c::double_diffraction_horizontal(geo, h2),
+                e6c::psi_constant_vertical(geo, reference, psi),
+                e6c::psi_constant_horizontal(geo, reference, psi),
+                e6c::constant_mu_horizontal(geo),
+            ],
+            "ESRF BM28 PSIC" | "ESRF ID01 PSIC" => vec![
+                esrf_bm28_psic::constant_nu_coplanar(geo),
+                esrf_bm28_psic::constant_delta_coplanar(geo),
+                esrf_bm28_psic::constant_eta_noncoplanar(geo),
+            ],
+            "ZAXIS" => vec![zaxis::zaxis(geo), zaxis::reflectivity(geo)],
+            "SOLEIL SIXS MED1+2" => vec![med::pitch_fixed(geo), med::delta_fixed(geo)],
+            "SOLEIL SIXS MED2+2" => vec![
+                med::mu_fixed(geo),
+                med::reflectivity(geo),
+                med::emergence_fixed(geo, surface, -0.3),
+            ],
+            "SOLEIL SIXS MED2+3" | "SOLEIL SIXS MED2+3 v2" => [
+                med::mu_fixed(geo),
+                med::gamma_fixed(geo),
+                med::emergence_fixed(geo, surface, -0.3),
+            ]
+            .into_iter()
+            .flat_map(|m| {
+                let m = m.unwrap();
+                [Ok(m.clone()), med::slits(m)]
+            })
+            .collect(),
+            "APS POLAR" => vec![
+                polar::constant_phi_horizontal(geo),
+                polar::zaxis_alpha_fixed(geo),
+                polar::zaxis_beta_fixed(geo),
+                polar::zaxis_alpha_eq_beta(geo),
+                polar::bissecting_horizontal(geo),
+                polar::constant_mu_horizontal(geo),
+                polar::constant_chi_horizontal(geo),
+                polar::lifting_detector_tau(geo),
+                polar::lifting_detector_mu(geo),
+                polar::lifting_detector_chi(geo),
+                polar::lifting_detector_phi(geo),
+                polar::psi_constant_horizontal(geo, reference, psi),
+                polar::psi_constant_vertical(geo, reference, psi),
+            ],
+            "PETRA3 P09 EH2" => vec![
+                p09::zaxis_alpha_fixed(geo),
+                p09::zaxis_beta_fixed(geo),
+                p09::zaxis_alpha_eq_beta(geo),
+                p09::bissecting_horizontal(geo),
+                p09::constant_omega_horizontal(geo),
+                p09::constant_chi_horizontal(geo),
+                p09::constant_phi_horizontal(geo),
+                p09::lifting_detector_mu(geo),
+                p09::lifting_detector_omega(geo),
+                p09::lifting_detector_chi(geo),
+                p09::lifting_detector_phi(geo),
+            ],
+            "PETRA3 P23 4C" => vec![
+                p23::bissector_vertical(geo),
+                p23::lifting_detector_omega_t(geo),
+                p23::lifting_detector_mu(geo),
+                p23::bissector_horizontal(geo),
+                p23::psi_constant(geo, reference, psi),
+            ],
+            "SOLEIL SIRIUS TURRET" => vec![turret::lifting_detector_thetah(geo)],
+            "SOLEIL NANOSCOPIUM ROBOT" => vec![
+                robot::lifting_detector_rz(geo),
+                robot::lifting_detector_rs(geo),
+                robot::lifting_detector_rx(geo),
+            ],
+            other => panic!("{other} maps but has no modes here"),
+        };
+        modes
+            .into_iter()
+            .map(Result::unwrap)
+            .map(|m| {
+                let slits = if m.slits().is_some() { " slits" } else { "" };
+                (format!("{}{slits}", m.name()), m)
+            })
+            .collect()
+    }
+
+    /// The closed form's set against the numeric search's for `mode`, from
+    /// three held positions and four targets: per case `None` where the
+    /// closed form refuses the mode, else whether a position solves it (the
+    /// same positions within 1e-6) or the same error, or the disagreement.
+    fn cases(mode: &Mode) -> Vec<Option<Result<bool, String>>> {
+        let ub = nalgebra::Rotation3::from_euler_angles(0.3, -0.2, 0.5).into_inner() * 1.5;
+        let targets = [
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.3, -0.4, 1.1),
+            Vector3::new(1.2, 0.8, -0.5),
+            Vector3::new(2.5, 1.0, 1.5),
+        ];
+        let n = mode.geometry().axes().len();
+        let turned: Vec<f64> = (0..n).map(|i| 0.3 - 0.17 * i as f64).collect();
+        // Held χ, ν or δ far from zero, where the modes holding them reach.
+        let far = [0.6, 1.2, -0.9, 0.8, 1.0, -0.7, 0.4];
+        let far: Vec<f64> = (0..n).map(|i| far[i % far.len()]).collect();
+        let mut out = Vec::new();
+        for current in [vec![0.0; n], turned, far] {
+            for h in targets {
+                let request = InverseRequest {
+                    mode,
+                    ub,
+                    wavelength: Wavelength::new(1.54).unwrap(),
+                    target: Target::Hkl(h),
+                    current: &current,
+                };
+                let system = request.system().unwrap();
+                out.push(search(&system).map(|ours| {
+                    let [ours, theirs] = [ours, numeric::search(&system)]
+                        .map(|s| s.into_sorted().map(|f| f.solutions));
+                    match (&ours, &theirs) {
+                        (Ok(a), Ok(b)) if same_sets(a, b) => Ok(true),
+                        (Err(a), Err(b)) if a == b => Ok(false),
+                        _ => Err(format!(
+                            "{current:?} {h:?}:\nanalytic {ours:?}\nnumeric {theirs:?}"
+                        )),
+                    }
+                }));
+            }
+        }
+        out
+    }
+
+    /// On every preset that maps, every hkl mode that is one of You's
+    /// families agrees with the numeric search in every case of [`cases`]
+    /// and solves at least one. The modes that are not tie a sample axis to
+    /// a detector one (`Bisector`, `Equal`), add a second reflection, or
+    /// hold one of a detector arm's own two axes, which no NU or DELTA
+    /// constraint is.
+    #[test]
+    fn preset_modes_agree_with_numeric() {
+        let mut refused = std::collections::BTreeSet::new();
+        let (mut mapped, mut failed, mut unsolved) = (0, Vec::new(), Vec::new());
+        for &name in PRESETS {
+            let geo = preset(name).unwrap();
+            if Map::new(&geo).is_none() {
+                continue;
+            }
+            for (label, mode) in hkl_modes(name, &geo) {
+                let label = format!("{name}: {label}");
+                let cases = cases(&mode);
+                if cases.iter().any(Option::is_none) {
+                    refused.insert(label);
+                    continue;
+                }
+                mapped += 1;
+                let cases = cases.into_iter().flatten();
+                let (solved, errors): (Vec<_>, Vec<_>) = cases.partition(Result::is_ok);
+                failed.extend(
+                    errors
+                        .into_iter()
+                        .map(|e| format!("{label} {}", e.unwrap_err())),
+                );
+                if !solved.into_iter().any(|s| s == Ok(true)) {
+                    unsolved.push(label);
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+        assert!(unsolved.is_empty(), "{unsolved:?}");
+        assert_eq!(mapped, 60);
+        let refused: Vec<_> = refused.iter().map(String::as_str).collect();
+        assert_eq!(
+            refused,
+            [
+                "APS POLAR: 4-circles bissecting horizontal",
+                "APS POLAR: 4-circles constant chi horizontal",
+                "APS POLAR: 4-circles constant mu horizontal",
+                "APS POLAR: 4-circles constant phi horizontal",
+                "APS POLAR: psi constant horizontal",
+                "APS POLAR: psi constant vertical",
+                "APS POLAR: zaxis + alpha=beta",
+                "APS POLAR: zaxis + beta-fixed",
+                "E4CH: bissector",
+                "E4CH: double_diffraction",
+                "E4CV: bissector",
+                "E4CV: double_diffraction",
+                "E6C: bissector_horizontal",
+                "E6C: bissector_vertical",
+                "E6C: double_diffraction_horizontal",
+                "E6C: double_diffraction_vertical",
+                "PETRA3 P09 EH2: 4-circles bissecting horizontal",
+                "PETRA3 P09 EH2: 4-circles constant chi horizontal",
+                "PETRA3 P09 EH2: 4-circles constant omega horizontal",
+                "PETRA3 P09 EH2: 4-circles constant phi horizontal",
+                "PETRA3 P09 EH2: zaxis + alpha=beta",
+                "PETRA3 P09 EH2: zaxis + beta-fixed",
+                "SOLEIL MARS: bissector",
+                "SOLEIL MARS: double_diffraction",
+                "SOLEIL SIXS MED1+2: delta_fixed",
+                "SOLEIL SIXS MED2+2: reflectivity",
+                "SOLEIL SIXS MED2+3: gamma_fixed",
+                "SOLEIL SIXS MED2+3: gamma_fixed slits",
+                "ZAXIS: reflectivity",
+            ]
+        );
+    }
+
+    /// The equations no hkl mode of a mapped preset gives, through maps that
+    /// turn them: qaz and naz on each preset whose azimuth is not zero, the
+    /// arm and the last two sample circles written; bisect with virtual
+    /// omega on E6C with χ reversed, which maps χ turned the other way.
+    #[test]
+    fn turned_equations_agree_with_numeric() {
+        let reversed = Geometry::builder("E6C, chi reversed")
+            .sample_rotation("mu", [0.0, 0.0, 1.0])
+            .sample_rotation("omega", [0.0, -1.0, 0.0])
+            .sample_rotation("chi", [-1.0, 0.0, 0.0])
+            .sample_rotation("phi", [0.0, -1.0, 0.0])
+            .detector_rotation("gamma", [0.0, 0.0, 1.0])
+            .detector_rotation("delta", [0.0, -1.0, 0.0])
+            .build()
+            .unwrap();
+        assert_eq!(Map::new(&reversed).unwrap().sample[you::CHI].sign, -1.0);
+        let azimuths = [
+            ("SOLEIL NANOSCOPIUM ROBOT", ["rs", "rx", "delta", "gamma"]),
+            ("APS POLAR", ["chi", "phi", "gamma", "delta"]),
+            ("PETRA3 P09 EH2", ["chi", "phi", "delta", "gamma"]),
+            ("SOLEIL SIXS MED1+2", ["pitch", "mu", "gamma", "delta"]),
+            (
+                "SOLEIL SIRIUS TURRET",
+                ["alphay", "alphax", "delta", "gamma"],
+            ),
+        ]
+        .map(|(name, written)| (preset(name).unwrap(), written));
+        let normal = Vector3::new(0.2, 0.3, 1.0);
+        let mut modes = Vec::new();
+        for (geo, written) in &azimuths {
+            assert_ne!(Map::new(geo).unwrap().azimuth, Some(0.0));
+            modes.push(Mode::named(geo, "qaz", written, |_| {
+                vec![Equation::Qaz { qaz: 0.4 }]
+            }));
+            modes.push(Mode::named(geo, "naz", written, |_| {
+                vec![Equation::Naz { normal, naz: -2.1 }]
+            }));
+        }
+        let bisect = ["mu", "omega", "chi", "phi", "gamma"];
+        modes.push(Mode::named(&reversed, "bisect omega", &bisect, |w| {
+            vec![
+                Equation::InScatteringPlane { axis: w[2] },
+                Equation::VirtualOmega {
+                    axis: w[2],
+                    omega: 0.3,
+                },
+            ]
+        }));
+        for mode in modes.into_iter().map(Result::unwrap) {
+            let label = format!("{} {}", mode.geometry().name(), mode.name());
+            let cases: Vec<_> = cases(&mode).into_iter().map(|c| c.expect(&label)).collect();
+            let failed: Vec<_> = cases.iter().filter_map(|c| c.clone().err()).collect();
+            assert!(failed.is_empty(), "{label}: {}", failed.join("\n"));
+            assert!(cases.contains(&Ok(true)), "{label}");
         }
     }
 
