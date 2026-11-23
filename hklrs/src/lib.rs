@@ -15,6 +15,7 @@ pub mod presets;
 pub mod pseudo;
 mod qmap;
 mod sample;
+mod sixs;
 mod units;
 pub mod xu;
 
@@ -30,6 +31,7 @@ pub use qmap::{
     solid_angle,
 };
 pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
+pub use sixs::sixs;
 pub use units::{Deg, Energy, HC_KEV_ANGSTROM, PerMetre, Rad, Wavelength};
 
 pub use nalgebra;
