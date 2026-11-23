@@ -7,6 +7,14 @@
 //! over the window, with `dᵢ` the pixel counts (at least 1) and `N` the
 //! background-subtracted sum. Background pixels count, so a wide window
 //! costs precision; for a pure peak it reduces to second moment over √N.
+//!
+//! The search starts at the window position of largest background-subtracted
+//! sum above the mean of its surrounding ring (a summed-area table), never at
+//! the whole-frame centre of mass: a background that is off by δ over N
+//! pixels adds `Nδ` to that, which swamps a peak at δ ≈ 0.1 on a detector of
+//! 640000 pixels (xrayutilities' `_peak_position`, XU-20). The starting
+//! window and the settled one are peaks only if that excess is at least
+//! `min_snr` σ of its own Poisson noise, else [`Reject::NoSignal`].
 
 use thiserror::Error;
 
@@ -30,7 +38,8 @@ pub struct Peak1 {
 /// failures of the caller's input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
-    /// No positive signal above the border background in the window.
+    /// No window of the frame holds a sum of `min_snr` σ above the border
+    /// background.
     NoSignal,
     /// An unmasked pixel in the peak window is at or above the saturation level.
     Saturated { slow: usize, fast: usize },
@@ -76,6 +85,12 @@ pub struct PeakOptions {
     /// Width of the image-edge ring that gives the background and the edge test.
     pub border: usize,
     pub edge_fraction: f64,
+    /// A window is a peak only if its background-subtracted sum exceeds
+    /// this many σ of its own Poisson noise. Default 6: the largest of the
+    /// ~10⁶ window sums of a signal-free frame reaches about √(2 ln 10⁶) ≈
+    /// 5.3 σ, so 6 leaves the chance of a false peak per frame near 10⁻³
+    /// at the largest detectors and far below for the usual ones.
+    pub min_snr: f64,
 }
 
 impl Default for PeakOptions {
@@ -86,6 +101,7 @@ impl Default for PeakOptions {
             max_passes: 20,
             border: 3,
             edge_fraction: 0.1,
+            min_snr: 6.0,
         }
     }
 }
@@ -182,20 +198,168 @@ fn com(w: &[f64], ns: usize, nf: usize, c: [f64; 2], half: [f64; 2]) -> ([f64; 2
     ([a / s, b / s], s)
 }
 
-/// Re-centre a window of half-width `half` until the centre moves less than
-/// `tol`; the whole image is the first window.
+/// Sum over every `bs × bf` box of a frame, by summed-area table, O(N).
+struct Boxes {
+    nf: usize,
+    sat: Vec<f64>,
+}
+
+impl Boxes {
+    fn new(v: impl Fn(usize) -> f64, ns: usize, nf: usize) -> Self {
+        let mut sat = vec![0.0; (ns + 1) * (nf + 1)];
+        for i in 0..ns {
+            let mut row = 0.0;
+            for j in 0..nf {
+                row += v(i * nf + j);
+                sat[(i + 1) * (nf + 1) + j + 1] = sat[i * (nf + 1) + j + 1] + row;
+            }
+        }
+        Self { nf, sat }
+    }
+
+    fn sum(&self, i: usize, j: usize, bs: usize, bf: usize) -> f64 {
+        let at = |a: usize, b: usize| self.sat[a * (self.nf + 1) + b];
+        at(i + bs, j + bf) - at(i, j + bf) - at(i + bs, j) + at(i, j)
+    }
+}
+
+/// Window sum, its Poisson variance, and the position error terms
+/// `Σ var·(x−c)²` along each axis, over the tapered window about `c`.
+/// A pixel's variance is its raw count, at least 1.
+fn window_stats(img: &Image, w: &[f64], c: [f64; 2], half: [f64; 2]) -> (f64, f64, [f64; 2]) {
+    let (ns, nf) = img.shape;
+    let (mut n, mut var, mut e) = (0.0, 0.0, [0.0; 2]);
+    for (i, j, om) in pixels(c, half, ns, nf) {
+        let k = i * nf + j;
+        if img.mask.is_some_and(|m| m[k]) {
+            continue;
+        }
+        let vk = om * om * img.data[k].max(1.0);
+        n += om * w[k];
+        var += vk;
+        e[0] += vk * (i as f64 - c[0]).powi(2);
+        e[1] += vk * (j as f64 - c[1]).powi(2);
+    }
+    (n, var, e)
+}
+
+/// The window sum must clear `min_snr` σ, else there is no peak.
+fn significant(n: f64, var: f64, opts: &PeakOptions) -> Result<(), Reject> {
+    if n.is_nan() || n <= 0.0 || n < opts.min_snr * var.sqrt() {
+        Err(Reject::NoSignal)
+    } else {
+        Ok(())
+    }
+}
+
+/// Box sums of the background-subtracted counts and of their Poisson
+/// variance, each box measured against the ring of pixels around it.
+///
+/// The border median fixes the background only at the border. Whatever the
+/// interior sits above it (a level, a gradient) adds `Nδ` to a sum over the
+/// frame, and still `Bδ` to a box of `B` pixels, which would count as signal
+/// in a signal-free frame. The ring mean is the local background: a level
+/// cancels and so does a gradient that is linear across the ring.
+struct Scan {
+    sums: Boxes,
+    vars: Boxes,
+    ns: usize,
+    nf: usize,
+    bs: usize,
+    bf: usize,
+    margin: [usize; 2],
+}
+
+impl Scan {
+    fn new(img: &Image, w: &[f64], window: usize) -> Self {
+        let (ns, nf) = img.shape;
+        let (bs, bf) = (window.clamp(1, ns), window.clamp(1, nf));
+        let var = |k: usize| {
+            if img.mask.is_some_and(|m| m[k]) {
+                0.0
+            } else {
+                img.data[k].max(1.0)
+            }
+        };
+        Self {
+            sums: Boxes::new(|k| w[k], ns, nf),
+            vars: Boxes::new(var, ns, nf),
+            ns,
+            nf,
+            bs,
+            bf,
+            // A one-row frame has no ring across the row.
+            margin: [if ns == 1 { 0 } else { window }, window],
+        }
+    }
+
+    /// Box with top-left pixel `(i, j)`: its sum above the ring mean, and
+    /// the variance of that. With no ring (the box is the frame) the
+    /// plain sum.
+    fn excess(&self, i: usize, j: usize) -> (f64, f64) {
+        let (bs, bf) = (self.bs, self.bf);
+        let (i0, j0) = (
+            i.saturating_sub(self.margin[0]),
+            j.saturating_sub(self.margin[1]),
+        );
+        let i1 = (i + bs + self.margin[0]).min(self.ns);
+        let j1 = (j + bf + self.margin[1]).min(self.nf);
+        let (rs, rv) = (
+            self.sums.sum(i0, j0, i1 - i0, j1 - j0),
+            self.vars.sum(i0, j0, i1 - i0, j1 - j0),
+        );
+        let (bsum, bvar) = (self.sums.sum(i, j, bs, bf), self.vars.sum(i, j, bs, bf));
+        let ring = ((i1 - i0) * (j1 - j0) - bs * bf) as f64;
+        if ring <= 0.0 {
+            return (bsum, bvar);
+        }
+        let f = (bs * bf) as f64 / ring;
+        (bsum - f * (rs - bsum), bvar + f * f * (rv - bvar))
+    }
+
+    /// The box of largest excess: its centre, excess and variance.
+    fn best(&self) -> ([f64; 2], f64, f64) {
+        let mut best = (f64::NEG_INFINITY, 0, 0, 0.0);
+        for i in 0..=self.ns - self.bs {
+            for j in 0..=self.nf - self.bf {
+                let (e, v) = self.excess(i, j);
+                if e > best.0 {
+                    best = (e, i, j, v);
+                }
+            }
+        }
+        (
+            [
+                best.1 as f64 + (self.bs - 1) as f64 / 2.0,
+                best.2 as f64 + (self.bf - 1) as f64 / 2.0,
+            ],
+            best.0,
+            best.3,
+        )
+    }
+
+    /// Excess and variance of the box whose centre is nearest `c`.
+    fn at(&self, c: [f64; 2]) -> (f64, f64) {
+        let origin = |c: f64, b: usize, n: usize| {
+            ((c - (b - 1) as f64 / 2.0).round().max(0.0) as usize).min(n - b)
+        };
+        self.excess(
+            origin(c[0], self.bs, self.ns),
+            origin(c[1], self.bf, self.nf),
+        )
+    }
+}
+
+/// Re-centre a window of half-width `half` from `c` until the centre moves
+/// less than `tol`.
 fn settle(
     w: &[f64],
     ns: usize,
     nf: usize,
+    mut c: [f64; 2],
     half: [f64; 2],
     opts: &PeakOptions,
 ) -> Result<[f64; 2], Reject> {
-    let inf = [f64::INFINITY; 2];
-    let (mut c, total) = com(w, ns, nf, [0.0; 2], inf);
-    if total.is_nan() || total <= 0.0 {
-        return Err(Reject::NoSignal);
-    }
     for _ in 0..opts.max_passes {
         let (next, sum) = com(w, ns, nf, c, half);
         if sum.is_nan() || sum <= 0.0 {
@@ -247,6 +411,10 @@ fn lowest_median<const N: usize>(strips: [Vec<f64>; N]) -> Option<f64> {
 }
 
 /// Centre of mass of a frame in a window re-centred until it settles.
+///
+/// Limit, untested: the ring mean cancels a background level or a gradient
+/// that is linear across the ring. A step or curvature inside the ring leaves
+/// a residual that can pass `min_snr` on a signal-free frame.
 pub fn find_peak(img: &Image, opts: &PeakOptions) -> Result<Peak, PeakError> {
     let (ns, nf) = img.shape;
     validate(img, ns, nf)?;
@@ -284,21 +452,17 @@ pub fn find_peak(img: &Image, opts: &PeakOptions) -> Result<Peak, PeakError> {
         .map(|i| if bad(i) { 0.0 } else { img.data[i] - bg })
         .collect();
     let half = [(opts.window / 2) as f64; 2];
-    let c = settle(&w, ns, nf, half, opts).map_err(PeakError::Rejected)?;
+    let scan = Scan::new(img, &w, opts.window);
+    let (c0, e0, v0) = scan.best();
+    significant(e0, v0, opts).map_err(PeakError::Rejected)?;
+    let c = settle(&w, ns, nf, c0, half, opts).map_err(PeakError::Rejected)?;
     check_window(img, &w, c, half, opts).map_err(PeakError::Rejected)?;
-    let (_, n) = com(&w, ns, nf, c, half);
-    let (mut va, mut vb) = (0.0, 0.0);
-    for (i, j, om) in pixels(c, half, ns, nf) {
-        let k = i * nf + j;
-        if !bad(k) {
-            let var = om * om * img.data[k].max(1.0);
-            va += var * (i as f64 - c[0]).powi(2);
-            vb += var * (j as f64 - c[1]).powi(2);
-        }
-    }
+    let (ex, vx) = scan.at(c);
+    significant(ex, vx, opts).map_err(PeakError::Rejected)?;
+    let (n, _, e) = window_stats(img, &w, c, half);
     Ok(Peak {
         pos: c,
-        sigma: [va.sqrt() / n, vb.sqrt() / n],
+        sigma: [e[0].sqrt() / n, e[1].sqrt() / n],
     })
 }
 
@@ -347,8 +511,13 @@ pub fn find_peak_1d(
         .map(|i| if bad(i) { 0.0 } else { row[i] - bg })
         .collect();
     let half = [f64::INFINITY, (opts.window / 2) as f64];
-    let c = settle(&w, 1, n, half, opts).map_err(PeakError::Rejected)?;
+    let scan = Scan::new(&img, &w, opts.window);
+    let (c0, e0, v0) = scan.best();
+    significant(e0, v0, opts).map_err(PeakError::Rejected)?;
+    let c = settle(&w, 1, n, c0, half, opts).map_err(PeakError::Rejected)?;
     check_window(&img, &w, c, half, opts).map_err(PeakError::Rejected)?;
+    let (ex, vx) = scan.at(c);
+    significant(ex, vx, opts).map_err(PeakError::Rejected)?;
     let c = c[1];
     let (kmax, wmax) =
         pixels([0.0, c], half, 1, n).fold(
@@ -477,8 +646,8 @@ mod tests {
             (p.pos[0] - 20.3).abs() < 0.1 && (p.pos[1] - 21.6).abs() < 0.1,
             "{p:?}"
         );
-        // The same frame with one pass cannot settle: the whole-image centre
-        // of mass sits between the peak and the hot pixel.
+        // The same frame with one pass cannot settle: the starting window is
+        // the box with the largest sum, a pixel or so from the true centre.
         let one = PeakOptions {
             max_passes: 1,
             ..opts
@@ -554,6 +723,79 @@ mod tests {
             find_peak(&img(&flat[..4], (2, 2)), &PeakOptions::default()),
             Err(PeakError::TooSmall { .. })
         ));
+    }
+
+    /// 800 x 800 frame, 2 px Gaussian of amplitude 2000 at (530, 540), the
+    /// border strips at level 5 and the interior `lift(i, j)` above it.
+    fn big_frame(lift: impl Fn(usize, usize) -> f64) -> Vec<f64> {
+        let mut rng = Rng(99);
+        let n = 800;
+        (0..n * n)
+            .map(|k| {
+                let (i, j) = (k / n, k % n);
+                let edge = i < 3 || i >= n - 3 || j < 3 || j >= n - 3;
+                let r2 = (i as f64 - 530.0).powi(2) + (j as f64 - 540.0).powi(2);
+                let mean = 5.0 + if edge { 0.0 } else { lift(i, j) } + 2000.0 * (-r2 / 8.0).exp();
+                mean + mean.sqrt() * rng.normal()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn leftover_background_does_not_pull_the_peak_off() {
+        let shape = (800, 800);
+        // Interior 0.1 above the border median: 640000 x 0.1 outweighs the
+        // peak's 50000 counts in a whole-frame centre of mass.
+        let flat = big_frame(|_, _| 0.1);
+        // Background rising across the frame, border strip at the low side.
+        let ramp = big_frame(|_, j| 0.0004 * j as f64);
+        for data in [flat, ramp] {
+            let p = find_peak(&img(&data, shape), &PeakOptions::default())
+                .expect("a clear peak must be found");
+            assert!(
+                (p.pos[0] - 530.0).abs() < 6.0 * p.sigma[0]
+                    && (p.pos[1] - 540.0).abs() < 6.0 * p.sigma[1],
+                "{p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn background_alone_is_no_signal() {
+        // Frames without a peak, interior above the border by a level or a
+        // ramp: a window that settles on background must be rejected.
+        let shape = (800, 800);
+        for seed in 1..=4 {
+            for ramp in [false, true] {
+                let mut rng = Rng(seed);
+                let data: Vec<f64> = (0..800 * 800)
+                    .map(|k| {
+                        let (i, j) = (k / 800, k % 800);
+                        let edge = !(3..797).contains(&i) || !(3..797).contains(&j);
+                        let lift = if ramp { 0.0004 * j as f64 } else { 0.1 };
+                        let mean: f64 = 5.0 + if edge { 0.0 } else { lift };
+                        mean + mean.sqrt() * rng.normal()
+                    })
+                    .collect();
+                assert_eq!(
+                    find_peak(&img(&data, shape), &PeakOptions::default()),
+                    Err(PeakError::Rejected(Reject::NoSignal)),
+                    "seed {seed} ramp {ramp}"
+                );
+            }
+        }
+        let mut rng = Rng(5);
+        let data: Vec<f64> = (0..800)
+            .map(|j| {
+                let mean: f64 = if (3..797).contains(&j) { 5.3 } else { 5.0 };
+                mean + mean.sqrt() * rng.normal()
+            })
+            .collect();
+        let lifted = data;
+        assert_eq!(
+            find_peak_1d(&lifted, None, None, &PeakOptions::default()),
+            Err(PeakError::Rejected(Reject::NoSignal))
+        );
     }
 
     fn row_pv(n: usize, c: f64, fwhm: f64, eta: f64, amp: f64, bg: f64, rng: &mut Rng) -> Vec<f64> {
