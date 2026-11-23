@@ -607,8 +607,8 @@ fn pseudo(
 }
 
 /// Pixels in the detector-arm frame (all axes zero), metres. Built by the
-/// detector table (`detector`) and the xu and PONI importers; opaque apart
-/// from its shape, mask and pixel positions.
+/// detector table (`detector`), `sixs` and the xu and PONI importers;
+/// opaque apart from its shape, mask and pixel positions.
 #[pyclass(name = "PixelDetector", frozen)]
 struct PyPixelDetector(hklrs::PixelDetector);
 
@@ -1241,6 +1241,22 @@ fn detector(name: &str) -> PyResult<PyPixelDetector> {
         })
 }
 
+/// binoculars' SIXS calibration: `detector` moved so that its pixel
+/// `centre` (slow, fast) lies at (`sdd`, 0, 0) metres, then turned `detrot`
+/// degrees about x. The mask is kept. The central pixel lands on x = `sdd`
+/// even on the Cirpad, whose pixels have an x.
+#[pyfunction]
+fn sixs(
+    detector: &PyPixelDetector,
+    centre: (usize, usize),
+    sdd: f64,
+    detrot: f64,
+) -> PyResult<PyPixelDetector> {
+    hklrs::sixs(&detector.0, centre, sdd, radians(detrot).0)
+        .map(PyPixelDetector)
+        .map_err(err)
+}
+
 fn submodule(
     m: &Bound<'_, PyModule>,
     name: &str,
@@ -1290,6 +1306,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(presets, m)?)?;
     m.add_function(wrap_pyfunction!(detectors, m)?)?;
     m.add_function(wrap_pyfunction!(detector, m)?)?;
+    m.add_function(wrap_pyfunction!(sixs, m)?)?;
     m.add_function(wrap_pyfunction!(q_map, m)?)?;
     m.add_function(wrap_pyfunction!(detector_positions, m)?)?;
     m.add_function(wrap_pyfunction!(solid_angle, m)?)?;
