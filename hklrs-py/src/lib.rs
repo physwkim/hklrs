@@ -1,6 +1,8 @@
 //! Python bindings: conversions only. Angles are degrees at this boundary,
 //! translations metres, wavelength Å.
 
+mod normalise;
+
 use hklrs::absorption::Masked;
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
@@ -1248,6 +1250,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         xu.add_class::<PyXuArea>()?;
         xu.add_class::<PyXuLinear>()
     })?;
+    submodule(m, "normalise", normalise::register)?;
     submodule(m, "poni", |p| {
         p.add_class::<PyPoni>()?;
         p.add_class::<PyPoniFile>()?;
