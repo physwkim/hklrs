@@ -1,5 +1,6 @@
 //! Read-only pseudo axes of `hkl-pseudoaxis-common-q.c` (reals to pseudo):
-//! `q`, `q2` (q, alpha) and `qper_qpar`. Q is `k_f − k_i` with 2π, Å⁻¹.
+//! `q`, `q2` (q, alpha), `tth2` (tth, alpha, `hkl-pseudoaxis-common-tth.c`)
+//! and `qper_qpar`. Q is `k_f − k_i` with 2π, Å⁻¹.
 //!
 //! Each engine is a kernel on a [`Scattering`] (so the inverse core can call
 //! it inside a residual) and an `_at` function that builds the scattering
@@ -22,6 +23,13 @@ pub fn q_signed(s: &Scattering) -> f64 {
 pub fn q2(s: &Scattering) -> (f64, Rad) {
     let kf = s.kf.into_inner();
     (s.q, Rad(kf.z.atan2(kf.y)))
+}
+
+/// Engine `tth2` (`common-tth.c:51-60`): (2θ, alpha), 2θ the angle between
+/// k_i and k_f in [0, π], alpha as in [`q2`]. hkl takes 2θ from an `acos`
+/// (HKL-11); [`Scattering::tth`] is `atan2`-based.
+pub fn tth2(s: &Scattering) -> (Rad, Rad) {
+    (s.tth, q2(s).1)
 }
 
 /// Engine `qper_qpar`: (qper, qpar). `surface` is the normal in the sample
@@ -69,6 +77,16 @@ pub fn q2_at(
     point: &Point3<f64>,
 ) -> Result<(f64, Rad), Error> {
     Ok(q2(&scattering(geometry, values, wavelength, point)?))
+}
+
+/// [`tth2`] at `values`; `point` as for [`scattering`].
+pub fn tth2_at(
+    geometry: &Geometry,
+    values: &[f64],
+    wavelength: Wavelength,
+    point: &Point3<f64>,
+) -> Result<(Rad, Rad), Error> {
+    Ok(tth2(&scattering(geometry, values, wavelength, point)?))
 }
 
 /// [`qper_qpar`] at `values`; `point` as for [`scattering`].

@@ -9,7 +9,7 @@
 use hklrs::Axis;
 use hklrs::nalgebra::Vector3;
 use hklrs::presets::preset;
-use hklrs::pseudo::{q_at, q2_at, qper_qpar_at};
+use hklrs::pseudo::{q_at, q2_at, qper_qpar_at, tth2_at};
 use hklrs::{PixelDetector, Wavelength};
 use serde_json::Value;
 
@@ -31,6 +31,8 @@ fn canonical_to_user(axis: &Axis, v: f64) -> f64 {
 }
 
 const HKL11_TTH: f64 = 1e-7;
+/// Same, for the 2θ value itself (degrees, absolute 1e-9 tolerance).
+const HKL11_TTH2: f64 = 1e-4;
 const TOL: f64 = 1e-9;
 
 fn close(a: f64, b: f64) -> bool {
@@ -90,6 +92,25 @@ fn pseudos_match_hkl() {
                     assert!(d.abs() < 1e-7, "{ctx}: alpha differs by {d} deg");
                 }
             }
+            "tth2" => {
+                let (t, alpha) = tth2_at(&geo, &values, wl, &point).unwrap();
+                // hkl's acos 2θ is off by ~1e-16/2θ rad; below 1e-4 rad the
+                // independent atan2 value is the reference (HKL-11)
+                let want = if tth < HKL11_TTH2 {
+                    f(&case["numpy"]["tth"])
+                } else {
+                    hkl(0)
+                };
+                assert!(
+                    close(t.0.to_degrees(), want),
+                    "{ctx}: tth {} vs {want}",
+                    t.0.to_degrees()
+                );
+                let d = wrap_deg(alpha.0.to_degrees() - hkl(1));
+                if tth > 1e-9 {
+                    assert!(d.abs() < 1e-7, "{ctx}: alpha differs by {d} deg");
+                }
+            }
             "qper_qpar" => {
                 let n = &case["parameters"];
                 let n = Vector3::new(f(&n[0]), f(&n[1]), f(&n[2]));
@@ -110,7 +131,7 @@ fn pseudos_match_hkl() {
             .entry((name.to_owned(), engine.to_owned()))
             .or_default() += 1;
     }
-    assert_eq!(seen.len(), 4 + 11 * 2, "{seen:?}");
+    assert_eq!(seen.len(), 4 + 11 * 3, "{seen:?}");
     // per q preset: the zero position and 2θ = 1e-6° (the HKL-11 case)
     assert_eq!(hkl11, 8);
 }
