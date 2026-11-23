@@ -32,10 +32,10 @@ AREA = [
     ("tilt_tiltazimuth", dict(tilt=8.0, tiltazimuth=30.0)),
     ("detrot", dict(detrot=2.5)),
     ("roi", dict(roi=[1, 8, 3, 12])),
-    ("nav", dict(nav=[2, 3])),
-    ("nav_roi", dict(nav=[2, 3], roi=[1, 9, 2, 13])),
+    ("nav", dict(nch1=10, nch2=12, nav=[2, 3])),
+    ("nav_roi", dict(nav=[2, 3], roi=[1, 9, 2, 11])),
     ("combined", dict(dir1="x-", dir2="z+", cch1=4.3, cch2=6.7, pwidth1=172e-6, pwidth2=150e-6,
-                      tilt=-6.0, tiltazimuth=120.0, detrot=-3.0, nav=[3, 2], roi=[2, 9, 1, 12])),
+                      tilt=-6.0, tiltazimuth=120.0, detrot=-3.0, nav=[3, 2], roi=[2, 8, 1, 11])),
 ]
 LINEAR_BASE = dict(dir="z+", cch=4.0, nch=9, distance=1.0, pwidth=50e-6, tilt=0.0, nav=1, roi=None)
 LINEAR = [
@@ -44,7 +44,7 @@ LINEAR = [
     ("roi", dict(roi=[2, 8])),
     ("nav", dict(nav=3)),
     ("nav_roi", dict(nav=2, roi=[1, 9])),
-    ("combined", dict(dir="x-", cch=3.6, pwidth=172e-6, tilt=-7.0, nav=2, roi=[1, 8])),
+    ("combined", dict(dir="x-", cch=3.6, pwidth=172e-6, tilt=-7.0, nav=2, roi=[1, 7])),
 ]
 
 
@@ -82,6 +82,7 @@ def linear_detector(p):
 
 def block_grid(cch, start, end, n):
     """Centre channel and channel count of the unbinned detector whose pixels are the block centres."""
+    assert (end - start) % n == 0, "the importer requires whole Nav blocks"
     return (cch - start - (n - 1) / 2) / n, (end - start) // n
 
 

@@ -48,6 +48,11 @@ pub enum Error {
     NotFinite { what: &'static str, value: f64 },
     #[error("xrayutilities direction {text:?} is not one of x+ x- y+ y- z+ z-")]
     XuDirection { text: String },
+    #[error("xrayutilities roi {roi:?} spans {} pixels, which Nav {nav} does not divide", .roi.len())]
+    NavRoi {
+        roi: std::ops::Range<usize>,
+        nav: usize,
+    },
     #[error("{what} are parallel")]
     ParallelDirections { what: &'static str },
     #[error("the two reflections are parallel in {space} (sin of their angle = {sin:e})")]

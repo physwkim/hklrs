@@ -8,6 +8,7 @@
 //! positive tilt turns a linear row toward the beam and an area chip's
 //! `tiltazimuth` direction toward `dir1 × dir2`.
 
+use std::ops::Range;
 use std::str::FromStr;
 
 use nalgebra::{Unit, UnitQuaternion, Vector3};
@@ -70,6 +71,20 @@ fn finite(what: &'static str, value: f64) -> Result<(), Error> {
     }
 }
 
+/// xu averages Nav-pixel blocks from the roi start and keeps a trailing
+/// partial block, which no regular pixel grid holds; requiring whole blocks
+/// gives the detector the shape of xu's averaged data. Nav 0 is left to
+/// [`PixelDetector::bin`].
+fn nav_divides(roi: &Range<usize>, nav: usize) -> Result<(), Error> {
+    if roi.len().checked_rem(nav).is_some_and(|r| r != 0) {
+        return Err(Error::NavRoi {
+            roi: roi.clone(),
+            nav,
+        });
+    }
+    Ok(())
+}
+
 /// `init_area` parameters. Pixel (j1, j2) is slow index j1 along `dir1`, fast
 /// index j2 along `dir2`, as in the arrays `QConversion.area` returns.
 #[derive(Clone, Debug, PartialEq)]
@@ -87,7 +102,7 @@ pub struct Area {
     pub tiltazimuth: Deg,
     pub detrot: Deg,
     /// Binning applied after the roi; a binned pixel is the centre of the raw
-    /// block it averages.
+    /// block it averages. Each must divide its roi length.
     pub nav: [usize; 2],
     /// `[start1, end1, start2, end2]`, half-open; `None` is the whole chip.
     pub roi: Option<[usize; 4]>,
@@ -150,14 +165,16 @@ impl Area {
         let e_slow = turn * (p1 * self.pwidth1);
         let e_fast = turn * (p2 * self.pwidth2);
         let [r0, r1, r2, r3] = self.roi.unwrap_or([0, self.nch1, 0, self.nch2]);
-        PixelDetector::new(
+        let det = PixelDetector::new(
             (self.nch1, self.nch2),
             beam.into_inner() * self.distance - e_slow * self.cch1 - e_fast * self.cch2,
             e_slow,
             e_fast,
         )?
-        .roi(r0..r1, r2..r3)?
-        .bin(self.nav[0], self.nav[1])
+        .roi(r0..r1, r2..r3)?;
+        nav_divides(&(r0..r1), self.nav[0])?;
+        nav_divides(&(r2..r3), self.nav[1])?;
+        det.bin(self.nav[0], self.nav[1])
     }
 }
 
@@ -171,7 +188,7 @@ pub struct Linear {
     pub pwidth: f64,
     pub tilt: Deg,
     /// Binning applied after the roi; a binned pixel is the centre of the raw
-    /// block it averages.
+    /// block it averages. Must divide the roi length.
     pub nav: usize,
     /// `[start, end]`, half-open; `None` is every channel.
     pub roi: Option<[usize; 2]>,
@@ -214,14 +231,15 @@ impl Linear {
             UnitQuaternion::from_axis_angle(&Unit::new_normalize(normal), tilt) * step
         };
         let [r0, r1] = self.roi.unwrap_or([0, self.nch]);
-        PixelDetector::new(
+        let det = PixelDetector::new(
             (1, self.nch),
             beam.into_inner() * self.distance - e_fast * self.cch,
             Vector3::zeros(),
             e_fast,
         )?
-        .roi(0..1, r0..r1)?
-        .bin(1, self.nav)
+        .roi(0..1, r0..r1)?;
+        nav_divides(&(r0..r1), self.nav)?;
+        det.bin(1, self.nav)
     }
 }
 
@@ -316,12 +334,11 @@ mod tests {
         let full = base.detector(y()).unwrap();
         let det = Area {
             nav: [2, 3],
-            roi: Some([1, 9, 2, 13]),
+            roi: Some([1, 9, 2, 11]),
             ..base
         }
         .detector(y())
         .unwrap();
-        // 11 fast pixels hold three whole blocks of 3; the remainder is dropped
         assert_eq!(det.shape(), (4, 3));
         for k1 in 0..4 {
             for k2 in 0..3 {
@@ -427,7 +444,7 @@ mod tests {
         let full = base.detector(y()).unwrap();
         let det = Linear {
             nav: 3,
-            roi: Some([1, 9]),
+            roi: Some([1, 7]),
             ..base
         }
         .detector(y())
@@ -440,6 +457,47 @@ mod tests {
                 1e-16
             ));
         }
+    }
+
+    #[test]
+    fn nav_must_divide_the_roi() {
+        let area = Area::new(dir("z+"), dir("x+"), [4.0, 6.0], [9, 13], 0.5, [1e-4, 1e-4]);
+        let whole_chip = Area {
+            nav: [2, 1],
+            ..area.clone()
+        };
+        let err = whole_chip.detector(y()).unwrap_err();
+        assert_eq!(err, Error::NavRoi { roi: 0..9, nav: 2 });
+        assert_eq!(
+            err.to_string(),
+            "xrayutilities roi 0..9 spans 9 pixels, which Nav 2 does not divide"
+        );
+        let fast = Area {
+            nav: [2, 3],
+            roi: Some([1, 9, 1, 12]),
+            ..area
+        };
+        assert_eq!(
+            fast.detector(y()),
+            Err(Error::NavRoi { roi: 1..12, nav: 3 })
+        );
+
+        let linear = Linear {
+            nav: 2,
+            roi: Some([1, 8]),
+            ..Linear::new(dir("z+"), 4.0, 9, 1.0, 1e-4)
+        };
+        assert_eq!(
+            linear.detector(y()),
+            Err(Error::NavRoi { roi: 1..8, nav: 2 })
+        );
+        // a roi off the chip is reported as such before any Nav check
+        let outside = Linear {
+            nav: 3,
+            roi: Some([0, 10]),
+            ..linear
+        };
+        assert!(matches!(outside.detector(y()), Err(Error::Roi { .. })));
     }
 
     /// splitmix64, so the property cases are fixed without a dependency.
