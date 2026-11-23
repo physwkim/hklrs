@@ -1,6 +1,7 @@
 //! Gridding (design §7): per-pixel projection coordinates and normalised
 //! pixels summed into a cube of Σcounts, Σweight and contributions per bin,
-//! the sums a bin of a cut holds ([`crate::cut::Bin`]).
+//! the sums a bin of a cut holds ([`crate::cut::Bin`]). A bin's intensity
+//! is their ratio Σcounts/Σweight ([`Cube::intensity`]).
 //!
 //! The one bin rule: on a dimension binned with width `step` from `anchor`,
 //! a value v falls in global bin k = ⌊(v − anchor)/step⌋, the half-open
@@ -399,6 +400,15 @@ impl Cube {
 
     pub fn contributions(&self) -> &[u64] {
         &self.contributions
+    }
+
+    /// Σcounts/Σweight per bin; `None` where Σweight is 0, a bin no pixel
+    /// reached.
+    pub fn intensity(&self) -> impl ExactSizeIterator<Item = Option<f64>> + '_ {
+        self.photons
+            .iter()
+            .zip(&self.weight)
+            .map(|(&c, &w)| (w != 0.0).then(|| c / w))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -880,6 +890,26 @@ mod tests {
         assert!(c.add(&far, &unweighted(&[1.0, f64::INFINITY])).is_err());
         assert!(c.add_growing(&[unit()], &far, &nan).is_err());
         assert_eq!(c, before);
+    }
+
+    #[test]
+    fn intensity_is_the_ratio_of_sums_and_absent_where_nothing_fell() {
+        // bin 0 takes 3 of weight 1 and 1 of weight 3: the ratio of sums is
+        // 1, the mean of their corrected values 5/3
+        let coords: &[&[f64]] = &[&[0.0], &[0.5], &[2.0]];
+        let c = filled(
+            ONE,
+            coords,
+            &[pixel(3.0, 1.0), pixel(1.0, 3.0), pixel(6.0, 4.0)],
+        );
+        assert_eq!(c.photons(), [4.0, 0.0, 6.0]);
+        assert_eq!(c.weight(), [4.0, 0.0, 4.0]);
+        assert_eq!(c.contributions(), [2, 0, 1]);
+        let ratio = |c: &Cube| c.intensity().collect::<Vec<_>>();
+        assert_eq!(ratio(&c), [Some(1.0), None, Some(1.5)]);
+        // merged cubes sum before the ratio
+        let m = c.merge(filled(ONE, &[&[2.0]], &[pixel(2.0, 4.0)])).unwrap();
+        assert_eq!(ratio(&m), [Some(1.0), None, Some(1.0)]);
     }
 
     #[test]
