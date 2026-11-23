@@ -717,4 +717,53 @@ mod tests {
         assert_eq!(s.factor(), 0.25);
         assert!(FrameScalars::new().absorber(&|_: &()| 0.0, &()).is_err());
     }
+
+    /// Non-unit weights from `Weights::from_values` normalise, then a cut
+    /// sums them: each bin's Σcounts / Σweight is the ratio of sums.
+    #[test]
+    fn from_values_weights_reach_the_cut_as_a_ratio_of_sums() {
+        use crate::cut::{Cut, CutKind, Footprint, IntDir};
+        use crate::grid::Binning;
+        let det = detector((1, 4));
+        let (_, red) = Region::new(0..1, 0..4, (1, 1)).apply(&det).unwrap();
+        let w = Weights::from_values((1, 4), &[2.0, 0.5, 4.0, 1.25], &[None; 4]).unwrap();
+        let raw = [10.0, 3.0, 7.0, 9.0];
+        let scalars = FrameScalars::new()
+            .monitor(500.0, 1000.0)
+            .unwrap()
+            .count_time(2.0)
+            .unwrap();
+        let frame = Normaliser::new(PixelFields::new((1, 4)))
+            .normalise(&raw, &scalars, &red, &[&w])
+            .unwrap();
+        // monitor 500 against reference 1000 and count time 2 each scale the weight
+        let scale = 0.5 * 2.0;
+        let cut = Cut::new(
+            CutKind::Qz,
+            IntDir::Q,
+            [0.0; 3],
+            1.0,
+            Binning::new(1.0, 0.0).unwrap(),
+        )
+        .unwrap();
+        // pixels 0, 1 at Qz 0.25, 0.75 (one bin), 2, 3 at 1.25, 1.75 (the next)
+        let q = [0.25, 0.75, 1.25, 1.75].map(|z| Vector3::new(0.0, 0.0, z));
+        let r = cut
+            .accumulate(
+                Wavelength::new(1.0).unwrap(),
+                Footprint::Point,
+                q.into_iter().zip(frame.data.iter().copied()),
+            )
+            .unwrap();
+        let g = [2.0, 0.5, 4.0, 1.25];
+        let bins: Vec<_> = r.bins().collect();
+        assert_eq!(bins.len(), 2);
+        for (n, (_, b)) in bins.iter().enumerate() {
+            let (i, j) = (2 * n, 2 * n + 1);
+            let (sc, sw) = (raw[i] + raw[j], (g[i] + g[j]) * scale);
+            assert!(close(b.counts, sc) && close(b.weight, sw), "{n}: {b:?}");
+            assert!(close(b.counts / b.weight, sc / sw));
+            assert_eq!(b.contributions, 2);
+        }
+    }
 }

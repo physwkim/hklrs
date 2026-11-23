@@ -57,7 +57,7 @@ pub struct Weight(f64);
 impl Weight {
     /// The one gate every weight passes: anything else is masked as
     /// `otherwise`.
-    pub(crate) fn new(value: f64, otherwise: Masked) -> Result<Self, Masked> {
+    pub fn new(value: f64, otherwise: Masked) -> Result<Self, Masked> {
         if value > 0.0 && value.is_finite() {
             Ok(Self(value))
         } else {
