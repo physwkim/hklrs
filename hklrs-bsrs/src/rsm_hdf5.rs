@@ -63,9 +63,7 @@ pub enum Hdf5FrameError {
     /// as NDFileHDF5's JPEG.
     #[error("HDF5 filter {id} ({name}) is not one this reader decodes")]
     UnsupportedFilter { id: u16, name: String },
-    /// A pixel type rust-hdf5 does not convert, such as the reduced-precision
-    /// integer NDFileHDF5 sets for its N-bit compression (`H5Tset_precision`,
-    /// `NDFileHDF5.cpp:3362`).
+    /// A pixel type rust-hdf5 does not read as a number, such as a compound.
     #[error("pixel type not readable: {0}")]
     UnsupportedType(String),
     /// Metadata whose checksum does not match: read while the writer was
@@ -85,22 +83,13 @@ impl From<Hdf5Error> for Hdf5FrameError {
             Hdf5Error::Format(FormatError::ChecksumMismatch { .. }) => {
                 Self::ChecksumMismatch(e.to_string())
             }
-            // rust-hdf5's I/O-layer error type is private (`pub(crate) mod
-            // io`), so a mismatch it raises is known by its text.
-            Hdf5Error::IoLayer(ref io)
-                if io
-                    .to_string()
-                    .starts_with("format error: checksum mismatch") =>
-            {
-                Self::ChecksumMismatch(e.to_string())
-            }
             e => Self::Hdf5(e.to_string()),
         }
     }
 }
 
 /// The first filter of `pipeline` this reader does not decode. The others
-/// are those rust-hdf5 0.7.13 decodes with the workspace's features
+/// are those rust-hdf5 0.7.14 decodes with the workspace's features
 /// (deflate, lz4, blosc, zstd), each read from a file in
 /// `golden/ndfilehdf5_filters.h5`.
 fn undecodable(pipeline: &[Filter]) -> Option<Hdf5FrameError> {
