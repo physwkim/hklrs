@@ -27,6 +27,6 @@ pub use qmap::{
     solid_angle,
 };
 pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
-pub use units::{Deg, Energy, HC_KEV_ANGSTROM, Rad, Wavelength};
+pub use units::{Deg, Energy, HC_KEV_ANGSTROM, PerMetre, Rad, Wavelength};
 
 pub use nalgebra;

@@ -76,6 +76,22 @@ impl Energy {
     }
 }
 
+/// Linear attenuation coefficient μ in m⁻¹, finite and positive by
+/// construction: every material attenuates, and at μ = 0 a bulk sample's
+/// absorption integral diverges.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct PerMetre(f64);
+
+impl PerMetre {
+    pub fn new(per_metre: f64) -> Result<Self, Error> {
+        positive("attenuation coefficient", per_metre).map(Self)
+    }
+
+    pub fn per_metre(self) -> f64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +117,14 @@ mod tests {
                 .abs()
                 < 1e-15
         );
+    }
+
+    #[test]
+    fn per_metre_rejects_non_positive() {
+        for v in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(PerMetre::new(v).is_err(), "{v}");
+        }
+        assert_eq!(PerMetre::new(2.5).unwrap().per_metre(), 2.5);
     }
 
     #[test]
