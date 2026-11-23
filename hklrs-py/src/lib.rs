@@ -232,6 +232,53 @@ fn forward<'py>(
     Ok(d)
 }
 
+/// Read-only pseudo axes of libhkl's q, q2, tth2, qper_qpar, incidence and
+/// emergence engines at `axes` (geometry axis order, degrees / metres):
+/// `q` -> (q,), `q2` -> (q, alpha), `tth2` -> (tth, alpha), `qper_qpar` ->
+/// (qper, qpar), `incidence`/`emergence` -> (angle, azimuth or None). Angles in
+/// degrees, q in Å⁻¹. `surface` is the sample-frame normal (default y) for the
+/// engines that take one; `point` as for `forward`.
+#[pyfunction]
+#[pyo3(signature = (geometry, engine, axes, wavelength, surface=None, point=None))]
+fn pseudo(
+    geometry: &PyGeometry,
+    engine: &str,
+    axes: Vec<f64>,
+    wavelength: f64,
+    surface: Option<[f64; 3]>,
+    point: Option<[f64; 3]>,
+) -> PyResult<Vec<Option<f64>>> {
+    use hklrs::pseudo as ps;
+    let geo = &geometry.0;
+    let (values, wl, p) = kernel_inputs(geo, &axes, wavelength, point)?;
+    let n = Vector3::from(surface.unwrap_or([0.0, 1.0, 0.0]));
+    let d = |r: hklrs::Rad| Some(hklrs::Deg::from(r).0);
+    let out = match engine {
+        "q" => vec![Some(ps::q_at(geo, &values, wl, &p).map_err(err)?)],
+        "q2" => ps::q2_at(geo, &values, wl, &p)
+            .map(|(q, a)| vec![Some(q), d(a)])
+            .map_err(err)?,
+        "tth2" => ps::tth2_at(geo, &values, wl, &p)
+            .map(|(t, a)| vec![d(t), d(a)])
+            .map_err(err)?,
+        "qper_qpar" => ps::qper_qpar_at(geo, &values, wl, &p, &n)
+            .map(|(a, b)| vec![Some(a), Some(b)])
+            .map_err(err)?,
+        "incidence" => ps::incidence_at(geo, &values, wl, &p, &n)
+            .map(|(a, z)| vec![d(a), z.and_then(d)])
+            .map_err(err)?,
+        "emergence" => ps::emergence_at(geo, &values, wl, &p, &n)
+            .map(|(a, z)| vec![d(a), z.and_then(d)])
+            .map_err(err)?,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown pseudo engine {other:?}"
+            )));
+        }
+    };
+    Ok(out)
+}
+
 #[pyfunction]
 fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
@@ -245,6 +292,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReflection>()?;
     m.add_class::<PySample>()?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
+    m.add_function(wrap_pyfunction!(pseudo, m)?)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
     Ok(())
 }
