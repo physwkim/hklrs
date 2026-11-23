@@ -122,4 +122,14 @@ pub enum Error {
     #[cfg(feature = "hdf5")]
     #[error("binoculars cube file: {reason}")]
     CubeFile { reason: String },
+    #[cfg(feature = "hdf5")]
+    #[error(
+        "binoculars centres bin k on k·step: axis {axis:?} of step {step} is \
+         anchored at {anchor}, not at −step/2"
+    )]
+    CubeFileAnchor {
+        axis: String,
+        step: f64,
+        anchor: f64,
+    },
 }

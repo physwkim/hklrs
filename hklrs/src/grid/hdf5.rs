@@ -7,12 +7,12 @@
 //! `[index, first·step, last·step, step, first, last]`; and `counts` and
 //! `contributions`, one value per bin, shaped like the axes, last axis
 //! fastest. binoculars reads index, step, first and last, and centres bin
-//! k on k·step, which is anchor −step/2.
+//! k on k·step, which is anchor −step/2; no other anchor has a place in
+//! the file.
 //!
 //! hklrs writes counts as f64 and contributions as u64 (binoculars writes
-//! f32 and u32 and has HDF5 convert on read), writes axes of one bin,
-//! which binoculars drops (BIN-14), and stores each axis' anchor as an attribute
-//! `anchor` of its dataset. New data goes in attributes or in datasets of
+//! f32 and u32 and has HDF5 convert on read), and writes axes of one bin,
+//! which binoculars drops (BIN-14). New data goes in attributes or in datasets of
 //! `/binoculars` beside these, which binoculars ignores, never in `axes`,
 //! whose every link binoculars reads as an axis.
 
@@ -25,7 +25,6 @@ use crate::Error;
 
 const ROOT: &str = "binoculars";
 const AXES: &str = "binoculars/axes";
-const ANCHOR: &str = "anchor";
 
 fn h5(e: Hdf5Error) -> Error {
     Error::Hdf5 {
@@ -35,6 +34,11 @@ fn h5(e: Hdf5Error) -> Error {
 
 fn layout(reason: String) -> Error {
     Error::CubeFile { reason }
+}
+
+/// binoculars' bins of width `step`: bin k centred on k·step.
+fn binoculars(step: f64) -> Result<Binning, Error> {
+    Binning::new(step, -step / 2.0)
 }
 
 /// Bin indices are stored as doubles; beyond 2^53 they would not read
@@ -54,7 +58,8 @@ fn exact(k: i64, name: &str) -> Result<f64, Error> {
 
 /// Writes `cube` and `config` to a new file at `path`, replacing any file
 /// there. The empty cube has no axes to write and is refused, as are axis
-/// names HDF5 cannot use as a link name.
+/// names HDF5 cannot use as a link name and axes binned other than
+/// binoculars' way, which its tools would show shifted.
 pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Error> {
     if cube.is_empty() {
         return Err(layout("the empty cube has no axes".to_owned()));
@@ -62,6 +67,14 @@ pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Er
     for a in &cube.axes {
         if a.name.is_empty() || a.name == "." || a.name.contains('/') {
             return Err(layout(format!("axis name {:?} is not a link name", a.name)));
+        }
+        let (step, anchor) = (a.binning.step, a.binning.anchor);
+        if a.binning != binoculars(step)? {
+            return Err(Error::CubeFileAnchor {
+                axis: a.name.clone(),
+                step,
+                anchor,
+            });
         }
     }
     let file = H5File::create(path).map_err(h5)?;
@@ -91,12 +104,6 @@ pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Er
             .map_err(h5)?;
         ds.write_raw(&[i as f64, first * step, last * step, step, first, last])
             .map_err(h5)?;
-        ds.new_attr::<f64>()
-            .shape(())
-            .create(ANCHOR)
-            .map_err(h5)?
-            .write_numeric(&a.binning.anchor)
-            .map_err(h5)?;
     }
 
     let shape: Vec<usize> = cube.axes.iter().map(|a| a.size).collect();
@@ -117,8 +124,8 @@ pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Er
 
 /// Reads the cube and config at `path`. Every link in `axes` must be an
 /// axis of six values whose index column numbers them 0..n once each, and
-/// counts and contributions must have the axes' shape; an axis without an
-/// `anchor` attribute is binoculars' own, anchored at −step/2.
+/// counts and contributions must have the axes' shape. Every axis gets
+/// binoculars' bins, anchored at −step/2.
 pub fn read(path: impl AsRef<Path>) -> Result<(Cube, String), Error> {
     let file = H5File::open(path).map_err(h5)?;
     let names = file
@@ -200,17 +207,9 @@ fn axis(ds: &H5Dataset, name: &str) -> Result<(usize, Axis), Error> {
             "axis {name:?}: first bin {first} is past last bin {last}"
         )));
     }
-    let anchor = if ds.attr_names().map_err(h5)?.iter().any(|a| a == ANCHOR) {
-        let v = ds.attr(ANCHOR).and_then(|a| a.read_numeric_as::<f64>());
-        let [anchor] = <[f64; 1]>::try_from(v.map_err(h5)?)
-            .map_err(|v| layout(format!("axis {name:?}: anchor holds {} values", v.len())))?;
-        anchor
-    } else {
-        -step / 2.0
-    };
     Ok((
         index,
-        Axis::spanning(name, Binning::new(step, anchor)?, (first, last))?,
+        Axis::spanning(name, binoculars(step)?, (first, last))?,
     ))
 }
 
@@ -241,11 +240,11 @@ mod tests {
     /// binoculars drops one-bin axes (BIN-14) and cannot save an empty
     /// config (BIN-17).
     #[test]
-    fn round_trip_keeps_one_bin_axes_anchors_and_full_precision() {
+    fn round_trip_keeps_one_bin_axes_and_full_precision() {
         let c = cube(vec![
-            spanning("h", 0.5, 0.1, (-3, 1)),
+            spanning("h", 0.5, -0.25, (-3, 1)),
             spanning("k", 0.25, -0.125, (7, 7)),
-            spanning("l", 2.0, 0.0, (0, 2)),
+            spanning("l", 2.0, -1.0, (0, 2)),
         ]);
         for config in ["", "[input]\ntype = \"x\"\n"] {
             let p = path("round_trip");
@@ -261,9 +260,32 @@ mod tests {
         assert!(refused(&Cube::default()));
         for name in ["", ".", "q/x"] {
             assert!(
-                refused(&cube(vec![spanning(name, 1.0, 0.0, (0, 1))])),
+                refused(&cube(vec![spanning(name, 1.0, -0.5, (0, 1))])),
                 "{name:?}"
             );
+        }
+    }
+
+    /// Anchor step/2 is binoculars' lattice with every index one off.
+    #[test]
+    fn write_refuses_anchors_binoculars_would_shift() {
+        let p = path("shifted");
+        for anchor in [0.0, 0.25, -0.2, -0.75] {
+            let c = cube(vec![
+                spanning("qx", 0.5, -0.25, (0, 1)),
+                spanning("qy", 0.5, anchor, (0, 1)),
+            ]);
+            match write(&p, &c, "") {
+                Err(Error::CubeFileAnchor {
+                    axis,
+                    step,
+                    anchor: a,
+                }) => {
+                    assert_eq!((axis.as_str(), step, a), ("qy", 0.5, anchor))
+                }
+                other => panic!("{anchor}: {other:?}"),
+            }
+            assert!(!p.exists(), "{anchor}: refused before the file");
         }
     }
 
