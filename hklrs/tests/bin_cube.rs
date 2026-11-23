@@ -20,7 +20,7 @@ use hklrs::nalgebra::Vector3;
 use hklrs::normalise::{FrameScalars, PixelFields, RawFrame, Region};
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
-use hklrs::{PixelDetector, Wavelength};
+use hklrs::{Image, PixelDetector, Wavelength};
 use serde_json::Value;
 
 /// binoculars' single-precision Q against hklrs' (bin_projections.rs).
@@ -69,11 +69,9 @@ fn scan() -> Scan {
         .collect();
     let detector = PixelDetector::new(shape, v("origin"), v("e_slow"), v("e_fast"))
         .unwrap()
-        .with_mask(
-            (0..shape.0 * shape.1)
-                .map(|i| masked.contains(&i))
-                .collect(),
-        )
+        .with_mask(Image::from_fn(shape, |s, f| {
+            masked.contains(&(s * shape.1 + f))
+        }))
         .unwrap();
     let binnings = list("resolutions")
         .iter()

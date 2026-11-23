@@ -6,7 +6,7 @@
 use hklrs::calib::peak::PeakError;
 use hklrs::calib::{self as core, CalibError as Failure, ParamId, Reject};
 use hklrs::xu;
-use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -930,25 +930,10 @@ fn find_peak(
     edge_fraction: Option<f64>,
     min_snr: Option<f64>,
 ) -> PyResult<PyPeak> {
-    let shape = image.shape();
-    if let Some(m) = &mask
-        && m.shape() != shape
-    {
-        return Err(PyValueError::new_err(format!(
-            "mask shape {:?} does not match image shape {shape:?}",
-            m.shape()
-        )));
-    }
-    let data: Vec<f64> = image.as_array().iter().copied().collect();
-    let mask: Option<Vec<bool>> = mask.map(|m| m.as_array().iter().copied().collect());
+    let image = super::image(&image)?;
+    let mask = mask.as_ref().map(super::image).transpose()?;
     let opts = options(window, tol, max_passes, border, edge_fraction, min_snr);
-    let img = core::peak::Image {
-        data: &data,
-        shape: (shape[0], shape[1]),
-        mask: mask.as_deref(),
-        saturation,
-    };
-    py.detach(|| core::peak::find_peak(&img, &opts))
+    py.detach(|| core::peak::find_peak(&image, mask.as_ref(), saturation, &opts))
         .map(PyPeak)
         .map_err(|e| peak_err(py, e))
 }

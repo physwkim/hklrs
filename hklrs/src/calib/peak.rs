@@ -19,6 +19,7 @@
 use thiserror::Error;
 
 use super::lm;
+use crate::Image;
 
 /// A located peak: fractional index along (slow, fast) and its standard error.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,14 +62,11 @@ pub enum Reject {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum PeakError {
-    #[error("image has {len} values, shape ({slow}, {fast}) needs {}", slow * fast)]
-    Shape {
-        len: usize,
-        slow: usize,
-        fast: usize,
+    #[error("mask of shape {mask:?} on an image of shape {image:?}")]
+    MaskShape {
+        mask: (usize, usize),
+        image: (usize, usize),
     },
-    #[error("mask has {mask} values, image has {data}")]
-    MaskLength { mask: usize, data: usize },
     #[error("unmasked pixel ({slow}, {fast}) is not finite")]
     NonFinite { slow: usize, fast: usize },
     #[error("image of {slow} x {fast} has no pixels left outside the {border}-pixel border")]
@@ -112,14 +110,14 @@ impl Default for PeakOptions {
     }
 }
 
-/// A frame: row-major counts, `shape = (slow, fast)`. `mask[i]` true marks a
-/// bad pixel, which carries no weight.
-#[derive(Clone, Copy, Debug)]
-pub struct Image<'a> {
-    pub data: &'a [f64],
-    pub shape: (usize, usize),
-    pub mask: Option<&'a [bool]>,
-    pub saturation: Option<f64>,
+/// A frame as the search reads it: row-major counts over `shape`, and a
+/// mask of as many values. `mask[i]` true marks a bad pixel, which carries
+/// no weight.
+struct Frame<'a> {
+    data: &'a [f64],
+    shape: (usize, usize),
+    mask: Option<&'a [bool]>,
+    saturation: Option<f64>,
 }
 
 fn median(mut v: Vec<f64>) -> Option<f64> {
@@ -135,22 +133,9 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     })
 }
 
-fn validate(img: &Image, ns: usize, nf: usize) -> Result<(), PeakError> {
-    if ns == 0 || nf == 0 || img.data.len() != ns * nf {
-        return Err(PeakError::Shape {
-            len: img.data.len(),
-            slow: ns,
-            fast: nf,
-        });
-    }
-    if let Some(m) = img.mask
-        && m.len() != img.data.len()
-    {
-        return Err(PeakError::MaskLength {
-            mask: m.len(),
-            data: img.data.len(),
-        });
-    }
+/// Refuses an unmasked pixel that is not finite.
+fn validate(img: &Frame) -> Result<(), PeakError> {
+    let nf = img.shape.1;
     for (i, v) in img.data.iter().enumerate() {
         if !v.is_finite() && !img.mask.is_some_and(|m| m[i]) {
             return Err(PeakError::NonFinite {
@@ -232,7 +217,7 @@ impl Boxes {
 /// Window sum, its Poisson variance, and the position error terms
 /// `Σ var·(x−c)²` along each axis, over the tapered window about `c`.
 /// A pixel's variance is its raw count, at least 1.
-fn window_stats(img: &Image, w: &[f64], c: [f64; 2], half: [f64; 2]) -> (f64, f64, [f64; 2]) {
+fn window_stats(img: &Frame, w: &[f64], c: [f64; 2], half: [f64; 2]) -> (f64, f64, [f64; 2]) {
     let (ns, nf) = img.shape;
     let (mut n, mut var, mut e) = (0.0, 0.0, [0.0; 2]);
     for (i, j, om) in pixels(c, half, ns, nf) {
@@ -277,7 +262,7 @@ struct Scan {
 }
 
 impl Scan {
-    fn new(img: &Image, w: &[f64], window: usize) -> Self {
+    fn new(img: &Frame, w: &[f64], window: usize) -> Self {
         let (ns, nf) = img.shape;
         let (bs, bf) = (window.clamp(1, ns), window.clamp(1, nf));
         let var = |k: usize| {
@@ -384,7 +369,7 @@ fn settle(
 
 /// Saturation and edge tests over the final window.
 fn check_window(
-    img: &Image,
+    img: &Frame,
     w: &[f64],
     c: [f64; 2],
     half: [f64; 2],
@@ -416,14 +401,36 @@ fn lowest_median<const N: usize>(strips: [Vec<f64>; N]) -> Option<f64> {
     strips.into_iter().filter_map(median).min_by(f64::total_cmp)
 }
 
-/// Centre of mass of a frame in a window re-centred until it settles.
+/// Centre of mass of a frame of counts in a window re-centred until it
+/// settles. `mask`, of the image's shape, is true at each bad pixel, which
+/// carries no weight; an unmasked pixel at or above `saturation` in the
+/// final window rejects the frame.
 ///
 /// Limit, untested: the ring mean cancels a background level or a gradient
 /// that is linear across the ring. A step or curvature inside the ring leaves
 /// a residual that can pass `min_snr` on a signal-free frame.
-pub fn find_peak(img: &Image, opts: &PeakOptions) -> Result<Peak, PeakError> {
+pub fn find_peak(
+    image: &Image<f64>,
+    mask: Option<&Image<bool>>,
+    saturation: Option<f64>,
+    opts: &PeakOptions,
+) -> Result<Peak, PeakError> {
+    if let Some(m) = mask
+        && m.shape() != image.shape()
+    {
+        return Err(PeakError::MaskShape {
+            mask: m.shape(),
+            image: image.shape(),
+        });
+    }
+    let img = &Frame {
+        data: image.data(),
+        shape: image.shape(),
+        mask: mask.map(Image::data),
+        saturation,
+    };
     let (ns, nf) = img.shape;
-    validate(img, ns, nf)?;
+    validate(img)?;
     let bad = |i: usize| img.mask.is_some_and(|m| m[i]);
     let b = opts.border;
     let too_small = || PeakError::TooSmall {
@@ -494,13 +501,21 @@ pub fn find_peak_1d(
     opts: &PeakOptions,
 ) -> Result<Peak1, PeakError> {
     let n = row.len();
-    let img = Image {
+    if let Some(m) = mask
+        && m.len() != n
+    {
+        return Err(PeakError::MaskShape {
+            mask: (1, m.len()),
+            image: (1, n),
+        });
+    }
+    let img = Frame {
         data: row,
         shape: (1, n),
         mask,
         saturation,
     };
-    validate(&img, 1, n)?;
+    validate(&img)?;
     let bad = |i: usize| mask.is_some_and(|m| m[i]);
     let b = opts.border;
     let too_small = || PeakError::TooSmall {
@@ -611,13 +626,8 @@ mod tests {
             .collect()
     }
 
-    fn img(data: &[f64], shape: (usize, usize)) -> Image<'_> {
-        Image {
-            data,
-            shape,
-            mask: None,
-            saturation: None,
-        }
+    fn img(data: &[f64], shape: (usize, usize)) -> Image<f64> {
+        Image::new(shape, data.to_vec()).unwrap()
     }
 
     #[test]
@@ -628,7 +638,7 @@ mod tests {
         for _ in 0..300 {
             let c = [30.0 + rng.uniform() * 4.0, 28.0 + rng.uniform() * 4.0];
             let data = blob(shape, c, 3.0, 300.0, 5.0, &mut rng);
-            let p = find_peak(&img(&data, shape), &PeakOptions::default()).unwrap();
+            let p = find_peak(&img(&data, shape), None, None, &PeakOptions::default()).unwrap();
             for a in 0..2 {
                 assert!((p.pos[a] - c[a]).abs() < 6.0 * p.sigma[a], "{p:?} vs {c:?}");
                 sum2 += ((p.pos[a] - c[a]) / p.sigma[a]).powi(2);
@@ -649,7 +659,7 @@ mod tests {
             window: 20,
             ..PeakOptions::default()
         };
-        let p = find_peak(&img(&data, shape), &opts).unwrap();
+        let p = find_peak(&img(&data, shape), None, None, &opts).unwrap();
         assert!(
             (p.pos[0] - 20.3).abs() < 0.1 && (p.pos[1] - 21.6).abs() < 0.1,
             "{p:?}"
@@ -661,7 +671,7 @@ mod tests {
             ..opts
         };
         assert_eq!(
-            find_peak(&img(&data, shape), &one),
+            find_peak(&img(&data, shape), None, None, &one),
             Err(PeakError::Rejected(Reject::NotConverged { passes: 1 }))
         );
     }
@@ -671,14 +681,15 @@ mod tests {
         let shape = (64, 64);
         let mut rng = Rng(11);
         let mut data = blob(shape, [30.0, 30.0], 3.0, 300.0, 5.0, &mut rng);
-        let mut mask = vec![false; 64 * 64];
         data[40 * 64 + 40] = 1e9;
-        mask[40 * 64 + 40] = true;
-        let image = Image {
-            mask: Some(&mask),
-            ..img(&data, shape)
-        };
-        let p = find_peak(&image, &PeakOptions::default()).unwrap();
+        let mask = Image::from_fn(shape, |s, f| (s, f) == (40, 40));
+        let p = find_peak(
+            &img(&data, shape),
+            Some(&mask),
+            None,
+            &PeakOptions::default(),
+        )
+        .unwrap();
         assert!((p.pos[0] - 30.0).abs() < 0.1 && (p.pos[1] - 30.0).abs() < 0.1);
     }
 
@@ -688,7 +699,7 @@ mod tests {
         let mut rng = Rng(3);
         let data = blob(shape, [1.5, 30.0], 3.0, 300.0, 5.0, &mut rng);
         assert_eq!(
-            find_peak(&img(&data, shape), &PeakOptions::default()),
+            find_peak(&img(&data, shape), None, None, &PeakOptions::default()),
             Err(PeakError::Rejected(Reject::TouchesEdge))
         );
     }
@@ -698,13 +709,12 @@ mod tests {
         let shape = (64, 64);
         let mut rng = Rng(5);
         let data = blob(shape, [30.0, 30.0], 3.0, 300.0, 5.0, &mut rng);
-        let image = Image {
-            saturation: Some(250.0),
-            ..img(&data, shape)
-        };
-        let Err(PeakError::Rejected(Reject::Saturated { slow, fast })) =
-            find_peak(&image, &PeakOptions::default())
-        else {
+        let Err(PeakError::Rejected(Reject::Saturated { slow, fast })) = find_peak(
+            &img(&data, shape),
+            None,
+            Some(250.0),
+            &PeakOptions::default(),
+        ) else {
             panic!("not rejected as saturated");
         };
         assert!((28..=32).contains(&slow) && (28..=32).contains(&fast));
@@ -714,21 +724,52 @@ mod tests {
     fn flat_frame_has_no_signal_and_bad_input_is_an_error() {
         let flat = vec![5.0; 32 * 32];
         assert_eq!(
-            find_peak(&img(&flat, (32, 32)), &PeakOptions::default()),
+            find_peak(&img(&flat, (32, 32)), None, None, &PeakOptions::default()),
             Err(PeakError::Rejected(Reject::NoSignal))
         );
+        // A transposed mask has the image's pixel count.
+        let wide = img(&flat[..32 * 30], (32, 30));
+        assert_eq!(
+            find_peak(
+                &wide,
+                Some(&Image::from_fn((30, 32), |_, _| false)),
+                None,
+                &PeakOptions::default()
+            ),
+            Err(PeakError::MaskShape {
+                mask: (30, 32),
+                image: (32, 30)
+            })
+        );
+        assert_eq!(
+            find_peak_1d(
+                &flat[..32],
+                Some(&[false; 31]),
+                None,
+                &PeakOptions::default()
+            ),
+            Err(PeakError::MaskShape {
+                mask: (1, 31),
+                image: (1, 32)
+            })
+        );
         assert!(matches!(
-            find_peak(&img(&flat, (32, 31)), &PeakOptions::default()),
-            Err(PeakError::Shape { .. })
+            find_peak(&img(&[], (0, 32)), None, None, &PeakOptions::default()),
+            Err(PeakError::TooSmall { .. })
         ));
         let mut nan = flat.clone();
         nan[40] = f64::NAN;
         assert_eq!(
-            find_peak(&img(&nan, (32, 32)), &PeakOptions::default()),
+            find_peak(&img(&nan, (32, 32)), None, None, &PeakOptions::default()),
             Err(PeakError::NonFinite { slow: 1, fast: 8 })
         );
         assert!(matches!(
-            find_peak(&img(&flat[..4], (2, 2)), &PeakOptions::default()),
+            find_peak(
+                &img(&flat[..4], (2, 2)),
+                None,
+                None,
+                &PeakOptions::default()
+            ),
             Err(PeakError::TooSmall { .. })
         ));
     }
@@ -758,7 +799,7 @@ mod tests {
         // Background rising across the frame, border strip at the low side.
         let ramp = big_frame(|_, j| 0.0004 * j as f64);
         for data in [flat, ramp] {
-            let p = find_peak(&img(&data, shape), &PeakOptions::default())
+            let p = find_peak(&img(&data, shape), None, None, &PeakOptions::default())
                 .expect("a clear peak must be found");
             assert!(
                 (p.pos[0] - 530.0).abs() < 6.0 * p.sigma[0]
@@ -786,7 +827,7 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(
-                    find_peak(&img(&data, shape), &PeakOptions::default()),
+                    find_peak(&img(&data, shape), None, None, &PeakOptions::default()),
                     Err(PeakError::Rejected(Reject::NoSignal)),
                     "seed {seed} ramp {ramp}"
                 );

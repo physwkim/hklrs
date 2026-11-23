@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use nalgebra::{Isometry3, Point3, Unit, UnitQuaternion, Vector3};
 
-use crate::{Error, PARALLEL_SIN};
+use crate::{Error, Image, PARALLEL_SIN};
 
 /// Pixels along one module axis, coordinates in metres from the module
 /// corner.
@@ -512,17 +512,12 @@ impl PixelDetector {
         })
     }
 
-    /// `masked[slow * shape.1 + fast]` excludes pixel (slow, fast); replaces
-    /// any earlier mask.
-    pub fn with_mask(self, masked: Vec<bool>) -> Result<Self, Error> {
-        if self.shape.0.checked_mul(self.shape.1) != Some(masked.len()) {
-            return Err(Error::MaskShape {
-                len: masked.len(),
-                shape: self.shape,
-            });
-        }
+    /// `masked`, of the detector's shape, excludes each pixel where it is
+    /// true; replaces any earlier mask.
+    pub fn with_mask(self, masked: Image<bool>) -> Result<Self, Error> {
+        masked.check("mask", self.shape)?;
         Ok(Self {
-            mask: any_masked(masked),
+            mask: any_masked(masked.into_data()),
             ..self
         })
     }
@@ -1060,8 +1055,7 @@ mod tests {
 
     #[test]
     fn mask_follows_roi_and_bin() {
-        let mut m = vec![false; 35];
-        m[2 * 7 + 3] = true;
+        let m = Image::from_fn((5, 7), |s, f| (s, f) == (2, 3));
         let det = area().with_mask(m).unwrap();
         assert!(det.is_masked(2, 3).unwrap());
         assert!(!det.is_masked(2, 4).unwrap());
@@ -1084,11 +1078,21 @@ mod tests {
     #[test]
     fn an_all_clear_mask_is_no_mask() {
         let det = area();
-        assert_eq!(det.clone().with_mask(vec![false; 35]).unwrap(), det);
-        assert!(matches!(
-            det.with_mask(vec![true; 34]),
-            Err(Error::MaskShape { len: 34, .. })
-        ));
+        let clear = Image::from_fn((5, 7), |_, _| false);
+        assert_eq!(det.clone().with_mask(clear).unwrap(), det);
+    }
+
+    /// A mask of the transposed shape has the detector's pixel count.
+    #[test]
+    fn a_mask_of_another_shape_is_refused() {
+        assert_eq!(
+            area().with_mask(Image::from_fn((7, 5), |_, _| true)),
+            Err(Error::ShapeMismatch {
+                what: "mask",
+                shape: (7, 5),
+                expected: (5, 7)
+            })
+        );
     }
 
     /// Worst |locate(pixel(s, f)) − (s, f)| over every module's first and

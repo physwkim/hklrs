@@ -192,6 +192,8 @@ fn masks() {
         let (h, w) = det.shape();
         let want = golden_mask(d, h * w);
         let got = det.mask();
+        assert_eq!(got.shape(), (h, w), "{}", det.name());
+        let got = got.data();
         let differ: Vec<(usize, usize)> = (0..h * w)
             .filter(|&k| got[k] != want[k])
             .map(|k| (k / w, k % w))
@@ -226,7 +228,8 @@ fn masks() {
 fn bin_1_pilatus_centre_strip_on_every_module() {
     let mask = Detector::PilatusCdte2M.mask();
     let w = 1475;
-    let masked = |j: usize, c: usize| mask[j * w + c];
+    assert_eq!(mask.shape().1, w);
+    let masked = |j: usize, c: usize| mask.data()[j * w + c];
     for k in 0..3 {
         let centre = (487 + 7) * k + 243;
         for c in [centre - 1, centre, centre + 1] {
@@ -267,9 +270,10 @@ fn every_row_is_a_pixel_detector_with_its_mask() {
         let pd = det.pixel_detector();
         assert_eq!(pd.shape(), det.shape(), "{}", det.name());
         let mask = det.mask();
+        let mask = mask.data();
         assert_eq!(
             pd.mask(),
-            mask.contains(&true).then_some(&mask[..]),
+            mask.contains(&true).then_some(mask),
             "{}",
             det.name()
         );

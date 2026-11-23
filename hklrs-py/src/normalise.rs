@@ -2,27 +2,20 @@
 //! weight and a reason code (0 = has a value), as `solid_angle` does;
 //! counts and weight are NaN where masked.
 
-use hklrs::Weights;
 use hklrs::absorption::Masked;
 use hklrs::normalise as core;
+use hklrs::{Image, Weights};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::{MASKED, PyPixelDetector, err, masked_code};
+use super::{MASKED, PyPixelDetector, err, image, masked_code};
 
 type Pixels<'py> = (
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray2<u8>>,
 );
-
-/// `a` as a raw image of its own shape, which the core compares with the
-/// raw shape wherever the two meet.
-pub(crate) fn raw_frame(a: &PyReadonlyArray2<'_, f64>) -> PyResult<core::RawFrame> {
-    let shape = (a.shape()[0], a.shape()[1]);
-    core::RawFrame::new(shape, a.as_array().iter().copied().collect()).map_err(err)
-}
 
 /// What one frame contributes to every pixel's weight. A monitor needs its
 /// reference; a value that is not positive and finite is a ValueError, never
@@ -95,10 +88,10 @@ impl PyPixelFields {
     ) -> PyResult<Self> {
         let mut f = core::PixelFields::new(shape);
         if let Some(d) = dark_rate {
-            f = f.dark_rate(raw_frame(&d)?).map_err(err)?;
+            f = f.dark_rate(image(&d)?).map_err(err)?;
         }
         if let Some(g) = flat {
-            f = f.flat(raw_frame(&g)?).map_err(err)?;
+            f = f.flat(image(&g)?).map_err(err)?;
         }
         Ok(Self(f))
     }
@@ -137,14 +130,15 @@ impl PyRegion {
     }
 }
 
-/// The weights of `solid_angle` and `polarisation`: (values, reasons).
+/// The weights of `solid_angle` and `polarisation`: (values, reasons), each
+/// of its own shape.
 fn geometric(
     (values, reasons): (PyReadonlyArray2<'_, f64>, PyReadonlyArray2<'_, u8>),
 ) -> PyResult<Weights> {
-    let shape = (values.shape()[0], values.shape()[1]);
-    let reasons = plane_u8(&reasons, shape)?
-        .into_iter()
-        .map(|c| match c {
+    let codes = reasons
+        .as_array()
+        .iter()
+        .map(|&c| match c {
             0 => Ok(None),
             c => MASKED
                 .iter()
@@ -153,18 +147,8 @@ fn geometric(
                 .ok_or_else(|| PyValueError::new_err(format!("{c} is not a reason code"))),
         })
         .collect::<PyResult<Vec<Option<Masked>>>>()?;
-    let values: Vec<f64> = values.as_array().iter().copied().collect();
-    Weights::from_values(shape, &values, &reasons).map_err(err)
-}
-
-fn plane_u8(a: &PyReadonlyArray2<'_, u8>, shape: (usize, usize)) -> PyResult<Vec<u8>> {
-    if a.shape() != [shape.0, shape.1] {
-        return Err(PyValueError::new_err(format!(
-            "reasons shape {:?} does not match the values' {shape:?}",
-            a.shape()
-        )));
-    }
-    Ok(a.as_array().iter().copied().collect())
+    let reasons = Image::new((reasons.shape()[0], reasons.shape()[1]), codes).map_err(err)?;
+    Weights::from_values(&image(&values)?, &reasons).map_err(err)
 }
 
 /// The per-pixel stages of one region of one detector: `Normaliser(fields,
@@ -198,7 +182,7 @@ impl PyNormaliser {
         scalars: &PyFrameScalars,
         weights: Vec<(PyReadonlyArray2<'_, f64>, PyReadonlyArray2<'_, u8>)>,
     ) -> PyResult<Pixels<'py>> {
-        let raw = raw_frame(&raw)?;
+        let raw = image(&raw)?;
         let weights = weights
             .into_iter()
             .map(geometric)

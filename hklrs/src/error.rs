@@ -30,8 +30,6 @@ pub enum Error {
     },
     #[error("the detector point coincides with the sample position")]
     DetectorAtSample,
-    #[error("mask of {len} pixels does not match the detector shape {shape:?}")]
-    MaskShape { len: usize, shape: (usize, usize) },
     #[error("roi {slow:?} x {fast:?} is empty or outside the detector shape {shape:?}")]
     Roi {
         slow: std::ops::Range<usize>,

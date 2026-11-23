@@ -10,7 +10,7 @@
 
 use nalgebra::{Point3, Rotation3, Vector3};
 
-use crate::{Error, Module, PixelAxis, PixelDetector};
+use crate::{Error, Image, Module, PixelAxis, PixelDetector};
 
 /// Detector ids; the discriminants are the binoculars `HklBinocularsDetectorEnum`
 /// values, so a stored id keeps its meaning.
@@ -285,11 +285,12 @@ impl Detector {
         self.row().shape
     }
 
-    /// Row-major masked pixels over [`shape`](Self::shape).
-    pub fn mask(self) -> Vec<bool> {
+    /// The masked pixels, of [`shape`](Self::shape).
+    pub fn mask(self) -> Image<bool> {
         let row = self.row();
         let (h, w) = row.shape;
-        let mut mask = vec![false; h * w];
+        let mut image = Image::from_fn((h, w), |_, _| false);
+        let mask = image.data_mut();
         for s in self.strips() {
             let extent = if s.vertical { w } else { h };
             // Out-of-range bands are dropped, as binoculars does.
@@ -304,7 +305,7 @@ impl Detector {
                 }
             }
         }
-        mask
+        image
     }
 
     /// Every masked band the row implies, from its chips, its tiling and its

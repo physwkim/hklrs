@@ -12,8 +12,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use super::normalise::{PyFrameScalars, PyPixelFields, PyRegion, raw_frame};
-use super::{PyGeometry, PyPixelDetector, PySample, err, unit, xu_options};
+use super::normalise::{PyFrameScalars, PyPixelFields, PyRegion};
+use super::{PyGeometry, PyPixelDetector, PySample, err, image, unit, xu_options};
 
 /// Whether a cube axis is one of the angles projection's, radians in the
 /// core.
@@ -209,7 +209,7 @@ impl PyFrameMap {
         raw: PyReadonlyArray2<'_, f64>,
         scalars: Option<PyRef<'_, PyFrameScalars>>,
     ) -> PyResult<()> {
-        let raw = raw_frame(&raw)?;
+        let raw = image(&raw)?;
         let wavelength = Wavelength::new(wavelength).map_err(err)?;
         let s = scalars.map_or_else(FrameScalars::new, |s| s.0);
         let cube = &mut cube.0;
