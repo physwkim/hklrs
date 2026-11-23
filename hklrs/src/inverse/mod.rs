@@ -18,6 +18,7 @@ pub mod k6c;
 pub mod kappa;
 mod mode;
 pub mod petra3_p09_eh2;
+pub mod petra3_p23_4c;
 pub mod soleil_sixs_med;
 mod solve;
 mod system;

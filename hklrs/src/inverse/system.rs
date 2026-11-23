@@ -343,7 +343,8 @@ impl<'a> System<'a> {
 mod tests {
     use super::*;
     use crate::inverse::{
-        aps_04id_polar as polar, e4c, e6c, petra3_p09_eh2 as p09, soleil_sixs_med as med, zaxis,
+        aps_04id_polar as polar, e4c, e6c, petra3_p09_eh2 as p09, petra3_p23_4c as p23_4c,
+        soleil_sixs_med as med, zaxis,
     };
     use crate::presets::preset;
 
@@ -375,6 +376,10 @@ mod tests {
                 p09::zaxis_beta_fixed(geo).unwrap(),
                 p09::zaxis_alpha_eq_beta(geo).unwrap(),
                 p09::bissecting_horizontal(geo).unwrap(),
+            ],
+            "PETRA3 P23 4C" => vec![
+                p23_4c::bissector_vertical(geo).unwrap(),
+                p23_4c::psi_constant(geo, reference, 0.4).unwrap(),
             ],
             "E6C" => vec![
                 e6c::bissector_vertical(geo).unwrap(),
@@ -491,9 +496,9 @@ mod tests {
     /// every E4C mode, every kind of E6C mode and an emergence one, both
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
     /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
-    /// (in both stacks), every kappa eulerian row on K4CV and the surface rows
-    /// on K6C, at points away from the wrap cuts of the angular rows and from
-    /// kappa = 0.
+    /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa
+    /// eulerian row on K4CV and the surface rows on K6C, at points away from
+    /// the wrap cuts of the angular rows and from kappa = 0.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
@@ -514,6 +519,7 @@ mod tests {
             "SOLEIL SIXS MED2+3",
             "APS POLAR",
             "PETRA3 P09 EH2",
+            "PETRA3 P23 4C",
             "K4CV",
             "K6C",
         ] {
