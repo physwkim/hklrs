@@ -11,7 +11,7 @@
 //!
 //! hklrs writes counts as f64 and contributions as u64 (binoculars writes
 //! f32 and u32 and has HDF5 convert on read), writes axes of one bin,
-//! which binoculars drops, and stores each axis' anchor as an attribute
+//! which binoculars drops (BIN-14), and stores each axis' anchor as an attribute
 //! `anchor` of its dataset. New data goes in attributes or in datasets of
 //! `/binoculars` beside these, which binoculars ignores, never in `axes`,
 //! whose every link binoculars reads as an axis.
@@ -238,6 +238,8 @@ mod tests {
         Axis::spanning(name, Binning::new(step, anchor).unwrap(), bins).unwrap()
     }
 
+    /// binoculars drops one-bin axes (BIN-14) and cannot save an empty
+    /// config (BIN-17).
     #[test]
     fn round_trip_keeps_one_bin_axes_anchors_and_full_precision() {
         let c = cube(vec![
@@ -325,6 +327,9 @@ mod tests {
         assert_eq!(read(&p).unwrap(), (want, "cfg".to_owned()));
     }
 
+    /// binoculars' loader crashes on an empty axes group or a bad index
+    /// (BIN-15) and reads an axis of other than 6 values past its row or
+    /// the dataset (BIN-16).
     #[test]
     fn read_refuses_axes_binoculars_would_misread() {
         type Case<'a> = (&'a str, &'a [(&'a str, &'a [f64])], &'a [usize], &'a str);

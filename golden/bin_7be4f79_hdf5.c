@@ -6,10 +6,9 @@
  *                 imin, imax), offset0, photons and contributions equal the
  *                 merged cube's; cube_cmp is binoculars' own comparison,
  *                 which skips the bins
- * cube_new_merge keeps the offset0 of its first argument's axes after
- * widening them, so the merged cube's offset0 is printed next to the one
- * its axes give (compute_offset0, hkl-binoculars.c:1654) and the loads are
- * compared against the latter.
+ * widening them (BIN-6), so the merged cube's offset0 is printed next to
+ * the one its axes give (compute_offset0, hkl-binoculars.c:1654) and the
+ * loads are compared against the latter.
  * Build and run: bin_7be4f79_hdf5.sh */
 #include <string.h>
 #include "bin_7be4f79_scan.h"
