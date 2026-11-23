@@ -21,7 +21,7 @@ mod sixs;
 mod units;
 pub mod xu;
 
-pub use detector::PixelDetector;
+pub use detector::{Module, PixelAxis, PixelDetector};
 pub use detector_table::{Detector, Layout, Row, Strip, Tiling};
 pub use error::Error;
 pub use forward::{Forward, Scattering, angle_between, forward, scattering, scattering_at};

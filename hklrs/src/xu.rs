@@ -543,7 +543,9 @@ mod tests {
         assert_eq!(area.distance, 1.0);
         let det = area.detector(y()).unwrap();
         let centre = det.pixel(4, 6).unwrap().coords;
-        for (step, chpdeg) in [(det.e_slow(), 100.0), (det.e_fast(), 40.0)] {
+        let m = &det.modules()[0];
+        for (axis, chpdeg) in [(m.slow(), 100.0), (m.fast(), 40.0)] {
+            let step = axis.dir().unwrap().into_inner() * axis.pitch().unwrap();
             let half = step * (chpdeg / 2.0);
             let (a, b) = (centre - half, centre + half);
             let angle = a.cross(&b).norm().atan2(a.dot(&b));

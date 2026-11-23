@@ -2,7 +2,7 @@
 //! detector rotation, ported from `hkl_binoculars_detector_2d_sixs_calibration`
 //! (binoculars-ng 7be4f79, detectors-2d.c:463).
 
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 
 use crate::{Error, PixelDetector};
 
@@ -27,14 +27,5 @@ pub fn sixs(
     let c = det.pixel(centre.0, centre.1)?;
     let shift = Vector3::new(sdd, -c.y, -c.z);
     let rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), detrot);
-    let out = PixelDetector::new(
-        det.shape(),
-        rot * (det.origin().coords + shift),
-        rot * det.e_slow(),
-        rot * det.e_fast(),
-    )?;
-    match det.mask() {
-        Some(mask) => out.with_mask(mask.to_vec()),
-        None => Ok(out),
-    }
+    Ok(det.transformed(&Isometry3::from_parts(Translation3::from(rot * shift), rot)))
 }

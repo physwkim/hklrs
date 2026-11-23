@@ -275,7 +275,7 @@ fn xu14_tilted_linear_along_r_i_is_rejected_where_xu_scales_its_pitch() {
     }
     .detector(beam)
     .unwrap();
-    let pitch = det.e_fast().norm();
+    let pitch = det.modules()[0].fast().pitch().unwrap();
     assert!(
         (pitch - tilted.pwidth).abs() <= POS_TOL,
         "hklrs pitch {pitch}"
