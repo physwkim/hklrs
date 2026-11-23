@@ -1,0 +1,187 @@
+#hklpy2 configuration file
+
+_header:
+  hklpy2_version: 1.0.2.dev5+g352700b6b
+  python_class: Hklpy2Diffractometer
+  config_schema_version: 3
+  comment: golden/hklpy2_config.py
+name: e4cv
+axes:
+  pseudo_axes:
+  - h
+  - k
+  - l
+  real_axes:
+  - omega
+  - chi
+  - phi
+  - tth
+  axes_xref:
+    h: h
+    k: k
+    l: l
+    omega: omega
+    chi: chi
+    phi: phi
+    tth: tth
+  extra_axes:
+    h2: 0.0
+    k2: 0.0
+    l2: 1.0
+    psi: 30.0
+  auxiliary_axes: []
+digits: 12
+sample_name: hexagonal
+samples:
+  sample:
+    name: sample
+    lattice:
+      a: 1
+      b: 1
+      c: 1
+      alpha: 90.0
+      beta: 90.0
+      gamma: 90.0
+      digits: 4
+      angle_units: degrees
+      length_units: angstrom
+    reflections: {}
+    reflections_order: []
+    U:
+    - - 1
+      - 0
+      - 0
+    - - 0
+      - 1
+      - 0
+    - - 0
+      - 0
+      - 1
+    UB:
+    - - 6.283185307179586
+      - 0.0
+      - 0.0
+    - - 0.0
+      - 6.283185307179586
+      - 0.0
+    - - 0.0
+      - 0.0
+      - 6.283185307179586
+    digits: 4
+  hexagonal:
+    name: hexagonal
+    lattice:
+      a: 3.0
+      b: 3.0
+      c: 5.0
+      alpha: 90.0
+      beta: 90.0
+      gamma: 120.0
+      digits: 4
+      angle_units: degrees
+      length_units: angstrom
+    reflections:
+      r100:
+        name: r100
+        geometry: E4CV
+        pseudos:
+          h: 1
+          k: 0
+          l: 0
+        reals:
+          omega: 5.239895024565371
+          chi: 31.0
+          phi: 47.0
+          tth: 34.47979004913074
+        reals_units: angstrom
+        wavelength: 1.54
+        wavelength_units: angstrom
+        digits: 4
+      r001:
+        name: r001
+        geometry: E4CV
+        pseudos:
+          h: 0
+          k: 0
+          l: 1
+        reals:
+          omega: 16.858804147371487
+          chi: -54.0
+          phi: 112.0
+          tth: 17.717608294742977
+        reals_units: angstrom
+        wavelength: 1.54
+        wavelength_units: angstrom
+        digits: 4
+    reflections_order:
+    - r100
+    - r001
+    U:
+    - - 0.471397941368
+      - -0.447497367531
+      - 0.759954003166
+    - - 0.50378325726
+      - -0.570639732169
+      - -0.648515786835
+    - - 0.723869056238
+      - 0.688561109941
+      - -0.043556713577
+    UB:
+    - - 1.140028381805
+      - -0.367222103987
+      - 0.954986365365
+    - - 1.218349002306
+      - -0.585970559133
+      - -0.814948972664
+    - - 1.750604311991
+      - 2.317421172355
+      - -0.054734980556
+    digits: 4
+constraints:
+  omega:
+    label: omega
+    low_limit: -120.0
+    high_limit: 120.0
+    cut_point: -180.0
+    class: LimitsConstraint
+  chi:
+    label: chi
+    low_limit: -100.0
+    high_limit: 100.0
+    cut_point: -180.0
+    class: LimitsConstraint
+  phi:
+    label: phi
+    low_limit: 0.0
+    high_limit: 360.0
+    cut_point: 0.0
+    class: LimitsConstraint
+  tth:
+    label: tth
+    low_limit: -5.0
+    high_limit: 170.0
+    cut_point: -180.0
+    class: LimitsConstraint
+solver:
+  name: hkl_soleil
+  description: HklSolver(name='hkl_soleil', version='5.1.9', geometry='E4CV', engine_name='hkl',
+    mode='psi_constant')
+  geometry: E4CV
+  real_axes:
+  - omega
+  - chi
+  - phi
+  - tth
+  version: 5.1.9
+  engine: hkl
+  mode: psi_constant
+beam:
+  class: WavelengthXray
+  source_type: Synchrotron X-ray Source
+  energy: 8.050921976530415
+  wavelength: 1.54
+  energy_units: keV
+  wavelength_units: angstrom
+presets:
+  bissector: {}
+forward_solution_function: hklpy2.utils.pick_first_solution

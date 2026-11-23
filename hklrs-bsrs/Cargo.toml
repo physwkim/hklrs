@@ -14,7 +14,10 @@ bsrs = { version = "=0.6.2", default-features = false }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = { workspace = true }
+# a saved configuration reads back bit for bit
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+# unmaintained upstream; reads the YAML 1.1 hklpy2 writes, anchors included
+serde_yaml = "0.9"
 thiserror = { workspace = true }
 rust-hdf5 = { workspace = true, optional = true }
 
@@ -25,4 +28,5 @@ hdf5 = ["hklrs/hdf5", "dep:rust-hdf5"]
 [dev-dependencies]
 # Lua and the registry, to call the Lua methods as the queue server does
 bsrs = { version = "=0.6.2", default-features = false, features = ["host"] }
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

@@ -20,6 +20,7 @@ use hklrs::{
 use serde_json::{Value, json};
 
 use crate::DiffError;
+use crate::config::Config;
 use crate::samples::{Measured, Samples};
 
 /// A real axis: moved and located as one value, and read by a plan.
@@ -158,14 +159,19 @@ pub(crate) fn build_mode<'g>(
 }
 
 /// hkl's default: the first of [`ModeSpec::names`] `geometry` builds.
-fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
+pub(crate) fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
     ModeSpec::names()
         .map(ModeSpec::new)
         .find(|m| m.build(geometry).is_ok())
 }
 
 /// [`Diffractometer::set_limits`] on `geometry`.
-fn set_limits(geometry: &mut Geometry, name: &str, min: f64, max: f64) -> Result<(), DiffError> {
+pub(crate) fn set_limits(
+    geometry: &mut Geometry,
+    name: &str,
+    min: f64,
+    max: f64,
+) -> Result<(), DiffError> {
     let rotation = geometry.axes()[geometry.axis_index(name)?].is_rotation();
     let value = |v: f64| if rotation { v.to_radians() } else { v };
     geometry
@@ -204,7 +210,7 @@ fn point(geometry: &Geometry) -> Point3<f64> {
     Point3::from(geometry.beam_direction().into_inner())
 }
 
-fn reflection(geometry: &Geometry, m: &Measured) -> Result<Reflection, DiffError> {
+pub(crate) fn reflection(geometry: &Geometry, m: &Measured) -> Result<Reflection, DiffError> {
     let values = geometry.values_from_degrees(&m.positions)?;
     Ok(Reflection::measure(
         Vector3::from(m.hkl),
@@ -388,6 +394,34 @@ impl Diffractometer {
             .state_mut()
             .geometry
             .set_cut_point(name, cut.to_radians())?)
+    }
+
+    /// Everything [`Diffractometer::load_config`] sets.
+    pub fn config(&self) -> Config {
+        let state = self.state();
+        Config::capture(
+            &state.geometry,
+            &state.samples,
+            state.mode.as_ref(),
+            &state.wavelength,
+        )
+    }
+
+    /// Sets the limits and cut points, the samples and the current one, the
+    /// mode and a fixed wavelength from `config`, all or none. Its geometry
+    /// must be this device's by name and axes.
+    pub fn load_config(&self, config: &Config) -> Result<(), DiffError> {
+        let mut state = self.state_mut();
+        let mut next = state.clone();
+        let (geometry, samples, mode) = config.load(&next.geometry)?;
+        next.geometry = geometry;
+        next.samples = samples;
+        next.mode = mode;
+        if let Some(angstrom) = config.wavelength {
+            next.set_wavelength(Wavelength::new(angstrom)?)?;
+        }
+        *state = next;
+        Ok(())
     }
 
     /// The hkl mode the pseudo axes solve in; at construction the first of

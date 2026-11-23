@@ -1,15 +1,16 @@
 //! The Diffractometer's methods for Lua, on a type of their own: Lua names
 //! a method by its Rust name, and the device's typed methods keep theirs.
 
-use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use bsrs::lua_methods;
 use futures::try_join;
-use hklrs::nalgebra::{Matrix3, Vector3};
+use hklrs::nalgebra::Matrix3;
 use hklrs::{Lattice, ModeSpec};
 use serde::{Deserialize, Serialize};
 
+use crate::config::{Config, ModeConfig, Positions, PsiConfig, named, ordered};
 use crate::diffractometer::rows;
 use crate::error::Fault;
 use crate::{DiffError, Diffractometer, Measured};
@@ -35,6 +36,10 @@ use crate::{DiffError, Diffractometer, Measured};
 ///   `positions`.
 /// - `ca(hkl)`: the positions a move to `hkl` would go to, without moving.
 /// - `wh()`: `{hkl, positions, wavelength}` at the readbacks.
+/// - `save_config(path)`: writes [`Diffractometer::config`] as hklrs JSON
+///   (`.json`) or YAML (`.yml`, `.yaml`).
+/// - `load_config(path)`: [`Diffractometer::load_config`] from hklrs JSON or
+///   YAML, or hklpy2 schema-3 YAML (a `.yml`/`.yaml` with its `_header`).
 ///
 /// ```
 /// use std::sync::Arc;
@@ -75,22 +80,11 @@ pub struct LuaDiffractometer {
     dx: Arc<Diffractometer>,
 }
 
-/// Axis values by geometry axis name.
-type Positions = BTreeMap<String, f64>;
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModeParams {
     hkl2: Option<[f64; 3]>,
-    psi: Option<Psi>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Psi {
-    reference: [f64; 3],
-    /// Degrees.
-    angle: f64,
+    psi: Option<PsiConfig>,
 }
 
 #[derive(Serialize)]
@@ -106,30 +100,12 @@ impl LuaDiffractometer {
         Self { dx }
     }
 
-    /// `positions` in geometry axis order.
     fn ordered(&self, positions: &Positions) -> Result<Vec<f64>, DiffError> {
-        let geometry = self.dx.geometry();
-        for name in positions.keys() {
-            geometry.axis_index(name)?;
-        }
-        geometry
-            .axes()
-            .iter()
-            .map(|a| {
-                positions
-                    .get(a.name())
-                    .copied()
-                    .ok_or_else(|| DiffError::MissingPosition {
-                        axis: a.name().to_owned(),
-                    })
-            })
-            .collect()
+        ordered(&self.dx.geometry(), positions)
     }
 
     fn named(&self, values: &[f64]) -> Positions {
-        let geometry = self.dx.geometry();
-        let names = geometry.axes().iter().map(|a| a.name().to_owned());
-        names.zip(values.iter().copied()).collect()
+        named(&self.dx.geometry(), values)
     }
 }
 
@@ -177,13 +153,12 @@ impl LuaDiffractometer {
 
     #[lua_method]
     fn set_mode(&self, name: String, params: ModeParams) -> Result<(), DiffError> {
-        self.dx.set_mode(ModeSpec {
+        let mode = ModeConfig {
             name,
-            hkl2: params.hkl2.map(Vector3::from),
-            psi: params
-                .psi
-                .map(|p| (Vector3::from(p.reference), p.angle.to_radians())),
-        })
+            hkl2: params.hkl2,
+            psi: params.psi,
+        };
+        self.dx.set_mode(ModeSpec::from(&mode))
     }
 
     #[lua_method]
@@ -214,5 +189,15 @@ impl LuaDiffractometer {
             positions: self.named(&current),
             wavelength: wavelength.angstrom(),
         })
+    }
+
+    #[lua_method]
+    fn save_config(&self, path: String) -> Result<(), DiffError> {
+        self.dx.config().write(Path::new(&path))
+    }
+
+    #[lua_method]
+    fn load_config(&self, path: String) -> Result<(), DiffError> {
+        self.dx.load_config(&Config::read(Path::new(&path))?)
     }
 }

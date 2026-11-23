@@ -3,8 +3,10 @@
 //! Values cross this boundary in degrees for rotations, metres for
 //! translations and Å for lattice constants and the wavelength.
 
+mod config;
 mod diffractometer;
 mod error;
+mod hklpy2;
 mod lua;
 mod plans;
 mod pseudo;
@@ -13,6 +15,10 @@ mod rsm;
 mod rsm_hdf5;
 mod samples;
 
+pub use config::{
+    AxisConfig, Config, GeometryConfig, LatticeConfig, ModeConfig, PsiConfig, ReflectionConfig,
+    SCHEMA_VERSION, SampleConfig,
+};
 pub use diffractometer::{Diffractometer, RealAxis, WavelengthSource};
 pub use error::DiffError;
 pub use lua::LuaDiffractometer;
