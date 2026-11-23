@@ -92,6 +92,101 @@ pub fn detector_positions(
     Ok(planes3(detector.shape(), planes))
 }
 
+/// One f64 per pixel, row-major (slow, fast).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Weights {
+    shape: (usize, usize),
+    pub data: Vec<f64>,
+}
+
+impl Weights {
+    pub fn shape(&self) -> (usize, usize) {
+        self.shape
+    }
+
+    /// The weight at pixel (slow, fast); panics outside the shape.
+    pub fn get(&self, slow: usize, fast: usize) -> f64 {
+        assert!(slow < self.shape.0 && fast < self.shape.1);
+        self.data[slow * self.shape.1 + fast]
+    }
+}
+
+fn weights(shape: (usize, usize), [data]: [Vec<f64>; 1]) -> Weights {
+    Weights { shape, data }
+}
+
+/// Solid angle of each pixel, sr: `|(e_slow × e_fast) · k̂f| / |p|²`, with
+/// the pixel area vector rotated by the detector pose. Needs a detector of
+/// at least 2×2 pixels to know its pixel steps.
+pub fn solid_angle(
+    geometry: &Geometry,
+    frame: &Frame,
+    detector: &PixelDetector,
+) -> Result<Weights, Error> {
+    let shape = detector.shape();
+    if shape.0 < 2 || shape.1 < 2 {
+        return Err(Error::NoPixelArea { shape });
+    }
+    let origin = detector.pixel(0, 0)?;
+    let area = (detector.pixel(1, 0)? - origin).cross(&(detector.pixel(0, 1)? - origin));
+    let data = fill(geometry, frame, detector, |poses, p, s| {
+        [(poses.detector.rotation * area).dot(&s.kf).abs() / p.norm_squared()]
+    })?;
+    Ok(weights(shape, data))
+}
+
+/// Which way the incident beam's electric vector points, perpendicular to
+/// k̂i, lab z being up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PolarisationPlane {
+    /// Along z × k̂i (the usual synchrotron case).
+    Horizontal,
+    /// Along k̂i × (z × k̂i).
+    Vertical,
+}
+
+/// Polarisation factor of the scattered intensity for a beam polarised in
+/// `plane` with degree `factor` (1 fully in the plane, 0 unpolarised, −1
+/// fully across): `P = ½(1+f)(1−(ê·k̂f)²) + ½(1−f)(1−(ê⊥·k̂f)²)`, which is
+/// pyFAI's `½(1 + cos²2θ − f cos 2χ sin²2θ)` for a horizontal beam.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Polarisation {
+    pub plane: PolarisationPlane,
+    pub factor: f64,
+}
+
+pub fn polarisation(
+    geometry: &Geometry,
+    frame: &Frame,
+    detector: &PixelDetector,
+    polarisation: Polarisation,
+) -> Result<Weights, Error> {
+    let f = polarisation.factor;
+    if !(-1.0..=1.0).contains(&f) {
+        return Err(Error::PolarisationFactor { value: f });
+    }
+    // k̂i is the same for every pixel of the frame
+    let poses = geometry.poses(&frame.values)?;
+    let ki = poses.source * geometry.beam_direction();
+    let horizontal = Vector3::z()
+        .cross(&ki)
+        .try_normalize(0.0)
+        .ok_or(Error::ZeroVector {
+            what: "horizontal polarisation direction (beam along lab z)".to_owned(),
+        })?;
+    let vertical = ki.cross(&horizontal);
+    let (e, across) = match polarisation.plane {
+        PolarisationPlane::Horizontal => (horizontal, vertical),
+        PolarisationPlane::Vertical => (vertical, horizontal),
+    };
+    let data = fill(geometry, frame, detector, |_, _, s| {
+        let kf = s.kf.into_inner();
+        [0.5 * (1.0 + f) * (1.0 - e.dot(&kf).powi(2))
+            + 0.5 * (1.0 - f) * (1.0 - across.dot(&kf).powi(2))]
+    })?;
+    Ok(weights(detector.shape(), data))
+}
+
 #[cfg(test)]
 mod tests {
     use nalgebra::Unit;
@@ -181,6 +276,145 @@ mod tests {
                 assert!(diff < 1e-15, "pixel ({i}, {j}): {diff:e}");
             }
         }
+    }
+
+    fn point_at(direction: [f64; 3]) -> PixelDetector {
+        PixelDetector::point(Unit::new_normalize(direction.into()), 0.5).unwrap()
+    }
+
+    fn one(g: &Geometry, d: &PixelDetector, pol: Polarisation) -> f64 {
+        let f = Frame {
+            values: vec![0.0],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        polarisation(g, &f, d, pol).unwrap().get(0, 0)
+    }
+
+    fn om_only() -> Geometry {
+        Geometry::builder("t")
+            .sample_rotation("om", [0.0, 0.0, 1.0])
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn polarisation_at_90_degrees_in_and_out_of_the_plane() {
+        let g = om_only();
+        let h = |factor| Polarisation {
+            plane: PolarisationPlane::Horizontal,
+            factor,
+        };
+        let v = |factor| Polarisation {
+            plane: PolarisationPlane::Vertical,
+            factor,
+        };
+        // beam along x, in the plane means kf along y
+        let inp = point_at([0.0, 1.0, 0.0]);
+        let out = point_at([0.0, 0.0, 1.0]);
+        for (d, ph, pv) in [(&inp, 0.0, 1.0), (&out, 1.0, 0.0)] {
+            assert_eq!(one(&g, d, h(1.0)), ph);
+            assert_eq!(one(&g, d, v(1.0)), pv);
+            assert_eq!(one(&g, d, h(-1.0)), pv);
+            assert_eq!(one(&g, d, h(0.0)), 0.5);
+        }
+    }
+
+    #[test]
+    fn polarisation_matches_the_2theta_chi_form() {
+        let g = om_only();
+        let (tth, chi) = (0.7_f64, 0.4_f64);
+        // ki = x, horizontal e = z × x = y: χ is measured from y towards z
+        let d = point_at([tth.cos(), tth.sin() * chi.cos(), tth.sin() * chi.sin()]);
+        for f in [1.0, 0.3, 0.0, -0.6] {
+            let want = 0.5 * (1.0 + tth.cos().powi(2) - f * (2.0 * chi).cos() * tth.sin().powi(2));
+            let got = one(
+                &g,
+                &d,
+                Polarisation {
+                    plane: PolarisationPlane::Horizontal,
+                    factor: f,
+                },
+            );
+            assert!((got - want).abs() < 1e-15, "f = {f}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn polarisation_factor_outside_the_unit_interval_is_an_error() {
+        let g = om_only();
+        let f = Frame {
+            values: vec![0.0],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        let pol = Polarisation {
+            plane: PolarisationPlane::Horizontal,
+            factor: f64::NAN,
+        };
+        assert!(matches!(
+            polarisation(&g, &f, &point_at([0.0, 1.0, 0.0]), pol),
+            Err(Error::PolarisationFactor { .. })
+        ));
+    }
+
+    /// Detector at `d` along x, steps (a along z, b along y); pixel (0, 0)
+    /// is at normal incidence.
+    fn flat(d: f64, a: f64, b: f64) -> PixelDetector {
+        PixelDetector::new(
+            (4, 3),
+            Vector3::new(d, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, a),
+            Vector3::new(0.0, b, 0.0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn solid_angle_at_normal_incidence_and_tilted() {
+        let g = om_only();
+        let f = Frame {
+            values: vec![0.0],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        let (d, a, b) = (0.4_f64, 1e-3, 2e-3);
+        let w = solid_angle(&g, &f, &flat(d, a, b)).unwrap();
+        let normal = a * b / (d * d);
+        assert!((w.get(0, 0) - normal).abs() < 1e-12 * normal);
+        // pixel (3, 2) sits at (d, 2b, 3a): cos α = d / r
+        let r2 = d * d + (2.0 * b).powi(2) + (3.0 * a).powi(2);
+        let tilted = a * b * d / r2.powf(1.5);
+        assert!((w.get(3, 2) - tilted).abs() < 1e-12 * tilted);
+    }
+
+    #[test]
+    fn solid_angle_follows_the_detector_pose() {
+        // detector turned by tt about z: the area vector turns with it, so
+        // the on-axis pixel stays at normal incidence
+        let g = Geometry::builder("t")
+            .sample_rotation("om", [0.0, 0.0, 1.0])
+            .detector_rotation("tt", [0.0, 0.0, 1.0])
+            .build()
+            .unwrap();
+        let f = Frame {
+            values: vec![0.0, 0.9],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        let (d, a, b) = (0.4_f64, 1e-3, 2e-3);
+        let w = solid_angle(&g, &f, &flat(d, a, b)).unwrap();
+        let normal = a * b / (d * d);
+        assert!((w.get(0, 0) - normal).abs() < 1e-12 * normal);
+    }
+
+    #[test]
+    fn solid_angle_needs_a_pixel_area() {
+        let g = om_only();
+        let f = Frame {
+            values: vec![0.0],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        assert_eq!(
+            solid_angle(&g, &f, &point_at([1.0, 0.0, 0.0])),
+            Err(Error::NoPixelArea { shape: (1, 1) })
+        );
     }
 
     #[test]

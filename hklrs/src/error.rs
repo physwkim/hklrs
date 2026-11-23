@@ -64,4 +64,8 @@ pub enum Error {
     CutPoint { name: String, cut: f64 },
     #[error("axis {name:?} is not a rotation and has no cut point")]
     NoCutPoint { name: String },
+    #[error("solid angle needs a detector with at least 2x2 pixels, got {shape:?}")]
+    NoPixelArea { shape: (usize, usize) },
+    #[error("polarisation factor must be in [-1, 1], got {value}")]
+    PolarisationFactor { value: f64 },
 }
