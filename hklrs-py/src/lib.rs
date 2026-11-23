@@ -3,6 +3,7 @@
 
 mod calib;
 mod cut;
+mod frame_map;
 mod inverse_error;
 mod normalise;
 mod pseudo_set;
@@ -1388,6 +1389,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     submodule(m, "calib", calib::register)?;
     submodule(m, "normalise", normalise::register)?;
     submodule(m, "cut", cut::register)?;
+    submodule(m, "frame_map", frame_map::register)?;
     submodule(m, "poni", |p| {
         p.add_class::<PyPoni>()?;
         p.add_class::<PyPoniFile>()?;

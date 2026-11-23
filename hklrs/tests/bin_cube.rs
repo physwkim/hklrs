@@ -14,10 +14,10 @@ use common::{f, load};
 
 use std::ops::Range;
 
-use hklrs::absorption::Masked;
-use hklrs::grid::{Binning, Bounds, Cube, Projected};
+use hklrs::frame_map::{FrameMap, MappedFrame};
+use hklrs::grid::{Binning, Bounds, Cube};
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, Region};
+use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
 use hklrs::{PixelDetector, Wavelength};
@@ -40,11 +40,9 @@ fn weight(frame: usize) -> f64 {
 
 struct Scan {
     golden: Value,
-    binnings: Vec<Binning>,
+    map: FrameMap,
     /// Every pixel of each frame, masked or not.
-    points: Vec<Projected>,
-    /// Each frame normalised.
-    frames: Vec<Vec<Result<Normalised, Masked>>>,
+    frames: Vec<MappedFrame>,
 }
 
 fn scan() -> Scan {
@@ -77,36 +75,33 @@ fn scan() -> Scan {
                 .collect(),
         )
         .unwrap();
-    let (_, reducer) = Region::new(0..shape.0, 0..shape.1, (1, 1))
-        .apply(&detector)
-        .unwrap();
-    let normaliser = Normaliser::new(PixelFields::new(shape));
     let binnings = list("resolutions")
         .iter()
         .map(|&r| Binning::new(r, -r / 2.0).unwrap())
         .collect();
-    let mut points = Vec::new();
-    let mut frames = Vec::new();
-    for frame in 0..golden["frames"].as_u64().unwrap() as usize {
-        let mut deg = list("values_deg");
-        deg[scanned] += frame as f64 * f(&golden["step_deg"]);
-        let values = geometry.values_from_degrees(&deg).unwrap();
-        let p = Projection::QSample
-            .project(&geometry, &values, wavelength, &detector)
-            .unwrap();
-        let raw: Vec<f64> = (0..p.pixels())
-            .map(|i| image(frame, i) * weight(frame))
-            .collect();
-        let n = normaliser
-            .normalise(&raw, &FrameScalars::new(), &reducer, &[])
-            .unwrap();
-        frames.push(n.data);
-        points.push(p);
-    }
+    let map = FrameMap::new(
+        geometry,
+        Projection::QSample,
+        &detector,
+        &Region::new(0..shape.0, 0..shape.1, (1, 1)),
+        PixelFields::new(shape),
+        binnings,
+    )
+    .unwrap();
+    let frames = (0..golden["frames"].as_u64().unwrap() as usize)
+        .map(|frame| {
+            let mut deg = list("values_deg");
+            deg[scanned] += frame as f64 * f(&golden["step_deg"]);
+            let raw: Vec<f64> = (0..shape.0 * shape.1)
+                .map(|i| image(frame, i) * weight(frame))
+                .collect();
+            map.map(&deg, wavelength, &raw, &FrameScalars::new())
+                .unwrap()
+        })
+        .collect();
     Scan {
         golden,
-        binnings,
-        points,
+        map,
         frames,
     }
 }
@@ -115,8 +110,8 @@ impl Scan {
     /// One-pass filling of frames `range`, as binoculars' cube_add_space.
     fn grown(&self, range: Range<usize>) -> Cube {
         let mut cube = Cube::default();
-        for (p, n) in self.points[range.clone()].iter().zip(&self.frames[range]) {
-            cube.add_growing(&self.binnings, p, n).unwrap();
+        for frame in &self.frames[range] {
+            self.map.add(&mut cube, frame).unwrap();
         }
         cube
     }
@@ -127,7 +122,7 @@ impl Scan {
         let golden = &self.golden["cubes"][key];
         let axes = golden["axes"].as_array().unwrap();
         assert_eq!(cube.axes().len(), axes.len(), "{key}");
-        for (axis, (b, theirs)) in cube.axes().iter().zip(self.binnings.iter().zip(axes)) {
+        for (axis, (b, theirs)) in cube.axes().iter().zip(self.map.binnings().iter().zip(axes)) {
             let imin = theirs["imin"].as_i64().unwrap();
             let imax = theirs["imax"].as_i64().unwrap();
             assert_eq!(axis.name(), theirs["name"].as_str().unwrap(), "{key}");
@@ -160,9 +155,9 @@ fn every_pixel_is_far_from_a_bin_edge_so_floor_and_rint_agree() {
     let fine = f(&s.golden["fine"]);
     let coordinates = s.golden["coordinates"].as_array().unwrap();
     let mut closest = f64::INFINITY;
-    for (frame, (p, rows)) in s.points.iter().zip(coordinates).enumerate() {
+    for (frame, (m, rows)) in s.frames.iter().zip(coordinates).enumerate() {
         for (i, row) in rows.as_array().unwrap().iter().enumerate() {
-            for (d, (plane, b)) in p.planes().iter().zip(&s.binnings).enumerate() {
+            for (d, (plane, b)) in m.points().planes().iter().zip(s.map.binnings()).enumerate() {
                 let ours = plane[i];
                 let theirs = row[d].as_i64().unwrap() as f64 * fine;
                 assert!((ours - theirs).abs() < Q_TOL, "{frame} {i} {d}");
@@ -186,13 +181,13 @@ fn add_growing_matches_cube_add_space() {
 #[test]
 fn bounds_then_add_match_cube_new() {
     let s = scan();
-    let mut bounds = Bounds::new(s.binnings.clone());
-    for (p, n) in s.points.iter().zip(&s.frames) {
-        bounds.include(p, n).unwrap();
+    let mut bounds = Bounds::new(s.map.binnings().to_vec());
+    for m in &s.frames {
+        bounds.include(m.points(), m.pixels()).unwrap();
     }
     let mut cube = bounds.cube().unwrap();
-    for (p, n) in s.points.iter().zip(&s.frames) {
-        assert_eq!(cube.add(p, n).unwrap(), 0);
+    for m in &s.frames {
+        assert_eq!(cube.add(m.points(), m.pixels()).unwrap(), 0);
     }
     s.check(&cube, "two_pass");
 }

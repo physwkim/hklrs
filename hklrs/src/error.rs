@@ -99,6 +99,14 @@ pub enum Error {
         len: usize,
         expected: usize,
     },
+    /// Two (slow, fast) shapes that must agree; a pixel count would not
+    /// tell a transposed shape from the right one.
+    #[error("{what} shape {shape:?} does not match {expected:?}")]
+    ShapeMismatch {
+        what: &'static str,
+        shape: (usize, usize),
+        expected: (usize, usize),
+    },
     #[error("cube grids differ: {left:?} vs {right:?} (name, step, anchor)")]
     GridMismatch {
         left: Vec<(String, f64, f64)>,

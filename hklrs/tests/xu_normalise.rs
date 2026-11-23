@@ -63,7 +63,6 @@ struct Case {
     frames: Vec<Vec<f64>>,
     scalars: Vec<Result<FrameScalars, Error>>,
     normaliser: Normaliser,
-    shape: (usize, usize),
 }
 
 fn build(case: &Value) -> Case {
@@ -107,23 +106,25 @@ fn build(case: &Value) -> Case {
     if case["flat"].is_array() {
         fields = fields.flat(flat(&case["flat"])).unwrap();
     }
+    let (_, r) = Region::new(0..shape.0, 0..shape.1, (1, 1))
+        .apply(&detector(shape))
+        .unwrap();
     Case {
         frames,
         scalars,
-        normaliser: Normaliser::new(fields),
-        shape,
+        normaliser: Normaliser::new(fields, r).unwrap(),
     }
 }
 
 impl Case {
+    fn shape(&self) -> (usize, usize) {
+        self.normaliser.raw_shape()
+    }
+
     /// Frame `k` whole, unbinned: its pixels.
     fn pixels(&self, k: usize) -> Vec<Result<Normalised, Masked>> {
-        let (h, w) = self.shape;
-        let (_, r) = Region::new(0..h, 0..w, (1, 1))
-            .apply(&detector(self.shape))
-            .unwrap();
         self.normaliser
-            .normalise(&self.frames[k], self.scalars[k].as_ref().unwrap(), &r, &[])
+            .normalise(&self.frames[k], self.scalars[k].as_ref().unwrap(), &[])
             .unwrap()
             .data
     }
@@ -143,7 +144,7 @@ fn counts_over_weight_is_xus_intensity() {
     for (name, case) in cases(&doc, "compare") {
         let c = build(case);
         let want = xu(case);
-        let size = c.shape.0 * c.shape.1;
+        let size = c.shape().0 * c.shape().1;
         for k in 0..c.frames.len() {
             for (i, p) in c.pixels(k).iter().enumerate() {
                 let got = p.as_ref().unwrap().value();
@@ -216,7 +217,7 @@ fn xu21_ccd_applies_dark_and_flat() {
     without["flat"] = Value::Null;
     let without = build(&without);
     let want = xu(case);
-    let size = with_fields.shape.0 * with_fields.shape.1;
+    let size = with_fields.shape().0 * with_fields.shape().1;
     let (mut differs, mut matches_plain) = (0, 0);
     for k in 0..with_fields.frames.len() {
         let (a, b) = (with_fields.pixels(k), without.pixels(k));
@@ -250,7 +251,7 @@ fn xu22_dark_subtraction_is_signed() {
     let case = &cases(&doc, "divergence")["dark_clamped"];
     let c = build(case);
     let (want, dark) = (xu(case), flat(&case["dark"]));
-    let (w, t) = (c.shape.1, flat(&case["time"]));
+    let (w, t) = (c.shape().1, flat(&case["time"]));
     let mut negative = 0;
     for k in 0..c.frames.len() {
         for (i, p) in c.pixels(k).iter().enumerate() {
@@ -288,11 +289,11 @@ fn xu24_a_dead_flat_pixel_is_masked() {
     let doc = load("xu_normalise.json");
     let case = &cases(&doc, "divergence")["flat_below_1e-5"];
     let c = build(case);
-    let (want, last) = (xu(case), c.shape.1 - 1);
+    let (want, last) = (xu(case), c.shape().1 - 1);
     for k in 0..c.frames.len() {
         let out = c.pixels(k);
         assert!(
-            want[k * c.shape.1 + last].is_finite(),
+            want[k * c.shape().1 + last].is_finite(),
             "xu returns a number"
         );
         assert_eq!(out[last], Err(Masked::BadFlat));

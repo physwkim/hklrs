@@ -18,7 +18,11 @@ type Pixels<'py> = (
 );
 
 /// Row-major values of `a`, which must have `shape`.
-fn plane(what: &str, a: &PyReadonlyArray2<'_, f64>, shape: (usize, usize)) -> PyResult<Vec<f64>> {
+pub(crate) fn plane(
+    what: &str,
+    a: &PyReadonlyArray2<'_, f64>,
+    shape: (usize, usize),
+) -> PyResult<Vec<f64>> {
     if a.shape() != [shape.0, shape.1] {
         return Err(PyValueError::new_err(format!(
             "{what} shape {:?} does not match {shape:?}",
@@ -32,7 +36,7 @@ fn plane(what: &str, a: &PyReadonlyArray2<'_, f64>, shape: (usize, usize)) -> Py
 /// reference; a value that is not positive and finite is a ValueError, never
 /// replaced by 1.
 #[pyclass(name = "FrameScalars", module = "hklrs.normalise", frozen)]
-struct PyFrameScalars(core::FrameScalars);
+pub(crate) struct PyFrameScalars(pub(crate) core::FrameScalars);
 
 #[pymethods]
 impl PyFrameScalars {
@@ -86,7 +90,7 @@ fn mean_monitor(monitor: Vec<f64>) -> PyResult<f64> {
 /// gain), arrays of the whole raw frame's `shape`. A flat pixel that is not
 /// finite or is <= 1e-5 is masked (`BadFlat`).
 #[pyclass(name = "PixelFields", module = "hklrs.normalise", frozen)]
-struct PyPixelFields(core::PixelFields);
+pub(crate) struct PyPixelFields(pub(crate) core::PixelFields);
 
 #[pymethods]
 impl PyPixelFields {
@@ -124,7 +128,7 @@ impl PyReducer {
 /// A roi (`slow`, `fast`: half-open (start, end) on the raw frame) cut into
 /// blocks of `bin` = (slow, fast) pixels.
 #[pyclass(name = "Region", module = "hklrs.normalise", frozen)]
-struct PyRegion(core::Region);
+pub(crate) struct PyRegion(pub(crate) core::Region);
 
 #[pymethods]
 impl PyRegion {
@@ -134,7 +138,7 @@ impl PyRegion {
     }
 
     /// (binned detector, reducer): the detector's `roi` and `bin` and the
-    /// reducer of the same blocks, for `Normaliser.normalise`.
+    /// reducer of the same blocks, for `Normaliser`.
     fn apply(&self, detector: &PyPixelDetector) -> PyResult<(PyPixelDetector, PyReducer)> {
         let (d, r) = self.0.apply(&detector.0).map_err(err)?;
         Ok((PyPixelDetector(d), PyReducer(r)))
@@ -171,15 +175,20 @@ fn plane_u8(a: &PyReadonlyArray2<'_, u8>, shape: (usize, usize)) -> PyResult<Vec
     Ok(a.as_array().iter().copied().collect())
 }
 
-/// The per-pixel stages of one detector.
+/// The per-pixel stages of one region of one detector: `Normaliser(fields,
+/// reducer)` with the `PixelFields` of the raw frame and the `Reducer` of
+/// `Region.apply`. Fields of another shape than the region's detector are a
+/// ValueError here, before any frame.
 #[pyclass(name = "Normaliser", module = "hklrs.normalise", frozen)]
 struct PyNormaliser(core::Normaliser);
 
 #[pymethods]
 impl PyNormaliser {
     #[new]
-    fn new(fields: &PyPixelFields) -> Self {
-        Self(core::Normaliser::new(fields.0.clone()))
+    fn new(fields: &PyPixelFields, reducer: &PyReducer) -> PyResult<Self> {
+        core::Normaliser::new(fields.0.clone(), reducer.0.clone())
+            .map(Self)
+            .map_err(err)
     }
 
     /// One frame: `raw` is the whole raw frame (the fields' shape);
@@ -189,26 +198,21 @@ impl PyNormaliser {
     /// counts / weight, a bin's by summing both. A masked pixel has NaN and
     /// its `Masked` code. Precedence: Detector, a weight's own reason,
     /// BadFlat, BadCount, Opaque.
-    #[pyo3(signature = (raw, scalars, reducer, weights=Vec::new()))]
+    #[pyo3(signature = (raw, scalars, weights=Vec::new()))]
     fn normalise<'py>(
         &self,
         py: Python<'py>,
         raw: PyReadonlyArray2<'_, f64>,
         scalars: &PyFrameScalars,
-        reducer: &PyReducer,
         weights: Vec<(PyReadonlyArray2<'_, f64>, PyReadonlyArray2<'_, u8>)>,
     ) -> PyResult<Pixels<'py>> {
-        let raw_shape = (raw.shape()[0], raw.shape()[1]);
-        let raw = plane("raw", &raw, raw_shape)?;
+        let raw = plane("raw", &raw, self.0.raw_shape())?;
         let weights = weights
             .into_iter()
             .map(geometric)
             .collect::<PyResult<Vec<_>>>()?;
         let refs: Vec<&Weights> = weights.iter().collect();
-        let frame = self
-            .0
-            .normalise(&raw, &scalars.0, &reducer.0, &refs)
-            .map_err(err)?;
+        let frame = self.0.normalise(&raw, &scalars.0, &refs).map_err(err)?;
         let (counts, weight, reasons): (Vec<f64>, Vec<f64>, Vec<u8>) = frame
             .data
             .iter()
