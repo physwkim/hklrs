@@ -21,13 +21,9 @@ LATTICE = (5.431020511, 5.431020511, 5.431020511, 90.0, 90.0, 90.0)
 WL = 1.54
 N_CASES = 30
 TOL_RAD = 1e-6
-# libhkl stops its GSL solve at ~1e-8 in hkl; where the system is ill-conditioned
-# (chi near 0 or 90) that moves an axis by up to ~5e-6 rad from the exact root
-# hklrs returns. A libhkl solution further than TOL_RAD from every hklrs
-# solution is accepted within LOOSE_RAD only when its own hkl residual exceeds
-# EXACT_HKL (hklrs's round trip is 1e-15).
-LOOSE_RAD = 1e-4
-EXACT_HKL = 1e-9
+STEP = 1e-6    # central-difference step, rad
+GN_STOP = 1e-12
+GN_MAX = 5
 MODES = ("bissector", "constant_omega", "constant_chi", "constant_phi",
          "double_diffraction", "psi_constant")
 PRESETS = ("E4CV", "E4CH")
@@ -66,6 +62,10 @@ class Rig:
     def set_axes(self, v):
         self.geo.axis_values_set([float(x) for x in v], USER)
 
+    def r_sample(self, axes):
+        self.set_axes(axes)
+        return mat(self.geo.sample_rotation_get(self.smp).to_matrix())
+
     def solve_hkl(self, mode, params, start, target, c_seed):
         """libhkl's solutions as lists of degrees (hkl's user unit is degree)."""
         self.set_axes(start)
@@ -87,6 +87,47 @@ class Rig:
 
 def forward_hkl(rig, axes):
     return np.array(hklrs.forward(rig.g, rig.sample, axes, WL)["hkl"])
+
+
+def wrap_rad(x):
+    return math.pi - ((math.pi - x) % math.tau)
+
+
+def residual(rig, mode, p, axes):
+    """Full residual of `mode` at `axes` (deg): hkl - target, then the mode
+    equation, written here from the definitions, not from the hklrs solver."""
+    r = list(forward_hkl(rig, axes) - p["target"])
+    if mode == "bissector":
+        r.append(wrap_rad(math.radians(axes[3] - 2 * axes[0])))
+    elif mode == "psi_constant":
+        psi = hklrs.psi(rig.g, rig.sample, p["params"][:3], axes)
+        r.append(wrap_rad(math.radians(psi - p["params"][3])))
+    elif mode == "double_diffraction":
+        k = math.tau / WL
+        q2 = rig.r_sample(axes) @ (np.array(rig.sample.ub()) @ p["params"]) / k
+        r.append(np.linalg.norm(q2 + np.array([1.0, 0, 0])) - 1.0)
+    return np.array(r)
+
+
+def correct(rig, mode, p, axes):
+    """Gauss-Newton from libhkl's solution over the mode's written axes
+    (pseudo-inverse of a central-difference Jacobian): libhkl's own stopping
+    error removed. Returns (corrected axes in deg, largest axis move in rad)."""
+    cols = [i for i in range(4) if HELD.get(mode) != i]
+    x = np.array(axes, float)
+    for _ in range(GN_MAX):
+        jac = []
+        for i in cols:
+            d = np.zeros(4)
+            d[i] = math.degrees(STEP)
+            jac.append((residual(rig, mode, p, x + d) - residual(rig, mode, p, x - d)) / (2 * STEP))
+        step = np.linalg.pinv(np.array(jac).T) @ residual(rig, mode, p, x)
+        for i, dx in zip(cols, step):
+            x[i] -= math.degrees(dx)
+        if np.abs(step).max() < GN_STOP:
+            break
+    move = max(abs(math.radians(wrap(a - b))) for a, b in zip(axes, x))
+    return list(x), move
 
 
 def case_inputs(rig, mode, rng):
@@ -120,6 +161,7 @@ def test_inverse_against_libhkl(preset, mode):
         pytest.skip(f"libhkl {Hkl.VERSION} {preset} has no mode {mode}")
     rng = random.Random(f"cases-{preset}-{mode}")
     both = hkl_sols = 0
+    largest = 0.0
     for n in range(N_CASES):
         m, params, start, target = case_inputs(rig, mode, rng)
         theirs = rig.solve_hkl(mode, params, start, target, 1000 + n)
@@ -132,15 +174,16 @@ def test_inverse_against_libhkl(preset, mode):
             if mode in HELD:
                 assert s[HELD[mode]] == pytest.approx(start[HELD[mode]], abs=1e-12)
         for t in theirs:
-            miss = min(max(abs(math.radians(wrap(x - y))) for x, y in zip(t, s))
+            fixed, move = correct(rig, mode, {"target": target, "params": params}, t)
+            largest = max(largest, move)
+            miss = min(max(abs(math.radians(wrap(x - y))) for x, y in zip(fixed, s))
                        for s in ours) if ours else math.inf
-            if miss >= TOL_RAD:
-                resid = np.abs(forward_hkl(rig, t) - target).max()
-                assert miss < LOOSE_RAD and resid > EXACT_HKL, (
-                    f"{preset} {mode} case {n}: libhkl solution {t} is not in the hklrs "
-                    f"set {ours} (miss {miss} rad, libhkl hkl residual {resid})")
+            assert miss < TOL_RAD, (
+                f"{preset} {mode} case {n}: libhkl solution {t} (corrected {fixed}) is not in "
+                f"the hklrs set {ours} (miss {miss} rad)")
         hkl_sols += bool(theirs)
         both += bool(theirs) and bool(ours)
+    print(f"{preset} {mode}: largest libhkl correction {largest:.3e} rad")
     assert hkl_sols > 0, f"libhkl found no solution in {N_CASES} reachable cases"
     assert both == hkl_sols
 
@@ -159,3 +202,4 @@ def test_unreachable_raises(preset, mode):
         assert isinstance(e.value, hklrs.InverseError) and isinstance(e.value, ValueError)
         with pytest.raises(hklrs.Unreachable):
             hklrs.pick(m, rig.sample, h, WL, start)
+
