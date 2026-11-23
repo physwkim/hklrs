@@ -50,6 +50,13 @@ pub enum DiffError {
         geometry: String,
         candidates: Vec<String>,
     },
+    #[error("mode {mode:?} has no psi: set a psi mode")]
+    NoPsi { mode: String },
+    #[error("psi about reference {reference:?}: {source}")]
+    Psi {
+        reference: [f64; 3],
+        source: hklrs::InverseError,
+    },
     #[error("hkl {hkl:?}: {source}")]
     Solve {
         hkl: [f64; 3],

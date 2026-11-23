@@ -1,6 +1,6 @@
-//! h, k and l as movable axes, with ophyd's pseudo-positioner semantics:
-//! a set replaces one component of the shared setpoint and moves every real.
-//! Every move goes through [`Diffractometer::move_to`].
+//! h, k, l and ψ as movable axes, with ophyd's pseudo-positioner
+//! semantics: a set replaces one component of the shared setpoint and moves
+//! every real. Every move goes through [`Diffractometer::move_to`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,11 +13,11 @@ use bsrs::event_model::compose::now;
 use serde_json::json;
 
 use crate::Diffractometer;
-use crate::diffractometer::{Setpoint, datakey};
+use crate::diffractometer::{Component, Setpoint, datakey};
 
 pub struct PseudoAxis {
     dx: Arc<Diffractometer>,
-    index: usize,
+    component: Component,
     name: String,
 }
 
@@ -28,9 +28,21 @@ impl Diffractometer {
         let mut names = self.hkl_keys().into_iter();
         [0, 1, 2].map(|index| PseudoAxis {
             dx: self.clone(),
-            index,
+            component: Component::Hkl(index),
             name: names.next().expect("three keys"),
         })
+    }
+
+    /// ψ of the device's psi mode, degrees, as `{name}_psi`. A set holds
+    /// the hkl setpoint and replaces the mode's ψ, so later h, k, l moves
+    /// keep it; the readback is ψ about the mode's reference. Outside a psi
+    /// mode the axis refuses to move or be located.
+    pub fn psi_axis(self: &Arc<Self>) -> PseudoAxis {
+        PseudoAxis {
+            dx: self.clone(),
+            component: Component::Psi,
+            name: self.key("psi"),
+        }
     }
 
     /// A one-shot move of the whole setpoint to `hkl`.
@@ -83,7 +95,7 @@ impl MovableObj for PseudoAxis {
     async fn set_dyn(&self, value: f64) -> Status {
         self.dx
             .move_to(Setpoint::Component {
-                index: self.index,
+                component: self.component,
                 value,
             })
             .await
@@ -98,7 +110,7 @@ impl MovableObj for PseudoAxis {
 #[async_trait]
 impl LocatableObj for PseudoAxis {
     async fn locate_dyn(&self) -> Result<DynLocation, BsrsError> {
-        self.dx.locate_component(self.index).await
+        self.dx.locate(self.component).await
     }
 }
 

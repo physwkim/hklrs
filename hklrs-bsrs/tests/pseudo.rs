@@ -14,7 +14,7 @@ use bsrs::core::msg::{
 use bsrs::core::status::{Status, StatusError};
 use bsrs::core::{BsrsError, ConfigureArgs, DataKey, Document, ReadingValue};
 use bsrs::engine::{DocumentSink, RunEngine};
-use hklrs::nalgebra::UnitQuaternion;
+use hklrs::nalgebra::{UnitQuaternion, Vector3};
 use hklrs::presets::preset;
 use hklrs::{InverseError, Lattice, ModeSpec, Orientation, Sample, Wavelength};
 use hklrs_bsrs::{DiffError, Diffractometer, RealAxis, WavelengthSource, mv_hkl};
@@ -226,6 +226,85 @@ async fn the_mode_decides_which_axes_move() {
     assert_eq!(config["e4cv_mode"].value, json!("constant_phi"));
     let e = dx.configure_dyn(configure("nope")).await.unwrap_err();
     assert!(e.to_string().contains("\"nope\""), "{e}");
+}
+
+fn psi_constant(psi: f64) -> ModeSpec {
+    ModeSpec {
+        psi: Some((Vector3::z(), psi.to_radians())),
+        ..ModeSpec::new("psi_constant")
+    }
+}
+
+#[tokio::test]
+async fn a_psi_set_holds_hkl_and_later_hkl_sets_keep_psi() {
+    let dx = e4cv(soft(AT_001));
+    let [h, _, l] = dx.hkl_axes();
+    h.set_dyn(1.0).await.await.unwrap();
+    let held = dx.target().unwrap();
+    dx.set_mode(psi_constant(60.0)).unwrap();
+    let psi = dx.psi_axis();
+    assert_eq!(psi.name(), "e4cv_psi");
+    // before a ψ move, the mode's ψ is the setpoint
+    let before = psi.locate_dyn().await.unwrap();
+    assert!((before.setpoint - 60.0).abs() < 1e-12);
+    assert!((before.readback - 90.0).abs() > 1.0, "{}", before.readback);
+
+    psi.set_dyn(90.0).await.await.unwrap();
+    assert_close(&hkl(&dx).await, &[1.0, 0.0, 1.0], 1e-9);
+    assert_eq!(dx.target(), Some(held));
+    assert_eq!(dx.mode(), Some(psi_constant(90.0)));
+    let DynLocation { setpoint, readback } = psi.locate_dyn().await.unwrap();
+    assert!((setpoint - 90.0).abs() < 1e-12);
+    assert!((readback - 90.0).abs() < 1e-9, "{readback}");
+
+    l.set_dyn(0.5).await.await.unwrap();
+    assert_close(&hkl(&dx).await, &[1.0, 0.0, 0.5], 1e-9);
+    let readback = psi.locate_dyn().await.unwrap().readback;
+    assert!((readback - 90.0).abs() < 1e-9, "{readback}");
+}
+
+#[tokio::test]
+async fn an_unreachable_psi_keeps_the_mode_the_setpoint_and_the_reals() {
+    let dx = e4cv(soft(AT_001));
+    let [h, ..] = dx.hkl_axes();
+    h.set_dyn(1.0).await.await.unwrap();
+    dx.set_mode(psi_constant(60.0)).unwrap();
+    let (target, at) = (dx.target(), dx.positions().await.unwrap());
+    // ψ = 0 puts chi at 180°, where omega and phi turn about one line
+    let e = dx.psi_axis().set_dyn(0.0).await.await.unwrap_err();
+    let StatusError::Failed(message) = e else {
+        panic!("{e:?}")
+    };
+    assert!(message.starts_with("e4cv_psi: "), "{message}");
+    assert!(message.contains("hkl [1.0, "), "{message}");
+    assert_eq!(dx.mode(), Some(psi_constant(60.0)));
+    assert_eq!(dx.target(), target);
+    assert_eq!(dx.positions().await.unwrap(), at);
+}
+
+#[tokio::test]
+async fn psi_refuses_outside_a_psi_mode_and_where_it_is_undefined() {
+    let dx = e4cv(soft(AT_001));
+    let psi = dx.psi_axis();
+    let no_psi = "mode \"bissector\" has no psi: set a psi mode";
+    let e = psi.set_dyn(30.0).await.await.unwrap_err();
+    let StatusError::Failed(message) = e else {
+        panic!("{e:?}")
+    };
+    assert!(message.starts_with("e4cv_psi: "), "{message}");
+    assert!(message.ends_with(no_psi), "{message}");
+    let e = psi.locate_dyn().await.unwrap_err().to_string();
+    assert!(e.ends_with(no_psi), "{e}");
+    assert_eq!(dx.target(), None);
+    assert_eq!(dx.positions().await.unwrap(), AT_001);
+
+    // Q at (0, 0, 1) lies along the reference
+    dx.set_mode(psi_constant(30.0)).unwrap();
+    let e = psi.locate_dyn().await.unwrap_err().to_string();
+    assert!(
+        e.contains("psi about reference [0.0, 0.0, 1.0]: psi is undefined"),
+        "{e}"
+    );
 }
 
 #[tokio::test]
