@@ -48,6 +48,19 @@ pub enum DiffError {
         hkl: [f64; 3],
         source: hklrs::InverseError,
     },
+    #[error("point {index}: {source}")]
+    Point {
+        index: usize,
+        source: Box<DiffError>,
+    },
+    #[error("data key {key:?} is read by both {first:?} and {second:?}")]
+    DataKeyCollision {
+        key: String,
+        first: String,
+        second: String,
+    },
+    #[error("hkl {start:?} and {stop:?} span no zone: both must be non-zero and not parallel")]
+    Zone { start: [f64; 3], stop: [f64; 3] },
     #[error(transparent)]
     Core(#[from] hklrs::Error),
 }

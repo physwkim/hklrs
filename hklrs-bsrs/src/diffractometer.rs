@@ -99,6 +99,15 @@ const CONFIG: [(&str, Dtype, &[u64], Option<&str>); 7] = [
 
 const SETTABLE: [&str; 3] = ["sample", "wavelength", "mode"];
 
+/// What a plan solves its trajectory from.
+pub(crate) struct Snapshot {
+    /// Readbacks in geometry axis order, degrees and metres.
+    pub current: Vec<f64>,
+    pub wavelength: Wavelength,
+    pub sample: Sample,
+    pub mode: Option<ModeSpec>,
+}
+
 pub struct Diffractometer {
     name: String,
     geometry: Geometry,
@@ -345,21 +354,108 @@ impl Diffractometer {
             let state = self.state();
             (state.mode.clone(), state.samples.current().sample.ub())
         };
-        let mode = mode.ok_or_else(|| DiffError::NoMode {
+        let mode = self.require_mode(mode.as_ref())?;
+        let values = self.solve(&mode, ub, wavelength, hkl, &current)?;
+        Ok(self.geometry.values_to_degrees(&values)?)
+    }
+
+    pub(crate) fn require_mode(&self, mode: Option<&ModeSpec>) -> Result<ModeSpec, DiffError> {
+        mode.cloned().ok_or_else(|| DiffError::NoMode {
             geometry: self.geometry.name().to_owned(),
-        })?;
-        let mode = self.build_mode(&mode)?;
+        })
+    }
+
+    /// Radian axis values reaching `hkl` in `mode`, closest to `seed`.
+    fn solve(
+        &self,
+        mode: &ModeSpec,
+        ub: Matrix3<f64>,
+        wavelength: Wavelength,
+        hkl: [f64; 3],
+        seed: &[f64],
+    ) -> Result<Vec<f64>, DiffError> {
+        let mode = self.build_mode(mode)?;
         let request = InverseRequest {
             mode: &mode,
             ub,
             wavelength,
             target: Target::Hkl(Vector3::from(hkl)),
-            current: &current,
+            current: seed,
         };
-        let values = request
+        request
             .pick(Picker::Closest)
-            .map_err(|source| DiffError::Solve { hkl, source })?;
-        Ok(self.geometry.values_to_degrees(&values)?)
+            .map_err(|source| DiffError::Solve { hkl, source })
+    }
+
+    /// The readbacks, the wavelength, and the sample and mode from one read
+    /// of the state.
+    pub(crate) async fn snapshot(&self) -> Result<Snapshot, BsrsError> {
+        let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
+        let state = self.state();
+        Ok(Snapshot {
+            current,
+            wavelength,
+            sample: state.samples.current().sample.clone(),
+            mode: state.mode.clone(),
+        })
+    }
+
+    /// Axis values for each point of `path` in its mode, each picked closest
+    /// to the previous point's solution and the first to the readbacks, so
+    /// the path takes no branch jump.
+    pub(crate) fn solve_path(
+        &self,
+        snapshot: &Snapshot,
+        path: &[([f64; 3], ModeSpec)],
+    ) -> Result<Vec<Vec<f64>>, DiffError> {
+        let ub = snapshot.sample.ub();
+        let mut seed = self.geometry.values_from_degrees(&snapshot.current)?;
+        let mut solved = Vec::with_capacity(path.len());
+        for (index, (hkl, mode)) in path.iter().enumerate() {
+            let point = |source| DiffError::Point {
+                index,
+                source: Box::new(source),
+            };
+            let values = self
+                .solve(mode, ub, snapshot.wavelength, *hkl, &seed)
+                .map_err(point)?;
+            let degrees = self.geometry.values_to_degrees(&values);
+            solved.push(degrees.map_err(|e| point(e.into()))?);
+            seed = values;
+        }
+        Ok(solved)
+    }
+
+    pub(crate) fn set_target(&self, target: Option<[f64; 3]>) {
+        self.state_mut().target = target;
+    }
+
+    /// Configuration values by field, without the device-name prefix.
+    pub(crate) fn configuration(
+        &self,
+        sample: &Sample,
+        mode: Option<&str>,
+        wavelength: Wavelength,
+    ) -> Vec<(&'static str, Value)> {
+        let l = &sample.lattice;
+        let deg = |r| Deg::from(r).0;
+        let values = [
+            json!(self.geometry.name()),
+            json!(sample.name),
+            json!([
+                l.a(),
+                l.b(),
+                l.c(),
+                deg(l.alpha()),
+                deg(l.beta()),
+                deg(l.gamma())
+            ]),
+            rows(&sample.u().to_rotation_matrix().into_inner()),
+            rows(&sample.ub()),
+            json!(wavelength.angstrom()),
+            json!(mode),
+        ];
+        CONFIG.iter().map(|c| c.0).zip(values).collect()
     }
 
     /// Replaces component `index` of the pseudo setpoint (the readback h, k,
@@ -522,33 +618,15 @@ impl ReadableObj for Diffractometer {
 impl ConfigurableObj for Diffractometer {
     async fn read_configuration_dyn(&self) -> Result<HashMap<String, ReadingValue>, BsrsError> {
         let wavelength = self.wavelength().await?;
-        let values = {
+        let fields = {
             let state = self.state();
-            let sample = &state.samples.current().sample;
-            let l = &sample.lattice;
-            let deg = |r| Deg::from(r).0;
-            [
-                json!(self.geometry.name()),
-                json!(sample.name),
-                json!([
-                    l.a(),
-                    l.b(),
-                    l.c(),
-                    deg(l.alpha()),
-                    deg(l.beta()),
-                    deg(l.gamma())
-                ]),
-                rows(&sample.u().to_rotation_matrix().into_inner()),
-                rows(&sample.ub()),
-                json!(wavelength.angstrom()),
-                json!(state.mode.as_ref().map(|m| &m.name)),
-            ]
+            let mode = state.mode.as_ref().map(|m| m.name.as_str());
+            self.configuration(&state.samples.current().sample, mode, wavelength)
         };
         let t = now();
-        Ok(CONFIG
-            .iter()
-            .zip(values)
-            .map(|((field, ..), v)| (self.key(field), ReadingValue::new(v, t)))
+        Ok(fields
+            .into_iter()
+            .map(|(field, v)| (self.key(field), ReadingValue::new(v, t)))
             .collect())
     }
 
