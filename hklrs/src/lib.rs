@@ -13,6 +13,7 @@ mod geometry;
 pub mod grid;
 pub mod inverse;
 mod lattice;
+pub mod normalise;
 pub mod poni;
 pub mod presets;
 pub mod projection;

@@ -90,7 +90,8 @@ def test_a_pixel_along_a_fully_polarised_field_is_extinct():
 def test_masked_codes_are_the_reasons():
     assert [(m.name, int(m)) for m in hklrs.Masked] == [
         ("Unlit", 1), ("GrazingExit", 2), ("ThroughBulk", 3), ("Opaque", 4),
-        ("EdgeOn", 5), ("Extinct", 6)]
+        ("EdgeOn", 5), ("Extinct", 6), ("Detector", 7), ("BadFlat", 8),
+        ("BadCount", 9)]
 
 
 def test_weights_refuse_what_has_none():
