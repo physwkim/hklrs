@@ -304,13 +304,13 @@ impl Bounds {
         points: &Projected,
         weights: Option<PixelWeights>,
     ) -> Result<(), Error> {
-        if let Some(seen) = &self.seen {
-            if seen.names != points.names {
-                return Err(Error::GridMismatch {
-                    left: describe_names(seen.names, &self.binnings),
-                    right: describe_names(points.names, &self.binnings),
-                });
-            }
+        if let Some(seen) = &self.seen
+            && seen.names != points.names
+        {
+            return Err(Error::GridMismatch {
+                left: describe_names(seen.names, &self.binnings),
+                right: describe_names(points.names, &self.binnings),
+            });
         }
         let (_, bins) = unmasked_bins(&self.binnings, points, weights)?;
         let Some(frame) = span(self.binnings.len(), &bins) else {

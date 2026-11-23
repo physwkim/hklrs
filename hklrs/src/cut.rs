@@ -465,13 +465,13 @@ impl Cut {
         footprint: Footprint,
         pixels: impl IntoIterator<Item = (Vector3<f64>, Result<Normalised, Masked>)>,
     ) -> Result<CutResult, Error> {
-        if let Footprint::Width(w) = footprint {
-            if !(w.is_finite() && w > 0.0) {
-                return Err(Error::NotPositive {
-                    what: "footprint width",
-                    value: w,
-                });
-            }
+        if let Footprint::Width(w) = footprint
+            && !(w.is_finite() && w > 0.0)
+        {
+            return Err(Error::NotPositive {
+                what: "footprint width",
+                value: w,
+            });
         }
         let mut out = CutResult {
             binning: self.binning,
