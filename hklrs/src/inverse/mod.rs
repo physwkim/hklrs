@@ -9,6 +9,7 @@
 
 pub mod e4c;
 pub mod e6c;
+pub mod esrf_bm28_psic;
 mod jet;
 mod mode;
 mod solve;

@@ -7,7 +7,7 @@ mod inverse_check;
 
 use std::f64::consts::{PI, TAU};
 
-use hklrs::inverse::{self, e4c, e6c};
+use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use hklrs::presets::preset;
 use hklrs::{
@@ -380,6 +380,48 @@ fn zero_q_is_degenerate_in_every_mode() {
         e6c::constant_mu_horizontal(&geo),
     ] {
         degenerate(&mode.unwrap(), &current);
+    }
+    let geo = preset("ESRF BM28 PSIC").unwrap();
+    let current = geo
+        .values_from_degrees(&[5.0, 10.0, 20.0, 30.0, 15.0, 40.0])
+        .unwrap();
+    for mode in [
+        esrf_bm28_psic::constant_nu_coplanar(&geo),
+        esrf_bm28_psic::constant_delta_coplanar(&geo),
+        esrf_bm28_psic::constant_eta_noncoplanar(&geo),
+    ] {
+        degenerate(&mode.unwrap(), &current);
+    }
+}
+
+/// ESRF BM28 PSIC constant_nu_coplanar from all-zero axes, hkl's fresh
+/// geometry: chi = 0 makes eta and phi coaxial and nu = 0 keeps Q in the
+/// lab xz plane, so only Q ⟂ y (the phi axis) is reached, with eta − phi
+/// free. hkl's failures there are this geometry, not its solver.
+#[test]
+fn bm28_coplanar_at_chi_zero_reaches_only_q_normal_to_phi() {
+    let geo = preset("ESRF BM28 PSIC").unwrap();
+    let mode = esrf_bm28_psic::constant_nu_coplanar(&geo).unwrap();
+    // Q in Å⁻¹ straight from the target.
+    let ub = Matrix3::identity();
+    let solve = |q: &Vector3<f64>, current: &[f64]| {
+        InverseRequest {
+            ub,
+            ..request(&mode, *q, current)
+        }
+        .solve()
+    };
+    let (normal, oblique) = (Vector3::new(1.5, 0.0, 1.0), Vector3::new(1.5, 0.5, 1.0));
+    let zero = [0.0; 6];
+    assert_eq!(solve(&normal, &zero), Err(InverseError::Degenerate));
+    assert_eq!(solve(&oblique, &zero), Err(InverseError::NoSolution));
+    let chi = geo
+        .values_from_degrees(&[0.0, 0.0, 30.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    let solutions = solve(&oblique, &chi).unwrap();
+    assert!(!solutions.is_empty());
+    for s in &solutions {
+        inverse_check::check(&mode, &ub, wavelength(), &oblique, &chi, s).unwrap();
     }
 }
 
