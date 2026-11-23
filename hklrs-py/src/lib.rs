@@ -1,6 +1,7 @@
 //! Python bindings: conversions only. Angles are degrees at this boundary,
 //! translations metres, wavelength Å.
 
+use hklrs::absorption::Masked;
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -1003,6 +1004,101 @@ fn detector_positions<'py>(
     planes(py, p)
 }
 
+/// The code a reasons array holds for `m`; 0 is a pixel with a value.
+fn masked_code(m: Masked) -> u8 {
+    match m {
+        Masked::Unlit => 1,
+        Masked::GrazingExit => 2,
+        Masked::ThroughBulk => 3,
+        Masked::Opaque => 4,
+        Masked::EdgeOn => 5,
+        Masked::Extinct => 6,
+    }
+}
+
+/// Every reason, for the Python enum; a new variant fails to compile in
+/// `masked_code` first.
+const MASKED: [Masked; 6] = [
+    Masked::Unlit,
+    Masked::GrazingExit,
+    Masked::ThroughBulk,
+    Masked::Opaque,
+    Masked::EdgeOn,
+    Masked::Extinct,
+];
+
+type WeightArrays<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<u8>>);
+
+/// Row-major values and reasons: the weight and 0, or NaN and the reason's
+/// code.
+fn split(w: hklrs::Weights) -> ((usize, usize), Vec<f64>, Vec<u8>) {
+    let (values, reasons) = w
+        .data
+        .iter()
+        .map(|w| match w {
+            Ok(v) => (v.get(), 0),
+            Err(m) => (f64::NAN, masked_code(*m)),
+        })
+        .unzip();
+    (w.shape(), values, reasons)
+}
+
+fn weight_arrays(
+    py: Python<'_>,
+    (shape, values, reasons): ((usize, usize), Vec<f64>, Vec<u8>),
+) -> PyResult<WeightArrays<'_>> {
+    Ok((
+        PyArray1::from_vec(py, values).reshape(shape)?,
+        PyArray1::from_vec(py, reasons).reshape(shape)?,
+    ))
+}
+
+/// Solid angle of every pixel (sr) at `axes`, arguments as for `q_map`:
+/// (values, reasons), each a (slow, fast) array. A pixel with no value has
+/// NaN and its `Masked` reason, `EdgeOn` here; the others have reason 0.
+#[pyfunction]
+fn solid_angle<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+) -> PyResult<WeightArrays<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let frame = frame(geo, &axes, wavelength)?;
+    let w = py
+        .detach(|| hklrs::solid_angle(geo, &frame, det).map(split))
+        .map_err(err)?;
+    weight_arrays(py, w)
+}
+
+/// Polarisation factor of every pixel at `axes`, arguments as for `q_map`,
+/// for a beam whose electric field lies along `e` (lab frame, projected
+/// normal to the beam) with degree `factor` in [-1, 1]: 1 fully along `e`,
+/// 0 unpolarised. Values and reasons as for `solid_angle`, `Extinct` where
+/// the factor vanishes.
+#[pyfunction]
+fn polarisation<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+    e: [f64; 3],
+    factor: f64,
+) -> PyResult<WeightArrays<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let frame = frame(geo, &axes, wavelength)?;
+    let pol = hklrs::Polarisation {
+        e: Vector3::from(e),
+        factor,
+    };
+    let w = py
+        .detach(|| hklrs::polarisation(geo, &frame, det, pol).map(split))
+        .map_err(err)?;
+    weight_arrays(py, w)
+}
+
 #[pyfunction]
 fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
@@ -1052,5 +1148,23 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(presets, m)?)?;
     m.add_function(wrap_pyfunction!(q_map, m)?)?;
     m.add_function(wrap_pyfunction!(detector_positions, m)?)?;
+    m.add_function(wrap_pyfunction!(solid_angle, m)?)?;
+    m.add_function(wrap_pyfunction!(polarisation, m)?)?;
+    let members: Vec<(String, u8)> = MASKED
+        .iter()
+        .map(|&r| (format!("{r:?}"), masked_code(r)))
+        .collect();
+    let kwargs = PyDict::new(m.py());
+    kwargs.set_item("module", "hklrs")?;
+    let masked = m
+        .py()
+        .import("enum")?
+        .getattr("IntEnum")?
+        .call(("Masked", members), Some(&kwargs))?;
+    masked.setattr(
+        "__doc__",
+        "Why a pixel has no weight: the codes of a reasons array, 0 being none.",
+    )?;
+    m.add("Masked", masked)?;
     Ok(())
 }
