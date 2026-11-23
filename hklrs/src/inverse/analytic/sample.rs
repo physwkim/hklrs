@@ -3,11 +3,7 @@
 use nalgebra::{Matrix3, Vector3};
 
 use super::trig;
-use super::you::{
-    Free, Roots, axis, circle, component_terms, harmonic, normal, solve_component, spin,
-};
-
-pub(super) const NAMES: [&str; 6] = ["mu", "eta", "chi", "phi", "nu", "delta"];
+use super::you::{Roots, axis, circle, component_terms, harmonic, normal, solve_component, spin};
 
 /// Sample circles (MU, ETA, CHI, PHI); `None` where free.
 pub(super) type Known = [Option<f64>; 4];
@@ -49,27 +45,27 @@ fn two_free(
     right: &Matrix3<f64>,
     p: &Vector3<f64>,
     q: &Vector3<f64>,
-) -> Vec<(f64, f64, Free)> {
+) -> Vec<(f64, f64)> {
     let (q, p, ax) = (left.transpose() * q, right * p, axis(a));
     let mut out = Vec::new();
     let ys = solve_component(&axis(b), &p, &(mid.transpose() * ax), ax.dot(&q));
-    for (y, fy) in ys.tagged(NAMES[b]) {
-        for (x, fx) in spin(&ax, &(mid * circle(b, y) * p), &q).tagged(NAMES[a]) {
-            out.push((x, y, fy.or(fx)));
+    for y in ys.values() {
+        for x in spin(&ax, &(mid * circle(b, y) * p), &q).values() {
+            out.push((x, y));
         }
     }
     out
 }
 
 /// Every pair of free circles that turns `p` onto `q` with two held.
-pub(super) fn two_held(known: &Known, p: &Vector3<f64>, q: &Vector3<f64>) -> Vec<([f64; 4], Free)> {
+pub(super) fn two_held(known: &Known, p: &Vector3<f64>, q: &Vector3<f64>) -> Vec<[f64; 4]> {
     let (free, seg) = split(known);
     let [a, b] = free[..] else {
         unreachable!("two held circles leave two free")
     };
     two_free(&seg[0], a, &seg[1], b, &seg[2], p, q)
         .into_iter()
-        .map(|(x, y, f)| (fill(known, &free, &[x, y]), f))
+        .map(|(x, y)| fill(known, &free, &[x, y]))
         .collect()
 }
 
@@ -80,7 +76,7 @@ pub(super) fn two_held(known: &Known, p: &Vector3<f64>, q: &Vector3<f64>) -> Vec
 pub(super) fn two_held_heights(
     known: &Known,
     eqs: &[(Vector3<f64>, Vector3<f64>, f64); 2],
-) -> Vec<([f64; 4], Free)> {
+) -> Vec<[f64; 4]> {
     let (free, seg) = split(known);
     let [a, b] = free[..] else {
         unreachable!("two held circles leave two free")
@@ -93,12 +89,9 @@ pub(super) fn two_held_heights(
         let [[a1, b1, c1], [a2, b2, c2]] = terms(x);
         (a1 * c2 - a2 * c1).powi(2) + (b1 * a2 - b2 * a1).powi(2) - (b1 * c2 - b2 * c1).powi(2)
     };
-    let xs = match trig::roots(g) {
-        Some(xs) => xs.into_iter().map(|x| (x, None)).collect(),
-        None => Roots::Free.tagged(NAMES[a]),
-    };
+    let xs = trig::roots(g).unwrap_or_else(|| Roots::Free.values());
     let mut out = Vec::new();
-    for (x, fx) in xs {
+    for x in xs {
         // y from the equation that depends on it more; the final check holds
         // the candidate to the other.
         let [t1, t2] = terms(x);
@@ -107,8 +100,8 @@ pub(super) fn two_held_heights(
         } else {
             t2
         };
-        for (y, fy) in harmonic(ys).tagged(NAMES[b]) {
-            out.push((fill(known, &free, &[x, y]), fx.or(fy)));
+        for y in harmonic(ys).values() {
+            out.push(fill(known, &free, &[x, y]));
         }
     }
     out
@@ -120,20 +113,20 @@ pub(super) fn three_held(
     p: &Vector3<f64>,
     y: &Vector3<f64>,
     height: f64,
-) -> Vec<([f64; 4], Free)> {
+) -> Vec<[f64; 4]> {
     let (free, seg) = split(known);
     let [a] = free[..] else {
         unreachable!("three held circles leave one free")
     };
     solve_component(&axis(a), &(seg[1] * p), &(seg[0].transpose() * y), height)
-        .tagged(NAMES[a])
+        .values()
         .into_iter()
-        .map(|(x, f)| (fill(known, &free, &[x]), f))
+        .map(|x| fill(known, &free, &[x]))
         .collect()
 }
 
 /// Every decomposition of the lab rotation `z` with one circle held.
-pub(super) fn one_held(known: &Known, z: &Matrix3<f64>) -> Vec<([f64; 4], Free)> {
+pub(super) fn one_held(known: &Known, z: &Matrix3<f64>) -> Vec<[f64; 4]> {
     let (free, seg) = split(known);
     let [a, b, c] = free[..] else {
         unreachable!("one held circle leaves three free")
@@ -141,10 +134,10 @@ pub(super) fn one_held(known: &Known, z: &Matrix3<f64>) -> Vec<([f64; 4], Free)>
     let w = seg[0].transpose() * z * seg[3].transpose();
     let (ac, u) = (axis(c), normal(&axis(c)));
     let mut out = Vec::new();
-    for (x, y, fxy) in two_free(&Matrix3::identity(), a, &seg[1], b, &seg[2], &ac, &(w * ac)) {
+    for (x, y) in two_free(&Matrix3::identity(), a, &seg[1], b, &seg[2], &ac, &(w * ac)) {
         let m = circle(a, x) * seg[1] * circle(b, y) * seg[2];
-        for (zv, fz) in spin(&ac, &u, &(m.transpose() * w * u)).tagged(NAMES[c]) {
-            out.push((fill(known, &free, &[x, y, zv]), fxy.or(fz)));
+        for zv in spin(&ac, &u, &(m.transpose() * w * u)).values() {
+            out.push(fill(known, &free, &[x, y, zv]));
         }
     }
     out
@@ -163,12 +156,8 @@ mod tests {
             let mut known = [None; 4];
             known[held] = Some(s[held]);
             let found = one_held(&known, &zs);
-            assert!(
-                found
-                    .iter()
-                    .all(|(f, free)| free.is_none() && (z(f) - zs).norm() < 1e-13)
-            );
-            assert!(found.iter().any(|(f, _)| {
+            assert!(found.iter().all(|f| (z(f) - zs).norm() < 1e-13));
+            assert!(found.iter().any(|f| {
                 (0..4).all(|i| (f[i] - s[i]).sin().abs() < 1e-12 && (f[i] - s[i]).cos() > 0.0)
             }));
         }

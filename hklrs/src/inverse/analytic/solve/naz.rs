@@ -7,60 +7,60 @@ use nalgebra::{Matrix3, Vector3};
 
 use super::super::Bisect;
 use super::super::sample::{self, Known};
-use super::super::you::{Angles, CHI, EPS, Free, PHI, axis, circle, rot, solve_component, spin};
+use super::super::you::{Angles, CHI, EPS, PHI, Roots, axis, circle, rot, solve_component, spin};
 use super::Problem;
 
 /// Grid points per period where φ is scanned.
 const SCAN: usize = 1440;
 
 impl Problem {
-    pub(super) fn naz_samples(&self, naz: f64, known: &Known) -> Vec<(Angles, Free)> {
+    /// `naz` of unit vector `n` (φ frame) with two sample circles held.
+    pub(super) fn naz_samples(&self, n: &Vector3<f64>, naz: f64, known: &Known) -> Vec<Angles> {
         let level = Vector3::new(naz.cos(), 0.0, -naz.sin());
-        let eqs = [(self.p0, Vector3::y(), -self.st), (self.n, level, 0.0)];
-        self.free_detector(sample::two_held_heights(known, &eqs), None)
+        let eqs = [(self.p0, Vector3::y(), -self.st), (*n, level, 0.0)];
+        self.free_detector(sample::two_held_heights(known, &eqs))
     }
 
     /// With bisect the χ axis lies at an angle t from the beam in the plane
     /// of the beam and Q̂, so Q̂ sits at height sin(t − θ) along it. ω fixes
     /// t = θ + ω and that height fixes φ; a held μ or η leaves φ to a scan.
-    pub(super) fn naz_bisect(&self, naz: f64, b: &Bisect) -> Vec<(Angles, Free)> {
+    pub(super) fn naz_bisect(&self, n: &Vector3<f64>, naz: f64, b: &Bisect) -> Vec<Angles> {
         match *b {
             Bisect::Omega(omega) => {
                 let t = self.theta() + omega;
                 let phis = solve_component(&axis(PHI), &self.p0, &Vector3::y(), omega.sin());
                 let mut out = Vec::new();
-                for (phi, f) in phis.tagged("phi") {
-                    out.extend(self.positions(naz, t, phi, f));
+                for phi in phis.values() {
+                    out.extend(self.positions(n, naz, t, phi));
                 }
                 out
             }
-            Bisect::Mu(mu) => self.naz_bisect_scan(naz, |a| a.z * mu.cos() - a.y * mu.sin()),
-            Bisect::Eta(eta) => self.naz_bisect_scan(naz, |a| a.x - eta.sin()),
+            Bisect::Mu(mu) => self.naz_bisect_scan(n, naz, |a| a.z * mu.cos() - a.y * mu.sin()),
+            Bisect::Eta(eta) => self.naz_bisect_scan(n, naz, |a| a.x - eta.sin()),
         }
     }
 
-    /// Z = R_y(qaz)·Rₓ(t)·CHI(s)·PHI(φ): at qaz = 0 the χ axis is Rₓ(t)·ŷ and
-    /// Q̂ is (0, −sin θ, cos θ), s turns Q̂ into place about the axis, and
-    /// naz fixes qaz.
-    fn lab(&self, naz: f64, t: f64, phi: f64) -> Vec<(Matrix3<f64>, Free)> {
-        let tilt = rot(&Vector3::x(), t);
-        let q = tilt.transpose() * Vector3::new(0.0, -self.st, self.ct);
+    /// The χ turns s that put Q̂ into place about the χ axis at tilt t.
+    fn chi(&self, t: f64, phi: f64) -> Roots {
+        let q = rot(&Vector3::x(), t).transpose() * Vector3::new(0.0, -self.st, self.ct);
         spin(&Vector3::y(), &(circle(PHI, phi) * self.p0), &q)
-            .tagged("chi")
-            .into_iter()
-            .filter_map(|(s, f)| {
-                let z = tilt * circle(CHI, s) * circle(PHI, phi);
-                let n = z * self.n;
-                (n.x.hypot(n.z) >= EPS).then(|| (rot(&Vector3::y(), naz - n.x.atan2(n.z)) * z, f))
-            })
-            .collect()
     }
 
-    fn positions(&self, naz: f64, t: f64, phi: f64, free: Free) -> Vec<(Angles, Free)> {
+    /// Z = R_y(qaz)·Rₓ(t)·CHI(s)·PHI(φ): at qaz = 0 the χ axis is Rₓ(t)·ŷ and
+    /// Q̂ is (0, −sin θ, cos θ), s from [`Self::chi`], and naz fixes qaz.
+    fn lab(n: &Vector3<f64>, naz: f64, t: f64, phi: f64, s: f64) -> Option<Matrix3<f64>> {
+        let z = rot(&Vector3::x(), t) * circle(CHI, s) * circle(PHI, phi);
+        let n = z * n;
+        (n.x.hypot(n.z) >= EPS).then(|| rot(&Vector3::y(), naz - n.x.atan2(n.z)) * z)
+    }
+
+    fn positions(&self, n: &Vector3<f64>, naz: f64, t: f64, phi: f64) -> Vec<Angles> {
         let mut out = Vec::new();
-        for (z, f) in self.lab(naz, t, phi) {
-            let samples = sample::one_held(&[None, None, None, Some(phi)], &z);
-            out.extend(self.free_detector(samples, free.or(f)));
+        for s in self.chi(t, phi).values() {
+            if let Some(z) = Self::lab(n, naz, t, phi, s) {
+                let samples = sample::one_held(&[None, None, None, Some(phi)], &z);
+                out.extend(self.free_detector(samples));
+            }
         }
         out
     }
@@ -70,21 +70,26 @@ impl Problem {
     /// for every φ, so neither ends in a fold where a root could hide.
     fn naz_bisect_scan(
         &self,
+        n: &Vector3<f64>,
         naz: f64,
         miss: impl Fn(&Vector3<f64>) -> f64,
-    ) -> Vec<(Angles, Free)> {
+    ) -> Vec<Angles> {
         let tilt = |phi: f64, branch: usize| {
             let lift = (circle(PHI, phi) * self.p0).y.clamp(-1.0, 1.0).asin();
             self.theta() + if branch == 0 { lift } else { PI - lift }
         };
+        // Where χ is free the residual has no one value; the scan steps over.
         let residual = |phi: f64, branch: usize| {
-            let lab = self.lab(naz, tilt(phi, branch), phi);
-            let (z, _) = lab.into_iter().find(|(_, f)| f.is_none())?;
+            let t = tilt(phi, branch);
+            let Roots::One(s) = self.chi(t, phi) else {
+                return None;
+            };
+            let z = Self::lab(n, naz, t, phi, s)?;
             Some(miss(&(z * circle(PHI, phi).transpose() * Vector3::y())))
         };
         let mut out = Vec::new();
         for (phi, branch) in scan(residual) {
-            out.extend(self.positions(naz, tilt(phi, branch), phi, None));
+            out.extend(self.positions(n, naz, tilt(phi, branch), phi));
         }
         out
     }

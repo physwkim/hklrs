@@ -144,6 +144,24 @@ impl<'a> System<'a> {
         self.current
     }
 
+    pub fn geometry(&self) -> &'a Geometry {
+        self.geometry
+    }
+
+    pub fn extra(&self) -> &'a [Equation] {
+        self.extra
+    }
+
+    /// UB in units of k.
+    pub fn ub(&self) -> &Matrix3<f64> {
+        &self.ub
+    }
+
+    /// Target Q in the sample frame, units of k.
+    pub fn q(&self) -> &Vector3<f64> {
+        &self.q
+    }
+
     pub fn kappa(&self) -> Option<&'a KappaAxes> {
         self.kappa
     }

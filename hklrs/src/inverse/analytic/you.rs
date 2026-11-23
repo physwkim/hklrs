@@ -8,10 +8,11 @@ use nalgebra::{Matrix3, Rotation3, Unit, Vector3};
 pub(super) const EPS: f64 = 1e-10;
 
 /// How many values a free angle is sampled at when an equation does not
-/// depend on it; a sample that passes the final check proves a continuous
-/// family. They are spread over the circle, so a family over an interval of
-/// the angle is hit, and none is a round number of degrees, so a constraint
-/// value does not coincide with one.
+/// depend on it; a sample that solves the mode is a point of a continuous
+/// family, which the validator finds singular. They are spread over the
+/// circle, so a family over an interval of the angle is hit, and none is a
+/// round number of degrees, so a constraint value does not coincide with
+/// one.
 const PROBES: usize = 12;
 
 fn probes() -> impl Iterator<Item = f64> {
@@ -44,9 +45,6 @@ pub(super) fn circle(c: usize, angle: f64) -> Matrix3<f64> {
     rot(&axis(c), angle)
 }
 
-/// Tag of a candidate built from a probed free angle: what is free.
-pub(super) type Free = Option<&'static str>;
-
 /// One E6C position in You's circles, radians, indexed by [`MU`]..[`DELTA`].
 pub(super) type Angles = [f64; 6];
 
@@ -70,12 +68,12 @@ pub(super) enum Roots {
 }
 
 impl Roots {
-    /// Isolated roots untagged, a free angle as [`PROBES`] tagged `what`.
-    pub(super) fn tagged(self, what: &'static str) -> Vec<(f64, Free)> {
+    /// The roots, a free angle as [`PROBES`] samples.
+    pub(super) fn values(self) -> Vec<f64> {
         match self {
-            Roots::Two(r) => r.iter().map(|&x| (x, None)).collect(),
-            Roots::One(x) => vec![(x, None)],
-            Roots::Free => probes().map(|x| (x, Some(what))).collect(),
+            Roots::Two(r) => r.to_vec(),
+            Roots::One(x) => vec![x],
+            Roots::Free => probes().collect(),
             Roots::Empty => Vec::new(),
         }
     }
@@ -147,24 +145,16 @@ pub(super) fn spin(axis: &Vector3<f64>, from: &Vector3<f64>, to: &Vector3<f64>) 
 /// (outer, inner) with R_x(outer)·R_−z(inner)·ŷ = v, i.e.
 /// v = (sin inner, cos inner cos outer, cos inner sin outer): NU, DELTA for
 /// k_out and MU, ETA for the χ axis.
-pub(super) fn arms(v: &Vector3<f64>, what: &'static str) -> Vec<(f64, f64, Free)> {
+pub(super) fn arms(v: &Vector3<f64>) -> Vec<(f64, f64)> {
     let c = v.y.hypot(v.z);
     let inner = v.x.atan2(c);
     if c < EPS {
-        return Roots::Free
-            .tagged(what)
-            .into_iter()
-            .map(|(outer, free)| (outer, inner, free))
-            .collect();
+        return probes().map(|outer| (outer, inner)).collect();
     }
     let outer = v.z.atan2(v.y);
     vec![
-        (outer, inner, None),
-        (
-            outer + std::f64::consts::PI,
-            std::f64::consts::PI - inner,
-            None,
-        ),
+        (outer, inner),
+        (outer + std::f64::consts::PI, std::f64::consts::PI - inner),
     ]
 }
 
@@ -195,8 +185,7 @@ mod tests {
     #[test]
     fn arms_rebuild_their_vector() {
         let v = Vector3::new(0.3, -0.5, 0.2).normalize();
-        for (outer, inner, free) in arms(&v, "") {
-            assert_eq!(free, None);
+        for (outer, inner) in arms(&v) {
             let a = [0.0, 0.0, 0.0, 0.0, outer, inner];
             assert!((kout(&a) - v).norm() < 1e-15);
         }

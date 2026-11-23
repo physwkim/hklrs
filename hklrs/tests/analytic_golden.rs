@@ -1,23 +1,25 @@
-//! diffcalc-core 059ec8a inverse golden (golden/diffcalc_inverse.py) against
-//! the closed-form E6C solver `hklrs::inverse::analytic`.
+//! diffcalc-core 059ec8a inverse golden (golden/diffcalc_inverse.py) posed
+//! as hklrs E6C modes and solved by `InverseRequest`.
 //!
 //! Per case the golden's UB, reference and surface (You's φ frame) enter in
-//! hklrs's E6C frame through `frame()ᵀ`. Every returned position must bring
-//! hkl into reflection through hklrs `scattering` and meet each constraint by
-//! the golden's own definition, recomputed here from hklrs poses; every valid
-//! diffcalc solution and every isolated solution of the golden's numeric
-//! solve must be among them. Where the numeric solve found a continuous
-//! family the answer is `Degenerate`; where it found nothing, no solution.
-//! `dc_ids` mark cases where diffcalc's own answer is wrong
-//! (upstream-defects.md); they are judged by the same physics.
+//! hklrs's E6C frame through `frame()ᵀ`; the held circles are `current` and
+//! each other constraint is the `Equation` that is its You definition on
+//! E6C. Every returned position must bring hkl into reflection through
+//! hklrs `scattering` and meet each constraint by the golden's own
+//! definition, recomputed here from hklrs poses; every valid diffcalc
+//! solution and every isolated solution of the golden's numeric solve must
+//! be among them. Where the numeric solve found a continuous family the
+//! answer is `Degenerate`; where it found nothing, `NoSolution`. `dc_ids`
+//! mark cases where diffcalc's own answer is wrong (upstream-defects.md);
+//! they are judged by the same physics.
 
 use std::collections::BTreeMap;
 
-use hklrs::inverse::analytic::{self, Constraints, Error};
-use hklrs::inverse::e6c;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::presets::preset;
-use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength, scattering};
+use hklrs::{
+    Equation, Geometry, InverseError, InverseRequest, Mode, Target, Wavelength, scattering,
+};
 use serde_json::Value;
 
 /// A diffcalc or numeric solution matches a returned one within this (rad).
@@ -28,6 +30,7 @@ const CONSTRAINT: f64 = 1e-8;
 
 /// hklrs E6C axis order (mu, omega, chi, phi, gamma, delta) in You's names.
 const ORDER: [&str; 6] = ["mu", "eta", "chi", "phi", "nu", "delta"];
+const CHI: usize = 2;
 const DET: [&str; 4] = ["delta", "nu", "qaz", "naz"];
 const REF: [&str; 7] = [
     "alpha",
@@ -73,11 +76,97 @@ fn wrap(a: f64) -> f64 {
     }
 }
 
-fn distance(a: &[f64; 6], b: &[f64; 6]) -> f64 {
+fn distance(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b)
         .map(|(x, y)| wrap(x - y).abs())
         .fold(0.0, f64::max)
+}
+
+/// hklrs's E6C lab (beam +x, `mu` and `gamma` about z) as You's lab (beam
+/// +y, μ and ν about x): x → y, y → z, z → x.
+fn frame() -> Matrix3<f64> {
+    Matrix3::new(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+}
+
+/// A golden case as an hklrs E6C request: its mode, UB in hklrs's frame,
+/// and every axis value, the held circles at their constraints.
+struct Posed<'g> {
+    mode: Mode<'g>,
+    ub: Matrix3<f64>,
+    current: [f64; 6],
+}
+
+impl Posed<'_> {
+    fn solve(&self, case: &Value) -> Result<Vec<Vec<f64>>, InverseError> {
+        InverseRequest {
+            mode: &self.mode,
+            ub: self.ub,
+            wavelength: Wavelength::new(f(&case["wavelength"])).unwrap(),
+            target: Target::Hkl(vec3(&case["hkl"])),
+            current: &self.current,
+        }
+        .solve()
+    }
+}
+
+fn pose<'g>(geo: &'g Geometry, case: &Value) -> Result<Posed<'g>, InverseError> {
+    let r = frame();
+    let (ub, n_phi) = (mat(&case["UB"]), vec3(&case["n_phi"]));
+    let (n, s) = (
+        r.transpose() * n_phi,
+        r.transpose() * vec3(&case["surf_nphi"]),
+    );
+    let (mut current, mut extra) = ([0.0; 6], Vec::new());
+    for (name, value) in case["constraints"].as_object().unwrap() {
+        let v = || f(value).to_radians();
+        if let Some(i) = ORDER.iter().position(|o| o == name) {
+            current[i] = v();
+            continue;
+        }
+        extra.push(match name.as_str() {
+            "qaz" => Equation::Qaz { qaz: v() },
+            "naz" => Equation::Naz {
+                normal: n,
+                naz: v(),
+            },
+            "alpha" => Equation::Incidence {
+                normal: n,
+                incidence: v(),
+            },
+            "beta" => Equation::Emergence {
+                surface: n,
+                emergence: v(),
+            },
+            "a_eq_b" => Equation::IncidenceEqualsEmergence { normal: n },
+            "psi" => Equation::PsiConstant {
+                reference: ub.lu().solve(&n_phi).unwrap(),
+                psi: v(),
+            },
+            "betain" => Equation::Incidence {
+                normal: s,
+                incidence: v(),
+            },
+            "betaout" => Equation::Emergence {
+                surface: s,
+                emergence: v(),
+            },
+            "bin_eq_bout" => Equation::IncidenceEqualsEmergence { normal: s },
+            "bisect" => Equation::InScatteringPlane { axis: CHI },
+            "omega" => Equation::VirtualOmega {
+                axis: CHI,
+                omega: v(),
+            },
+            other => panic!("constraint {other}"),
+        });
+    }
+    let names = case["constraints"].as_object().unwrap();
+    let written: Vec<usize> = (0..6).filter(|&i| !names.contains_key(ORDER[i])).collect();
+    Ok(Posed {
+        mode: Mode::new(geo, case["id"].as_str().unwrap(), &written, extra)?,
+        ub: r.transpose() * ub,
+        current,
+    })
 }
 
 /// The constraint family of a golden case, by the names it constrains.
@@ -108,16 +197,6 @@ fn position(named: &Value) -> [f64; 6] {
     ORDER.map(|n| f(&named[n]).to_radians())
 }
 
-fn constraints(case: &Value) -> Result<Constraints, Error> {
-    let named: Vec<(&str, Option<f64>)> = case["constraints"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(n, v)| (n.as_str(), v.as_f64().map(f64::to_radians)))
-        .collect();
-    Constraints::from_names(&named)
-}
-
 /// The golden's virtual angles of hklrs position `values`, from hklrs poses
 /// turned into You's lab.
 struct Virtual {
@@ -128,13 +207,13 @@ struct Virtual {
 }
 
 impl Virtual {
-    fn new(geo: &Geometry, values: &[f64; 6], n_phi: &Vector3<f64>, s_phi: &Vector3<f64>) -> Self {
-        let r = analytic::frame();
+    fn new(geo: &Geometry, values: &[f64], n_phi: &Vector3<f64>, s_phi: &Vector3<f64>) -> Self {
+        let r = frame();
         let poses = geo.poses(values).unwrap();
         let z = r * poses.sample.rotation.to_rotation_matrix().into_inner() * r.transpose();
         let kf = poses.detector.rotation * geo.beam_direction().into_inner();
         Self {
-            angles: *values,
+            angles: values.try_into().unwrap(),
             n: z * n_phi.normalize(),
             s: z * s_phi.normalize(),
             kout: r * kf,
@@ -193,14 +272,13 @@ struct Tally {
     extra: usize,
     degenerate: usize,
     empty: usize,
-    errors: BTreeMap<String, usize>,
     dc: BTreeMap<String, usize>,
 }
 
 /// Checks one case; `Err` names what is wrong.
 fn check(case: &Value, tally: &mut Tally) -> Result<(), String> {
     let geo = preset("E6C").unwrap();
-    let r = analytic::frame();
+    let r = frame();
     let ub = mat(&case["UB"]);
     let hkl = vec3(&case["hkl"]);
     let wavelength = Wavelength::new(f(&case["wavelength"])).unwrap();
@@ -225,39 +303,28 @@ fn check(case: &Value, tally: &mut Tally) -> Result<(), String> {
         })
         .unwrap_or_default();
     let names = case["constraints"].as_object().unwrap();
-    let constraints = constraints(case).map_err(|e| format!("from_names: {e}"))?;
-    let result = analytic::e6c(
-        &constraints,
-        &(r.transpose() * ub * hkl),
-        wavelength,
-        &(r.transpose() * n_phi),
-        &(r.transpose() * s_phi),
-    );
+    let posed = pose(&geo, case).map_err(|e| format!("mode: {e}"))?;
     for id in case["dc_ids"].as_array().unwrap() {
         *tally.dc.entry(id.as_str().unwrap().to_owned()).or_default() += 1;
     }
-    let solutions = match result {
-        Err(Error::Unreachable { .. }) if case["category"] == "unreachable" => return Ok(()),
-        Err(Error::Degenerate { .. }) if family_found => {
+    let unreachable = case["category"] == "unreachable";
+    let solutions = match posed.solve(case) {
+        Err(InverseError::Unreachable { .. }) if unreachable => return Ok(()),
+        Err(InverseError::Degenerate) if family_found => {
             tally.degenerate += 1;
             return Ok(());
         }
-        Err(Error::PsiUndefined)
-            if names.contains_key("psi") && isolated.is_empty() && valid.is_empty() =>
+        Err(InverseError::NoSolution)
+            if !family_found && !unreachable && isolated.is_empty() && valid.is_empty() =>
         {
-            *tally.errors.entry("PsiUndefined".into()).or_default() += 1;
+            tally.empty += 1;
             return Ok(());
         }
         Err(e) => return Err(format!("{e:?}")),
         Ok(s) if family_found => return Err(format!("{} solutions, numeric family", s.len())),
-        Ok(s) if case["category"] == "unreachable" => {
-            return Err(format!("{} solutions, unreachable", s.len()));
-        }
+        Ok(s) if unreachable => return Err(format!("{} solutions, unreachable", s.len())),
         Ok(s) => s,
     };
-    if solutions.is_empty() {
-        tally.empty += 1;
-    }
     tally.solutions += solutions.len();
     for values in &solutions {
         let point = Point3::from(geo.beam_direction().into_inner());
@@ -311,7 +378,7 @@ fn run(family_name: &str) {
         }
     }
     eprintln!(
-        "{family_name}: {} cases, {} failed; {} solutions ({} diffcalc-valid and {} numeric matched, {} extra), {} degenerate, {} empty, errors {:?}, dc cases {:?}",
+        "{family_name}: {} cases, {} failed; {} solutions ({} diffcalc-valid and {} numeric matched, {} extra), {} degenerate, {} with none, dc cases {:?}",
         tally.cases,
         tally.failed.len(),
         tally.solutions,
@@ -320,7 +387,6 @@ fn run(family_name: &str) {
         tally.extra,
         tally.degenerate,
         tally.empty,
-        tally.errors,
         tally.dc,
     );
     assert!(tally.cases > 0);
@@ -360,114 +426,6 @@ fn naz_2samp() {
 #[test]
 fn naz_bisect() {
     run("naz+bisect");
-}
-
-/// The numeric E6C mode that writes the circles `case` leaves free, if its
-/// constraints are three held circles or μ, ν and ψ.
-fn numeric_mode<'g>(geo: &'g Geometry, case: &Value) -> Option<Mode<'g>> {
-    let names = case["constraints"].as_object().unwrap();
-    let mut held: Vec<&str> = names.keys().map(String::as_str).collect();
-    held.sort_unstable();
-    let mode = match held[..] {
-        ["eta", "mu", "nu"] => e6c::constant_omega_vertical(geo),
-        ["chi", "mu", "nu"] => e6c::constant_chi_vertical(geo),
-        ["mu", "nu", "phi"] => e6c::constant_phi_vertical(geo),
-        ["chi", "eta", "mu"] => e6c::lifting_detector_phi(geo),
-        ["chi", "mu", "phi"] => e6c::lifting_detector_omega(geo),
-        ["chi", "eta", "phi"] => e6c::lifting_detector_mu(geo),
-        ["delta", "eta", "mu"] => e6c::constant_mu_horizontal(geo),
-        ["mu", "nu", "psi"] => {
-            let reference = mat(&case["UB"]).lu().solve(&vec3(&case["n_phi"])).unwrap();
-            e6c::psi_constant_vertical(geo, reference, f(&names["psi"]).to_radians())
-        }
-        _ => return None,
-    };
-    let mode = mode.unwrap();
-    let written: Vec<&str> = mode.written().iter().map(|&i| ORDER[i]).collect();
-    assert!(
-        ORDER
-            .iter()
-            .all(|n| held.contains(n) != written.contains(n)),
-        "{held:?} vs {written:?}"
-    );
-    Some(mode)
-}
-
-/// Every case a numeric E6C mode can pose, solved by both: the same
-/// positions within MATCH, or the same error. At |Q| = 2k the two
-/// reachability gates still differ until e6c runs behind the solver's;
-/// such a case is listed, not judged.
-#[test]
-fn analytic_agrees_with_numeric() {
-    let geo = preset("E6C").unwrap();
-    let r = analytic::frame();
-    let (mut positions, mut pending, mut failed) = (0, Vec::new(), Vec::new());
-    let mut agreed: BTreeMap<&str, usize> = BTreeMap::new();
-    for case in load()["cases"].as_array().unwrap() {
-        let Some(mode) = numeric_mode(&geo, case) else {
-            continue;
-        };
-        let id = &case["id"];
-        let ub = r.transpose() * mat(&case["UB"]);
-        let hkl = vec3(&case["hkl"]);
-        let wavelength = Wavelength::new(f(&case["wavelength"])).unwrap();
-        let q_max = 4.0 * std::f64::consts::PI / f(&case["wavelength"]);
-        if ((ub * hkl).norm() / q_max - 1.0).abs() < 1e-9 {
-            pending.push(id.clone());
-            continue;
-        }
-        let mut current = [0.0; 6];
-        for (name, value) in case["constraints"].as_object().unwrap() {
-            if let Some(i) = ORDER.iter().position(|o| o == name) {
-                current[i] = f(value).to_radians();
-            }
-        }
-        let numeric = InverseRequest {
-            mode: &mode,
-            ub,
-            wavelength,
-            target: Target::Hkl(hkl),
-            current: &current,
-        }
-        .solve();
-        let ours = analytic::e6c(
-            &constraints(case).unwrap(),
-            &(ub * hkl),
-            wavelength,
-            &(r.transpose() * vec3(&case["n_phi"])),
-            &(r.transpose() * vec3(&case["surf_nphi"])),
-        );
-        let kind = match (&ours, &numeric) {
-            (Ok(a), Ok(n)) => {
-                let n: Vec<[f64; 6]> = n.iter().map(|v| v[..].try_into().unwrap()).collect();
-                let within = |xs: &[[f64; 6]], ys: &[[f64; 6]]| {
-                    xs.iter().all(|x| ys.iter().any(|y| distance(x, y) < MATCH))
-                };
-                if a.len() != n.len() || !within(a, &n) || !within(&n, a) {
-                    failed.push(format!("{id}: analytic {a:?}\nnumeric {n:?}"));
-                    continue;
-                }
-                positions += a.len();
-                "positions"
-            }
-            (Ok(a), Err(InverseError::NoSolution)) if a.is_empty() => "none",
-            (Err(Error::Degenerate { .. }), Err(InverseError::Degenerate)) => "degenerate",
-            (Err(Error::Unreachable { .. }), Err(InverseError::Unreachable { .. })) => {
-                "unreachable"
-            }
-            _ => {
-                failed.push(format!("{id}: analytic {ours:?}, numeric {numeric:?}"));
-                continue;
-            }
-        };
-        *agreed.entry(kind).or_default() += 1;
-    }
-    eprintln!(
-        "analytic vs numeric: cases agreeing {agreed:?} ({positions} positions), failed {}, pending the reach gate {pending:?}",
-        failed.len()
-    );
-    assert!(agreed["positions"] > 0);
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
 /// The golden cases citing defect `id`, each checked; `count` of them.
@@ -557,17 +515,22 @@ fn dc6_backscatter_is_degenerate() {
     }
 }
 
-/// Every golden "unsupported" constraint set is refused by name.
+/// Of the golden's "unsupported" constraint sets, which diffcalc refuses,
+/// the two with two and four constraints are no mode of six circles; the
+/// others are modes, which `analytic`'s own tests keep off its closed form.
 #[test]
-fn unsupported_sets_are_refused() {
-    let golden = load();
-    for case in golden["cases"].as_array().unwrap() {
-        if case["category"] == "unsupported" {
-            assert!(
-                matches!(constraints(case), Err(Error::Unsupported { .. })),
-                "{}",
-                case["id"]
-            );
+fn unsupported_sets_pose_as_modes_or_fail_the_count() {
+    let geo = preset("E6C").unwrap();
+    let mut short = Vec::new();
+    for case in load()["cases"].as_array().unwrap() {
+        if case["category"] != "unsupported" {
+            continue;
+        }
+        match pose(&geo, case) {
+            Ok(_) => {}
+            Err(InverseError::EquationCount { .. }) => short.push(case["id"].clone()),
+            Err(e) => panic!("{}: {e}", case["id"]),
         }
     }
+    assert_eq!(short, ["c375", "c378"]);
 }

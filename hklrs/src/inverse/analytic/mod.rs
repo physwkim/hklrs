@@ -1,128 +1,75 @@
-//! Closed-form inverse for E6C: the You (1999) 4S+2D constraint families,
-//! solved as diffcalc-core (`059ec8a`, `src/diffcalc/hkl/calc*.py`) solves
-//! them, with its defects corrected (upstream-defects.md DC-1..DC-6).
+//! Closed-form candidates for the geometries that are You (1999) 4S+2D axis
+//! for axis: the constraint families solved as diffcalc-core (`059ec8a`,
+//! `src/diffcalc/hkl/calc*.py`) solves them, with its defects corrected
+//! (upstream-defects.md DC-1..DC-6).
 //!
-//! The solver works in You's frame and circle names; [`e6c`] is the only
-//! boundary, where [`frame`] and [`E6C`] map hklrs's E6C onto it. Every
-//! candidate is checked against the Q round trip and every constraint before
-//! it is returned. Where an equation leaves an angle free the solver samples
-//! it, and a sample that passes the check is reported as
-//! [`Error::Degenerate`].
+//! [`search`] is the one boundary: it maps the mode's [`System`] onto You's
+//! constraints through [`frame`] and offers what the solver finds to the
+//! validator, as every generator does. Where an equation leaves an angle
+//! free the solver samples it, and the validator finds the family singular.
 
 mod sample;
 mod solve;
 mod trig;
 mod you;
 
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
-
 use nalgebra::{Matrix3, Vector3};
 
-use crate::Wavelength;
-use you::{Angles, EPS};
-
-/// Largest Q miss (units of k) and constraint miss (rad, or sine for the
-/// angles You defines by their sine) a returned solution may have.
-const TOL: f64 = 1e-9;
-
-/// Solutions closer than this in every circle (rad) are one.
-const SAME: f64 = 1e-9;
+use super::Equation;
+use super::system::System;
+use super::validate::SolutionSet;
+use crate::{AxisKind, Geometry};
+use sample::Known;
 
 /// hklrs's E6C lab (beam +x, `mu` and `gamma` about z) as You's lab (beam
 /// +y, μ and ν about x): x → y, y → z, z → x. Lab and sample-frame vectors
-/// map by `frame() * v`, rotations by `frame() * r * frame().transpose()`.
-pub fn frame() -> Matrix3<f64> {
+/// map by `frame() * v`.
+fn frame() -> Matrix3<f64> {
     Matrix3::new(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 }
 
-/// Each hklrs E6C axis in geometry order, the You circle it is under
-/// [`frame`], and the sign from the hklrs value to You's.
-pub const E6C: [(&str, &str, f64); 6] = [
-    ("mu", "mu", 1.0),
-    ("omega", "eta", 1.0),
-    ("chi", "chi", 1.0),
-    ("phi", "phi", 1.0),
-    ("gamma", "nu", 1.0),
-    ("delta", "delta", 1.0),
-];
-
-/// Fixes the detector, or with `Naz` the azimuth about the beam of the
-/// reference vector.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Detector {
+/// Fixes the detector, or with `Naz` the azimuth about the beam of a unit
+/// vector in the φ frame.
+#[derive(Clone, Copy, Debug)]
+enum Detector {
     Delta(f64),
     Nu(f64),
     /// Azimuth of Q about the beam, atan2(Q_x, Q_z).
     Qaz(f64),
-    /// Azimuth of the reference vector about the beam, atan2(n_x, n_z).
-    Naz(f64),
+    /// atan2(v_x, v_z) of the vector in the lab.
+    Naz(Vector3<f64>, f64),
 }
 
-/// Fixes the reference vector n (`Alpha`, `Beta`, `AEqB`, `Psi`) or the
-/// surface normal s (`Betain`, `Betaout`, `BinEqBout`) relative to the beams.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Reference {
-    /// asin(−n·k̂_in).
-    Alpha(f64),
-    /// asin(n·k̂_out).
-    Beta(f64),
-    AEqB,
-    /// Azimuth of n about Q̂, zero when n is in the plane of Q̂ and the beam.
-    Psi(f64),
-    /// asin(−s·k̂_in).
-    Betain(f64),
-    /// asin(s·k̂_out).
-    Betaout(f64),
-    BinEqBout,
+/// Fixes a unit vector v in the φ frame relative to the beams: You's
+/// reference vector (alpha, beta, a_eq_b, psi) or surface normal (betain,
+/// betaout, bin_eq_bout).
+#[derive(Clone, Copy, Debug)]
+enum Reference {
+    /// asin(−v·k̂_in).
+    Incidence(Vector3<f64>, f64),
+    /// asin(v·k̂_out).
+    Emergence(Vector3<f64>, f64),
+    /// Incidence equals emergence.
+    Equal(Vector3<f64>),
+    /// Azimuth of v about Q̂, zero when v is in the plane of Q̂ and the beam.
+    Psi(Vector3<f64>, f64),
 }
 
 impl Reference {
-    fn on_surface(&self) -> bool {
-        matches!(
-            self,
-            Reference::Betain(_) | Reference::Betaout(_) | Reference::BinEqBout
-        )
-    }
-}
-
-/// A sample circle of Z = MU·ETA·CHI·PHI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Circle {
-    Mu,
-    Eta,
-    Chi,
-    Phi,
-}
-
-/// `N` distinct sample circles held at values.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Held<const N: usize>([(Circle, f64); N]);
-
-impl<const N: usize> Held<N> {
-    pub fn new(held: [(Circle, f64); N]) -> Result<Self, Error> {
-        for (i, (c, _)) in held.iter().enumerate() {
-            if held[..i].iter().any(|(d, _)| d == c) {
-                return Err(Error::Unsupported {
-                    names: format!("{c:?} held twice"),
-                });
-            }
+    fn vector(&self) -> Vector3<f64> {
+        match *self {
+            Reference::Incidence(v, _)
+            | Reference::Emergence(v, _)
+            | Reference::Equal(v)
+            | Reference::Psi(v, _) => v,
         }
-        Ok(Self(held))
-    }
-
-    fn known(&self) -> sample::Known {
-        let mut known = [None; 4];
-        for &(c, v) in &self.0 {
-            known[c as usize] = Some(v);
-        }
-        known
     }
 }
 
 /// With `bisect`, the χ axis MU·ETA·ŷ lies in the plane of the beam and Q's
 /// azimuth (sin qaz, 0, cos qaz); this fixes where in that plane.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Bisect {
+#[derive(Clone, Copy, Debug)]
+enum Bisect {
     Mu(f64),
     Eta(f64),
     /// Angle of the χ axis from the beam in that plane, minus θ.
@@ -130,242 +77,359 @@ pub enum Bisect {
 }
 
 /// One You (1999) constraint family with its values, radians.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Constraints {
-    DetRefSample(Detector, Reference, Held<1>),
-    DetSamples(Detector, Held<2>),
+#[derive(Clone, Copy, Debug)]
+enum Constraints {
+    DetRefSample(Detector, Reference, Known),
+    DetSamples(Detector, Known),
     DetBisect(Detector, Bisect),
-    RefSamples(Reference, Held<2>),
-    Samples(Held<3>),
+    RefSamples(Reference, Known),
+    Samples(Known),
 }
 
-impl Constraints {
-    /// From You's names as diffcalc's `Constraints` keys them, values in
-    /// radians; `a_eq_b` and `bin_eq_bout` take `None`.
-    pub fn from_names(named: &[(&str, Option<f64>)]) -> Result<Self, Error> {
-        let unsupported = || Error::Unsupported {
-            names: named.iter().map(|(n, _)| *n).collect::<Vec<_>>().join("+"),
-        };
-        let (mut det, mut refs, mut held) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut bisect, mut omega) = (false, Vec::new());
-        for (i, &(name, value)) in named.iter().enumerate() {
-            if named[..i].iter().any(|(n, _)| *n == name) {
-                return Err(unsupported());
-            }
-            let v = || match value {
-                Some(v) if v.is_finite() => Ok(v),
-                Some(_) => Err(Error::NonFinite {
-                    what: "constraint value",
-                }),
-                None => Err(Error::Value {
-                    name: name.to_owned(),
-                    problem: "needs a value",
-                }),
-            };
-            let flag = || match value {
-                None => Ok(()),
-                Some(_) => Err(Error::Value {
-                    name: name.to_owned(),
-                    problem: "takes no value",
-                }),
-            };
-            match name {
-                "delta" => det.push(Detector::Delta(v()?)),
-                "nu" => det.push(Detector::Nu(v()?)),
-                "qaz" => det.push(Detector::Qaz(v()?)),
-                "naz" => det.push(Detector::Naz(v()?)),
-                "alpha" => refs.push(Reference::Alpha(v()?)),
-                "beta" => refs.push(Reference::Beta(v()?)),
-                "psi" => refs.push(Reference::Psi(v()?)),
-                "betain" => refs.push(Reference::Betain(v()?)),
-                "betaout" => refs.push(Reference::Betaout(v()?)),
-                "a_eq_b" => refs.push(flag().map(|()| Reference::AEqB)?),
-                "bin_eq_bout" => refs.push(flag().map(|()| Reference::BinEqBout)?),
-                "mu" => held.push((Circle::Mu, v()?)),
-                "eta" => held.push((Circle::Eta, v()?)),
-                "chi" => held.push((Circle::Chi, v()?)),
-                "phi" => held.push((Circle::Phi, v()?)),
-                "bisect" => {
-                    flag()?;
-                    bisect = true;
-                }
-                "omega" => omega.push(v()?),
-                _ => return Err(unsupported()),
-            }
-        }
-        match (&det[..], &refs[..], &held[..], bisect, &omega[..]) {
-            (&[d], &[r], &[h], false, &[]) => Ok(Constraints::DetRefSample(d, r, Held::new([h])?)),
-            (&[], &[r], &[g, h], false, &[]) => Ok(Constraints::RefSamples(r, Held::new([g, h])?)),
-            (&[], &[], &[a, b, c], false, &[]) => Ok(Constraints::Samples(Held::new([a, b, c])?)),
-            (&[d], &[], &[g, h], false, &[]) => Ok(Constraints::DetSamples(d, Held::new([g, h])?)),
-            (&[d], &[], held, true, omega) => {
-                let b = match (held, omega) {
-                    (&[], &[w]) => Bisect::Omega(w),
-                    (&[(Circle::Mu, v)], &[]) => Bisect::Mu(v),
-                    (&[(Circle::Eta, v)], &[]) => Bisect::Eta(v),
-                    _ => return Err(unsupported()),
-                };
-                Ok(Constraints::DetBisect(d, b))
-            }
-            _ => Err(unsupported()),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
-pub enum Error {
-    #[error("|Q| = {q} Å⁻¹ exceeds 4π/λ = {q_max} Å⁻¹")]
-    Unreachable { q: f64, q_max: f64 },
-    #[error("the solutions form a continuous family in {what}")]
-    Degenerate { what: &'static str },
-    #[error("psi is undefined: the reference is parallel to Q or Q is along the beam")]
-    PsiUndefined,
-    #[error("{what} is not finite")]
-    NonFinite { what: &'static str },
-    #[error("{what} is zero")]
-    ZeroReference { what: &'static str },
-    #[error("{names} is not a You (1999) constraint set")]
-    Unsupported { names: String },
-    #[error("constraint {name:?} {problem}")]
-    Value { name: String, problem: &'static str },
-}
-
-/// Every E6C position, hklrs axis order (mu, omega, chi, phi, gamma, delta),
-/// radians in (−π, π], that brings `q_sample` (Å⁻¹ with 2π, hklrs sample
-/// frame) into reflection and meets `constraints`. `reference` and `surface`
-/// are the reference vector and surface normal in the same frame as
-/// `q_sample`; only their directions matter (DC-7).
-pub fn e6c(
-    constraints: &Constraints,
-    q_sample: &Vector3<f64>,
-    wavelength: Wavelength,
-    reference: &Vector3<f64>,
-    surface: &Vector3<f64>,
-) -> Result<Vec<[f64; 6]>, Error> {
+/// You's circle of each axis in geometry order, where the geometry is
+/// You's under [`frame`]: four sample rotations about MU, ETA, CHI, PHI's
+/// axes and two detector rotations about NU, DELTA's, outermost first, no
+/// source axis, and the beam along +y.
+fn layout(geometry: &Geometry) -> Option<[usize; 6]> {
     let r = frame();
-    let problem = solve::Problem::new(
-        &(r * q_sample),
-        wavelength.wavenumber(),
-        &(r * reference),
-        &(r * surface),
-    )?;
-    if let Constraints::DetRefSample(_, Reference::Psi(_), _)
-    | Constraints::RefSamples(Reference::Psi(_), _) = constraints
+    let (sample, detector) = (geometry.sample_stack(), geometry.detector_stack());
+    if geometry.axes().len() != 6
+        || sample.len() != 4
+        || detector.len() != 2
+        || !geometry.source_stack().is_empty()
+        || r * geometry.beam_direction().into_inner() != Vector3::y()
     {
-        if !problem.psi_defined() {
-            return Err(Error::PsiUndefined);
-        }
+        return None;
     }
-    let to_e6c = E6C.map(|(_, you, sign)| {
-        let c = sample::NAMES.iter().position(|n| *n == you).unwrap();
-        (c, sign)
-    });
-    let mut out: Vec<[f64; 6]> = Vec::new();
-    for (a, free) in problem.candidates(constraints) {
-        if !satisfied(constraints, &problem, &a) {
+    let mut out = [None; 6];
+    for (c, &i) in sample.iter().chain(detector).enumerate() {
+        let AxisKind::Rotation { axis } = geometry.axes()[i].kind() else {
+            return None;
+        };
+        if r * axis.into_inner() != you::axis(c) || out[i].is_some() {
+            return None;
+        }
+        out[i] = Some(c);
+    }
+    Some(out.map(Option::unwrap))
+}
+
+/// The mode as You's constraints: the axes it holds at `current` and its
+/// equations, which must make one family.
+fn constraints(system: &System, layout: &[usize; 6]) -> Option<Constraints> {
+    let unit = |v: &Vector3<f64>| (frame() * v).try_normalize(0.0);
+    let (mut det, mut refs, mut known) = (Vec::new(), Vec::new(), [None; 4]);
+    let (mut bisect, mut omega) = (false, None);
+    for (i, &c) in layout.iter().enumerate() {
+        if system.is_written(i) {
             continue;
         }
-        if let Some(what) = free {
-            return Err(Error::Degenerate { what });
-        }
-        let v = to_e6c.map(|(c, sign)| wrap(sign * a[c]));
-        if !out
-            .iter()
-            .any(|u| u.iter().zip(&v).all(|(x, y)| wrap(x - y).abs() < SAME))
-        {
-            out.push(v);
+        let v = system.current()[i];
+        match c {
+            you::NU => det.push(Detector::Nu(v)),
+            you::DELTA => det.push(Detector::Delta(v)),
+            c => known[c] = Some(v),
         }
     }
-    Ok(out)
-}
-
-/// Residue of `a` modulo 2π in (−π, π].
-fn wrap(a: f64) -> f64 {
-    let r = a.rem_euclid(TAU);
-    if r > PI { r - TAU } else { r }
-}
-
-fn near(angle: f64) -> bool {
-    wrap(angle).abs() <= TOL
-}
-
-/// `sine` is sin(value) for an angle You defines as an arcsine.
-fn arcsine(sine: f64, value: f64) -> bool {
-    value.abs() <= FRAC_PI_2 + TOL && (sine - value.sin()).abs() <= TOL
-}
-
-/// The final check every candidate passes: Q round trip and each constraint
-/// by its definition, independent of how the candidate was found.
-fn satisfied(constraints: &Constraints, p: &solve::Problem, a: &Angles) -> bool {
-    let z = you::z(a);
-    let kout = you::kout(a);
-    let q = kout - Vector3::y();
-    let (n, s) = (z * p.n, z * p.s);
-    if (z.transpose() * q - p.q()).norm() > TOL {
-        return false;
-    }
-    let detector = |d: &Detector| match *d {
-        Detector::Delta(v) => near(a[you::DELTA] - v),
-        Detector::Nu(v) => near(a[you::NU] - v),
-        Detector::Qaz(v) => q.x.hypot(q.z) > EPS && near(q.x.atan2(q.z) - v),
-        Detector::Naz(v) => n.x.hypot(n.z) > EPS && near(n.x.atan2(n.z) - v),
-    };
-    let reference = |r: &Reference| match *r {
-        Reference::Alpha(v) => arcsine(-n.y, v),
-        Reference::Beta(v) => arcsine(n.dot(&kout), v),
-        Reference::AEqB => (n.y + n.dot(&kout)).abs() <= TOL,
-        Reference::Psi(v) => {
-            let qh = q.normalize();
-            let (y, x) = (n.cross(&qh).y, n.y - n.dot(&qh) * qh.y);
-            x.hypot(y) > EPS && near(y.atan2(x) - v)
-        }
-        Reference::Betain(v) => arcsine(-s.y, v),
-        Reference::Betaout(v) => arcsine(s.dot(&kout), v),
-        Reference::BinEqBout => (s.y + s.dot(&kout)).abs() <= TOL,
-    };
-    let held = |h: &[(Circle, f64)]| h.iter().all(|&(c, v)| near(a[c as usize] - v));
-    let bisect = |b: &Bisect| {
-        let chi =
-            you::circle(you::MU, a[you::MU]) * you::circle(you::ETA, a[you::ETA]) * Vector3::y();
-        let Some(eq) = Vector3::new(q.x, 0.0, q.z).try_normalize(EPS) else {
-            return false;
-        };
-        chi.dot(&Vector3::new(eq.z, 0.0, -eq.x)).abs() <= TOL
-            && match *b {
-                Bisect::Mu(v) => near(a[you::MU] - v),
-                Bisect::Eta(v) => near(a[you::ETA] - v),
-                Bisect::Omega(v) => near(chi.dot(&eq).atan2(chi.y) - p.theta() - v),
+    for e in system.extra() {
+        match *e {
+            Equation::Qaz { qaz } => det.push(Detector::Qaz(qaz)),
+            Equation::Naz { normal, naz } => det.push(Detector::Naz(unit(&normal)?, naz)),
+            Equation::Incidence { normal, incidence } => {
+                refs.push(Reference::Incidence(unit(&normal)?, incidence))
             }
-    };
-    match constraints {
-        Constraints::DetRefSample(d, r, h) => detector(d) && reference(r) && held(&h.0),
-        Constraints::DetSamples(d, h) => detector(d) && held(&h.0),
-        Constraints::DetBisect(d, b) => detector(d) && bisect(b),
-        Constraints::RefSamples(r, h) => reference(r) && held(&h.0),
-        Constraints::Samples(h) => held(&h.0),
+            Equation::Emergence { surface, emergence } => {
+                refs.push(Reference::Emergence(unit(&surface)?, emergence))
+            }
+            Equation::IncidenceEqualsEmergence { normal } => {
+                refs.push(Reference::Equal(unit(&normal)?))
+            }
+            Equation::PsiConstant { reference, psi } => {
+                refs.push(Reference::Psi(unit(&(system.ub() * reference))?, psi))
+            }
+            Equation::InScatteringPlane { axis } if layout[axis] == you::CHI && !bisect => {
+                bisect = true
+            }
+            Equation::VirtualOmega { axis, omega: w }
+                if layout[axis] == you::CHI && omega.is_none() =>
+            {
+                omega = Some(w)
+            }
+            _ => return None,
+        }
     }
+    let held: Vec<usize> = (you::MU..=you::PHI)
+        .filter(|&c| known[c].is_some())
+        .collect();
+    match (&det[..], &refs[..], held.len(), bisect, omega) {
+        (&[d], &[r], 1, false, None) => Some(Constraints::DetRefSample(d, r, known)),
+        (&[], &[r], 2, false, None) => Some(Constraints::RefSamples(r, known)),
+        (&[], &[], 3, false, None) => Some(Constraints::Samples(known)),
+        (&[d], &[], 2, false, None) => Some(Constraints::DetSamples(d, known)),
+        (&[d], &[], _, true, _) => {
+            let b = match (&held[..], omega) {
+                (&[], Some(w)) => Bisect::Omega(w),
+                (&[you::MU], None) => Bisect::Mu(known[you::MU]?),
+                (&[you::ETA], None) => Bisect::Eta(known[you::ETA]?),
+                _ => return None,
+            };
+            Some(Constraints::DetBisect(d, b))
+        }
+        _ => None,
+    }
+}
+
+/// The set of `system` from You's solution of its mode: every candidate
+/// offered, written axes as solved and the others exactly `current`, until
+/// one is singular. `None` where the geometry or the mode is not You's.
+/// The reach gate has passed: Q is nonzero and no longer than 2k.
+pub(super) fn search<'a>(system: &'a System<'a>) -> Option<SolutionSet<'a>> {
+    let layout = layout(system.geometry())?;
+    let constraints = constraints(system, &layout)?;
+    let mut set = SolutionSet::new(system);
+    for a in solve::Problem::new(&(frame() * system.q())).candidates(&constraints) {
+        if set.is_degenerate() {
+            break;
+        }
+        let values: Vec<f64> = (0..6)
+            .map(|i| {
+                if system.is_written(i) {
+                    a[layout[i]]
+                } else {
+                    system.current()[i]
+                }
+            })
+            .collect();
+        set.offer(&values);
+    }
+    Some(set)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{AxisKind, presets::preset};
+    use serde_json::Value;
 
-    /// [`frame`] and [`E6C`] against the E6C preset: each hklrs axis maps to
-    /// its You circle's axis with its sign, and the beam to +y.
+    use super::super::validate::Found;
+    use super::super::{
+        InverseError, InverseRequest, Mode, Target, e6c, esrf_bm28_psic, solve as numeric, wrap,
+    };
+    use super::*;
+    use crate::Wavelength;
+    use crate::presets::{PRESETS, preset};
+
+    /// Of every preset, E6C and ESRF BM28 PSIC are You's geometry, each axis
+    /// on its circle in stack order.
     #[test]
-    fn frame_maps_e6c_onto_you() {
-        let geo = preset("E6C").unwrap();
-        let r = frame();
-        assert_eq!(r.determinant(), 1.0);
-        assert_eq!(r * geo.beam_direction().into_inner(), Vector3::y());
-        for (axis, (name, you, sign)) in geo.axes().iter().zip(E6C) {
-            assert_eq!(axis.name(), name);
-            let AxisKind::Rotation { axis: v } = axis.kind() else {
-                panic!("{name} is not a rotation");
-            };
-            let c = sample::NAMES.iter().position(|n| *n == you).unwrap();
-            assert_eq!(r * v.into_inner(), sign * you::axis(c), "{name}");
+    fn layout_maps_e6c_and_bm28_psic() {
+        assert_eq!(frame().determinant(), 1.0);
+        let mapped: Vec<_> = PRESETS
+            .iter()
+            .filter_map(|&name| layout(&preset(name).unwrap()).map(|l| (name, l)))
+            .collect();
+        let you = [you::MU, you::ETA, you::CHI, you::PHI, you::NU, you::DELTA];
+        assert_eq!(mapped, [("E6C", you), ("ESRF BM28 PSIC", you)]);
+    }
+
+    /// Every hkl mode of the two presets is one of You's families but the
+    /// bissector and double-diffraction modes.
+    #[test]
+    fn preset_modes_map_but_bissector_and_double_diffraction() {
+        let (e, b) = (preset("E6C").unwrap(), preset("ESRF BM28 PSIC").unwrap());
+        let (h, psi) = (Vector3::new(0.3, -0.2, 1.0), 0.4);
+        let modes = [
+            (e6c::bissector_vertical(&e), false),
+            (e6c::constant_omega_vertical(&e), true),
+            (e6c::constant_chi_vertical(&e), true),
+            (e6c::constant_phi_vertical(&e), true),
+            (e6c::lifting_detector_phi(&e), true),
+            (e6c::lifting_detector_omega(&e), true),
+            (e6c::lifting_detector_mu(&e), true),
+            (e6c::double_diffraction_vertical(&e, h), false),
+            (e6c::bissector_horizontal(&e), false),
+            (e6c::double_diffraction_horizontal(&e, h), false),
+            (e6c::psi_constant_vertical(&e, h, psi), true),
+            (e6c::psi_constant_horizontal(&e, h, psi), true),
+            (e6c::constant_mu_horizontal(&e), true),
+            (esrf_bm28_psic::constant_nu_coplanar(&b), true),
+            (esrf_bm28_psic::constant_delta_coplanar(&b), true),
+            (esrf_bm28_psic::constant_eta_noncoplanar(&b), true),
+        ];
+        let current = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        for (mode, maps) in modes {
+            let mode = mode.unwrap();
+            let system = System::new(&mode, Matrix3::identity(), Vector3::z(), &current);
+            let layout = layout(mode.geometry()).unwrap();
+            assert_eq!(
+                constraints(&system, &layout).is_some(),
+                maps,
+                "{}",
+                mode.name()
+            );
         }
+    }
+
+    fn golden() -> Value {
+        let path = format!(
+            "{}/../golden/diffcalc_inverse.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).expect(&path);
+        serde_json::from_str(&text.replace(": NaN", ": null")).unwrap()
+    }
+
+    fn vec3(v: &Value) -> Vector3<f64> {
+        Vector3::from_fn(|i, _| v[i].as_f64().unwrap())
+    }
+
+    /// A diffcalc golden case (You's names, φ frame, degrees) as a mode of
+    /// `geometry`, whose axes are You's circles in order, and its `current`:
+    /// the held circles at their values, each other constraint its equation.
+    fn pose<'g>(
+        geometry: &'g Geometry,
+        case: &Value,
+    ) -> (Result<Mode<'g>, InverseError>, [f64; 6]) {
+        const NAMES: [&str; 6] = ["mu", "eta", "chi", "phi", "nu", "delta"];
+        let (r, chi) = (frame().transpose(), you::CHI);
+        let ub = Matrix3::from_fn(|i, j| case["UB"][i][j].as_f64().unwrap());
+        let n_phi = vec3(&case["n_phi"]);
+        let (n, s) = (r * n_phi, r * vec3(&case["surf_nphi"]));
+        // The written axes start off every null of the equations: with the
+        // detector on the beam, qaz and ψ are undefined at all their images.
+        let (mut current, mut extra, mut written) = (
+            [0.3, -0.7, 1.1, 0.5, -0.4, 0.9],
+            Vec::new(),
+            vec![0, 1, 2, 3, 4, 5],
+        );
+        for (name, value) in case["constraints"].as_object().unwrap() {
+            let v = || value.as_f64().unwrap().to_radians();
+            if let Some(i) = NAMES.iter().position(|n| n == name) {
+                current[i] = v();
+                written.retain(|&w| w != i);
+                continue;
+            }
+            extra.push(match name.as_str() {
+                "qaz" => Equation::Qaz { qaz: v() },
+                "naz" => Equation::Naz {
+                    normal: n,
+                    naz: v(),
+                },
+                "alpha" => Equation::Incidence {
+                    normal: n,
+                    incidence: v(),
+                },
+                "beta" => Equation::Emergence {
+                    surface: n,
+                    emergence: v(),
+                },
+                "a_eq_b" => Equation::IncidenceEqualsEmergence { normal: n },
+                "psi" => Equation::PsiConstant {
+                    reference: ub.lu().solve(&n_phi).unwrap(),
+                    psi: v(),
+                },
+                "betain" => Equation::Incidence {
+                    normal: s,
+                    incidence: v(),
+                },
+                "betaout" => Equation::Emergence {
+                    surface: s,
+                    emergence: v(),
+                },
+                "bin_eq_bout" => Equation::IncidenceEqualsEmergence { normal: s },
+                "bisect" => Equation::InScatteringPlane { axis: chi },
+                "omega" => Equation::VirtualOmega {
+                    axis: chi,
+                    omega: v(),
+                },
+                other => panic!("constraint {other}"),
+            });
+        }
+        (Mode::new(geometry, "golden", &written, extra), current)
+    }
+
+    /// On both presets every diffcalc golden case that maps comes to the same
+    /// set from You's candidates as from the numeric search, each offered to
+    /// the validator: the same error, or the same positions within 1e-6. The
+    /// sets diffcalc refuses do not map.
+    #[test]
+    fn analytic_agrees_with_numeric() {
+        let golden = golden();
+        let mut agreed = std::collections::BTreeMap::new();
+        let mut failed = Vec::new();
+        for name in ["E6C", "ESRF BM28 PSIC"] {
+            let geometry = preset(name).unwrap();
+            for case in golden["cases"].as_array().unwrap() {
+                let (id, category) = (&case["id"], case["category"].as_str().unwrap());
+                let (mode, current) = pose(&geometry, case);
+                let Ok(mode) = mode else {
+                    assert_eq!(category, "unsupported", "{id}");
+                    continue;
+                };
+                let request = InverseRequest {
+                    mode: &mode,
+                    ub: frame().transpose()
+                        * Matrix3::from_fn(|i, j| case["UB"][i][j].as_f64().unwrap()),
+                    wavelength: Wavelength::new(case["wavelength"].as_f64().unwrap()).unwrap(),
+                    target: Target::Hkl(vec3(&case["hkl"])),
+                    current: &current,
+                };
+                let system = match request.system() {
+                    Ok(system) => system,
+                    // Q = 0 is Degenerate before any solver.
+                    Err(e) => {
+                        let zero = vec3(&case["hkl"]) == Vector3::zeros();
+                        assert!(
+                            match e {
+                                InverseError::Unreachable { .. } => category == "unreachable",
+                                InverseError::Degenerate => zero,
+                                _ => false,
+                            },
+                            "{id}: {e}"
+                        );
+                        continue;
+                    }
+                };
+                let Some(ours) = search(&system) else {
+                    assert_eq!(category, "unsupported", "{id}");
+                    continue;
+                };
+                assert_ne!(category, "unsupported", "{id}");
+                let (ours, theirs) = (ours.into_sorted(), numeric::search(&system).into_sorted());
+                let kind = match (&ours, &theirs) {
+                    (Ok(a), Ok(b)) => {
+                        let within = |x: &[Vec<f64>], y: &[Vec<f64>]| {
+                            x.iter().all(|x| {
+                                y.iter()
+                                    .any(|y| x.iter().zip(y).all(|(u, v)| wrap(u - v).abs() < 1e-6))
+                            })
+                        };
+                        let (a, b) = (&a.solutions, &b.solutions);
+                        if a.len() != b.len() || !within(a, b) || !within(b, a) {
+                            failed.push(format!("{name} {id}: analytic {a:?}\nnumeric {b:?}"));
+                            continue;
+                        }
+                        "solutions"
+                    }
+                    (Err(a), Err(b)) if a == b => match a {
+                        InverseError::Degenerate => "degenerate",
+                        InverseError::NoSolution => "none",
+                        _ => "other error",
+                    },
+                    _ => {
+                        let n = |r: &Result<Found, InverseError>| {
+                            r.as_ref().map(|f| f.solutions.len()).map_err(Clone::clone)
+                        };
+                        failed.push(format!(
+                            "{name} {id} {category}: analytic {:?}, numeric {:?}",
+                            n(&ours),
+                            n(&theirs)
+                        ));
+                        continue;
+                    }
+                };
+                *agreed.entry((name, kind)).or_insert(0) += 1;
+            }
+        }
+        eprintln!("analytic vs numeric: {agreed:?}, failed {}", failed.len());
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
     }
 }

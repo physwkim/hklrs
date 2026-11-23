@@ -7,7 +7,7 @@
 //! [`Equation`]s close the system over its written axes, and its [`Slits`],
 //! if any, are turned into the surface after. Other axes stay at `current`.
 
-pub mod analytic;
+mod analytic;
 pub mod aps_04id_polar;
 pub mod e4c;
 pub mod e6c;
@@ -138,7 +138,7 @@ fn finite(v: &[f64], what: &'static str) -> Result<(), InverseError> {
     }
 }
 
-impl InverseRequest<'_> {
+impl<'a> InverseRequest<'a> {
     /// Every solution found, written axes wrapped to their cut points and
     /// within their limits, held axes exactly `current` (limits or not),
     /// sorted by distance to `current`; `Degenerate` when one is not
@@ -158,6 +158,14 @@ impl InverseRequest<'_> {
     }
 
     fn search(&self) -> Result<validate::Found, InverseError> {
+        let system = self.system()?;
+        analytic::search(&system)
+            .unwrap_or_else(|| solve::search(&system))
+            .into_sorted()
+    }
+
+    /// The mode's equations at the target, once it passes the reach gate.
+    fn system(&self) -> Result<system::System<'a>, InverseError> {
         let geometry = self.mode.geometry();
         geometry.poses(self.current)?;
         finite(self.ub.as_slice(), "UB")?;
@@ -185,8 +193,12 @@ impl InverseRequest<'_> {
         } else {
             q
         };
-        let system = system::System::new(self.mode, self.ub / k, q / k, self.current);
-        solve::search(&system).into_sorted()
+        Ok(system::System::new(
+            self.mode,
+            self.ub / k,
+            q / k,
+            self.current,
+        ))
     }
 }
 
