@@ -7,7 +7,7 @@ pub mod common;
 use common::{f, load, vec3};
 use hklrs::nalgebra::Unit;
 use hklrs::xu::{Area, Direction, Linear};
-use hklrs::{Deg, Geometry, PixelDetector, Wavelength, scattering};
+use hklrs::{Deg, Error, Geometry, PixelDetector, Rad, Wavelength, scattering};
 use serde_json::Value;
 
 const POS_TOL: f64 = 1e-14;
@@ -41,6 +41,9 @@ fn geometry(doc: &Value) -> Geometry {
 }
 
 fn area(p: &Value) -> Area {
+    let (dir1, dir2) = (direction(&p["dir1"]), direction(&p["dir2"]));
+    let cch = [f(&p["cch1"]), f(&p["cch2"])];
+    let nch = [u(&p["nch1"]), u(&p["nch2"])];
     Area {
         tilt: Deg(f(&p["tilt"])),
         tiltazimuth: Deg(f(&p["tiltazimuth"])),
@@ -49,29 +52,32 @@ fn area(p: &Value) -> Area {
         roi: p["roi"]
             .as_array()
             .map(|r| [u(&r[0]), u(&r[1]), u(&r[2]), u(&r[3])]),
-        ..Area::new(
-            direction(&p["dir1"]),
-            direction(&p["dir2"]),
-            [f(&p["cch1"]), f(&p["cch2"])],
-            [u(&p["nch1"]), u(&p["nch2"])],
-            f(&p["distance"]),
-            [f(&p["pwidth1"]), f(&p["pwidth2"])],
-        )
+        ..if p["chpdeg1"].is_null() {
+            Area::new(
+                dir1,
+                dir2,
+                cch,
+                nch,
+                f(&p["distance"]),
+                [f(&p["pwidth1"]), f(&p["pwidth2"])],
+            )
+        } else {
+            Area::from_chpdeg(dir1, dir2, cch, nch, [f(&p["chpdeg1"]), f(&p["chpdeg2"])]).unwrap()
+        }
     }
 }
 
 fn linear(p: &Value) -> Linear {
+    let (dir, cch, nch) = (direction(&p["dir"]), f(&p["cch"]), u(&p["nch"]));
     Linear {
         tilt: Deg(f(&p["tilt"])),
         nav: u(&p["nav"]),
         roi: p["roi"].as_array().map(|r| [u(&r[0]), u(&r[1])]),
-        ..Linear::new(
-            direction(&p["dir"]),
-            f(&p["cch"]),
-            u(&p["nch"]),
-            f(&p["distance"]),
-            f(&p["pwidth"]),
-        )
+        ..if p["chpdeg"].is_null() {
+            Linear::new(dir, cch, nch, f(&p["distance"]), f(&p["pwidth"]))
+        } else {
+            Linear::from_chpdeg(dir, cch, nch, f(&p["chpdeg"])).unwrap()
+        }
     }
 }
 
@@ -173,6 +179,11 @@ fn area_combined() {
 }
 
 #[test]
+fn area_chpdeg() {
+    check_area("chpdeg");
+}
+
+#[test]
 fn linear_plain() {
     check_linear("plain");
 }
@@ -202,11 +213,16 @@ fn linear_combined() {
     check_linear("combined");
 }
 
-/// xu's own Nav output sits on the first raw pixel of a block aligned to
-/// pixel 0, which is why the golden takes Nav cases from the block-grid
-/// reference detector instead.
 #[test]
-fn xu_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block() {
+fn linear_chpdeg() {
+    check_linear("chpdeg");
+}
+
+/// XU-13: xu's own Nav output sits on the first raw pixel of a block
+/// aligned to pixel 0, which is why the golden takes Nav cases from the
+/// block-grid reference detector instead.
+#[test]
+fn xu13_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block() {
     let doc = doc();
     for (kind, linear) in [("area", false), ("linear", true)] {
         for c in array(&doc[kind])
@@ -235,5 +251,46 @@ fn xu_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block() {
                 }
             }
         }
+    }
+}
+
+/// XU-14: a linear row along r_i has no tilt axis. xu zeroes the NaN axis,
+/// which scales the pitch by cos(tilt); hklrs rejects the tilt, and the same
+/// row untilted keeps its pitch.
+#[test]
+fn xu14_tilted_linear_along_r_i_is_rejected_where_xu_scales_its_pitch() {
+    let doc = doc();
+    let c = &doc["linear_along_r_i"];
+    let beam = Unit::new_normalize(vec3(&doc["r_i"]));
+    let tilted = linear(&c["params"]);
+    assert_ne!(tilted.tilt.0, 0.0);
+    assert!(matches!(
+        tilted.detector(beam),
+        Err(Error::ParallelDirections { .. })
+    ));
+
+    let det = Linear {
+        tilt: Deg(0.0),
+        ..tilted.clone()
+    }
+    .detector(beam)
+    .unwrap();
+    let pitch = det.e_fast().norm();
+    assert!(
+        (pitch - tilted.pwidth).abs() <= POS_TOL,
+        "hklrs pitch {pitch}"
+    );
+    let xu = grid(&c["pos"], true).remove(0);
+    let centre = tilted.cch as usize;
+    let err = (det.pixel(0, centre).unwrap().coords - vec3(xu[centre])).norm();
+    assert!(err <= POS_TOL, "centre channel off by {err}");
+    let scaled = pitch * Rad::from(tilted.tilt).0.cos();
+    for k in 1..xu.len() {
+        let xu_pitch = (vec3(xu[k]) - vec3(xu[k - 1])).norm();
+        let err = (xu_pitch - scaled).abs();
+        assert!(
+            err <= POS_TOL,
+            "xu pitch {xu_pitch} is not cos(tilt) * {pitch}"
+        );
     }
 }
