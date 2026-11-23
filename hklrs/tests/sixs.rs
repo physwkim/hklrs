@@ -20,18 +20,13 @@ fn sixs_matches_binoculars() {
             c["iy0"].as_u64().unwrap() as usize,
         );
         let out = sixs(
-            &det.pixel_detector().unwrap(),
+            &det.pixel_detector(),
             (iy0, ix0),
             f(&c["sdd"]),
             f(&c["detrot"]),
         )
         .unwrap();
-        assert_eq!(
-            out.mask(),
-            det.pixel_detector().unwrap().mask(),
-            "{}",
-            det.name()
-        );
+        assert_eq!(out.mask(), det.pixel_detector().mask(), "{}", det.name());
         for p in c["pixels"].as_array().unwrap() {
             let (s, fa) = (
                 p[0].as_u64().unwrap() as usize,
@@ -52,7 +47,7 @@ fn sixs_matches_binoculars() {
 
 #[test]
 fn centre_outside_the_detector_is_an_error() {
-    let det = Detector::Merlin.pixel_detector().unwrap();
+    let det = Detector::Merlin.pixel_detector();
     assert_eq!(
         sixs(&det, (256, 0), 1.0, 0.0),
         Err(Error::PixelOutside {

@@ -1,16 +1,21 @@
-//! The detector table against binoculars-ng 7be4f79 (golden/bin_7be4f79_detectors.c):
-//! shape, pixel positions and mask of every detector. Equal everywhere except
-//! the Pilatus CdTe 2M centre strips, where binoculars is wrong (BIN-1).
+//! The detector table against binoculars-ng 7be4f79 (golden/bin_7be4f79_detectors.c)
+//! and pyFAI 2026.9.0 (golden/pyfai_imxpad.py): shape, pixel positions and
+//! mask of every detector. Equal to binoculars except the Pilatus CdTe 2M
+//! centre strips (BIN-1), the imXpad chip-end pixels (BIN-12) and the
+//! single-precision Cirpad placement (BIN-11).
 
 pub mod common;
 
 use common::{f, load};
-use hklrs::{Detector, Error};
+use hklrs::nalgebra::{Point3, Vector3};
+use hklrs::{Detector, Error, Layout};
 use serde_json::Value;
 
 const POS_TOL: f64 = 1e-14;
-/// Cirpad positions go through single-precision cglm matrices in binoculars.
-const CIRPAD_TOL: f64 = 1e-6;
+/// BIN-11: binoculars stores the Cirpad translations and angles as float and
+/// places the modules in float. The arithmetic gives up to 6.2e-8 m, the
+/// stored values the rest: 1.106e-7 m at most over the golden samples.
+const CIRPAD_TOL: f64 = 1.11e-7;
 
 fn doc() -> Value {
     load("bin_7be4f79_detectors.json")
@@ -18,6 +23,16 @@ fn doc() -> Value {
 
 fn u(v: &Value) -> usize {
     v.as_u64().unwrap() as usize
+}
+
+fn floats(v: &Value) -> Vec<f64> {
+    v.as_array().unwrap().iter().map(f).collect()
+}
+
+/// Doubles a golden writes as decimal strings, read to the bit.
+fn exact(v: &Value) -> Vec<f64> {
+    let parse = |x: &Value| x.as_str().unwrap().parse().unwrap();
+    v.as_array().unwrap().iter().map(parse).collect()
 }
 
 fn golden_mask(d: &Value, len: usize) -> Vec<bool> {
@@ -33,8 +48,17 @@ fn detector(d: &Value) -> Detector {
     Detector::try_from(d["id"].as_u64().unwrap() as u32).unwrap()
 }
 
-fn is_regular(det: Detector) -> bool {
-    det.pixel_detector().is_ok()
+/// BIN-12: binoculars' minus pyFAI's centre of pixel `i` of `n` in chips of
+/// `chip`, in pitches along the axis: binoculars puts the last pixel of a
+/// chip at its far edge, and makes the detector's last pixel wide too.
+fn bin_12_offset(i: usize, n: usize, chip: usize) -> f64 {
+    if i == n - 1 {
+        2.0
+    } else if i % chip == chip - 1 {
+        1.25
+    } else {
+        0.0
+    }
 }
 
 #[test]
@@ -55,38 +79,108 @@ fn name_and_shape() {
 fn pixel_positions() {
     for d in doc()["detectors"].as_array().unwrap() {
         let det = detector(d);
-        if let Some(samples) = d.get("samples") {
-            for s in samples.as_array().unwrap() {
-                let p = det.pixel(u(&s[0]), u(&s[1])).unwrap();
-                for (k, got) in p.iter().enumerate() {
-                    let err = (got - f(&s[2 + k])).abs();
-                    assert!(
-                        err < CIRPAD_TOL,
-                        "{} {s}: axis {k} off by {err}",
-                        det.name()
-                    );
-                }
-            }
+        if det == Detector::Cirpad {
             continue;
         }
-        let y: Vec<f64> = d["y"].as_array().unwrap().iter().map(f).collect();
-        let z: Vec<f64> = d["z"].as_array().unwrap().iter().map(f).collect();
-        let grid = det.pixel_detector().ok();
+        let row = det.row();
+        let (h, w) = row.shape;
+        let chip = match row.layout {
+            Layout::Chips { chip } => Some(chip),
+            _ => None,
+        };
+        // binoculars is farther along -y and along the rows' z than hklrs
+        let sz = if row.flip_z { -1.0 } else { 1.0 };
+        let dy = |i| chip.map_or(0.0, |c| bin_12_offset(i, w, c.1) * row.pitch);
+        let dz = |j| chip.map_or(0.0, |c| bin_12_offset(j, h, c.0) * row.pitch);
+        let (y, z) = (floats(&d["y"]), floats(&d["z"]));
+        let pd = det.pixel_detector();
         for (j, &zj) in z.iter().enumerate() {
             for (i, &yi) in y.iter().enumerate() {
-                let direct = det.pixel(j, i).unwrap();
-                let via_grid = grid.as_ref().map(|g| g.pixel(j, i).unwrap());
-                for p in std::iter::once(direct).chain(via_grid) {
-                    let err = p.x.abs().max((p.y - yi).abs()).max((p.z - zj).abs());
-                    assert!(
-                        err < POS_TOL,
-                        "{} pixel ({j}, {i}) off by {err}",
-                        det.name()
-                    );
-                }
+                let p = pd.pixel(j, i).unwrap();
+                let err =
+                    p.x.abs()
+                        .max((p.y - (yi + dy(i))).abs())
+                        .max((p.z - (zj - sz * dz(j))).abs());
+                assert!(
+                    err < POS_TOL,
+                    "{} pixel ({j}, {i}) off by {err}",
+                    det.name()
+                );
             }
         }
     }
+}
+
+/// The imXpad pixels are pyFAI's edges and centres to the bit.
+#[test]
+fn imxpad_pixels_are_pyfai() {
+    for g in load("pyfai_imxpad.json")["detectors"].as_array().unwrap() {
+        let det = Detector::ALL
+            .into_iter()
+            .find(|d| d.name() == g["name"])
+            .unwrap();
+        let row = det.row();
+        assert_eq!(row.shape, (u(&g["shape"][0]), u(&g["shape"][1])));
+        assert_eq!(
+            row.layout,
+            Layout::Chips {
+                chip: (u(&g["module"][0]), u(&g["module"][1]))
+            }
+        );
+        assert_eq!([row.pitch; 2], [f(&g["pixel"][0]), f(&g["pixel"][1])]);
+        let pd = det.pixel_detector();
+        let [m] = pd.modules() else {
+            panic!("{}: one module", det.name())
+        };
+        let (c1, c2) = (exact(&g["centre1"]), exact(&g["centre2"]));
+        for (axis, edges, centres) in [
+            (m.slow(), exact(&g["edges1"]), &c1),
+            (m.fast(), exact(&g["edges2"]), &c2),
+        ] {
+            assert_eq!(axis.pixel_count(), centres.len());
+            for (i, &c) in centres.iter().enumerate() {
+                assert_eq!(axis.centre(i), c, "{} pixel {i}", det.name());
+                assert_eq!(axis.width(i), edges[i + 1] - edges[i]);
+            }
+        }
+        for (j, &cj) in c1.iter().enumerate() {
+            for (i, &ci) in c2.iter().enumerate() {
+                assert_eq!(pd.pixel(j, i).unwrap(), Point3::new(0.0, -ci, cj));
+            }
+        }
+    }
+}
+
+/// BIN-11: binoculars places the Cirpad modules in single precision; each
+/// module is an S70 whose chip-end pixels are also BIN-12's.
+#[test]
+fn bin_11_cirpad_placed_in_single_precision() {
+    let d = &doc()["detectors"][Detector::Cirpad as usize];
+    assert_eq!(detector(d), Detector::Cirpad);
+    let pd = Detector::Cirpad.pixel_detector();
+    let pitch = Detector::Cirpad.row().pitch;
+    let samples = d["samples"].as_array().unwrap();
+    assert!(!samples.is_empty());
+    let mut worst = 0.0f64;
+    for s in samples {
+        let (j, i) = (u(&s[0]), u(&s[1]));
+        let m = pd
+            .modules()
+            .iter()
+            .find(|m| (m.at().0..m.at().0 + m.shape().0).contains(&j))
+            .unwrap();
+        let (h, w) = m.shape();
+        let (slow, fast) = (m.slow().dir().unwrap(), m.fast().dir().unwrap());
+        let bin_12 = slow.into_inner() * (bin_12_offset(j - m.at().0, h, 120) * pitch)
+            + fast.into_inner() * (bin_12_offset(i, w, 80) * pitch);
+        let want = Vector3::new(f(&s[2]), f(&s[3]), f(&s[4]));
+        let err = (want - pd.pixel(j, i).unwrap().coords - bin_12).abs().max();
+        worst = worst.max(err);
+    }
+    assert!(
+        worst > 1e-9 && worst <= CIRPAD_TOL,
+        "largest Cirpad error {worst}"
+    );
 }
 
 /// Columns 729..732 and 1216..1219 are what binoculars masks as the strips of
@@ -168,22 +262,22 @@ fn bin_2_unknown_id_is_an_error() {
 }
 
 #[test]
-fn irregular_detectors_have_no_pixel_detector() {
-    let irregular: Vec<_> = Detector::ALL
-        .into_iter()
-        .filter(|d| !is_regular(*d))
-        .collect();
-    assert_eq!(
-        irregular,
-        [
-            Detector::ImxpadS140,
-            Detector::ImxpadS70,
-            Detector::MerlinMedipix3RxQuad512,
-            Detector::Cirpad
-        ]
-    );
-    assert_eq!(
-        Detector::Cirpad.pixel_detector(),
-        Err(Error::DetectorNotRegular { name: "Cirpad" })
-    );
+fn every_row_is_a_pixel_detector_with_its_mask() {
+    for det in Detector::ALL {
+        let pd = det.pixel_detector();
+        assert_eq!(pd.shape(), det.shape(), "{}", det.name());
+        let mask = det.mask();
+        assert_eq!(
+            pd.mask(),
+            mask.contains(&true).then_some(&mask[..]),
+            "{}",
+            det.name()
+        );
+        let modules = match det {
+            Detector::MerlinMedipix3RxQuad512 => 4,
+            Detector::Cirpad => 20,
+            _ => 1,
+        };
+        assert_eq!(pd.modules().len(), modules, "{}", det.name());
+    }
 }
