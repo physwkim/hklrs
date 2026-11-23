@@ -1011,7 +1011,7 @@ impl PyPoniFile {
     }
 
     #[getter]
-    fn binning(&self) -> (u64, u64) {
+    fn binning(&self) -> Option<(u64, u64)> {
         self.0.detector.binning
     }
 

@@ -119,7 +119,8 @@ def test_parse_reads_pyfai_s_own_files(entry, lab):
                                                    entry["parallax"])
     assert (f.pixel1, f.pixel2) == (entry["pixel1"], entry["pixel2"])
     assert (f.orientation or 3) == entry["orientation"]
-    assert (f.binning, f.splinefile) == ((1, 1), None)
+    # no binning key: the class's default instance keeps its own
+    assert (f.binning, f.splinefile) == (None, None)
     for k in ("dist", "poni1", "poni2"):
         assert getattr(f, k) == entry[k], k
     for k in ("rot1", "rot2", "rot3"):
