@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["hklrs", "hklrs-py"]
+members = ["hklrs", "hklrs-py", "hklrs-bsrs"]
 
 [workspace.package]
 version = "0.1.0"

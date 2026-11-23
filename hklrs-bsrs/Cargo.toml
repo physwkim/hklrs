@@ -1,0 +1,20 @@
+[package]
+name = "hklrs-bsrs"
+description = "bsrs diffractometer device, pseudo axes and plans over hklrs"
+version.workspace = true
+edition.workspace = true
+# bsrs's own floor
+rust-version = "1.98"
+license.workspace = true
+publish = false
+
+[dependencies]
+hklrs = { path = "../hklrs" }
+bsrs = { version = "=0.6.2", default-features = false }
+async-trait = "0.1"
+futures = "0.3"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
