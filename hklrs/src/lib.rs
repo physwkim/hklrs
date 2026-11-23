@@ -15,6 +15,7 @@ pub mod inverse;
 mod lattice;
 pub mod poni;
 pub mod presets;
+pub mod projection;
 pub mod pseudo;
 mod qmap;
 mod sample;
