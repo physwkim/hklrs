@@ -2,4 +2,5 @@
  "merged_offset0": {"cube_new_merge": 1903, "from_axes": 3663},
  "loads": {
   "bin_7be4f79_cube.h5": {"loaded": true, "axes": true, "offset0": true, "photons": true, "contributions": true, "cube_cmp": 0},
+  "bin_7be4f79_cube_gzip.h5": {"loaded": true, "axes": true, "offset0": true, "photons": true, "contributions": true, "cube_cmp": 0},
   "hklrs_7be4f79_cube.h5": {"loaded": true, "axes": true, "offset0": true, "photons": true, "contributions": true, "cube_cmp": 0}}}
