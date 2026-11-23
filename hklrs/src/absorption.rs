@@ -45,7 +45,7 @@ pub enum Masked {
     Detector,
     /// The flat field has no usable gain here.
     BadFlat,
-    /// A raw count that is NaN or infinite.
+    /// The counts are NaN or infinite (`Normalised::new` refuses them).
     BadCount,
 }
 

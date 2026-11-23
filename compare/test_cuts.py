@@ -170,7 +170,12 @@ def test_xu_19_nan_intensity_is_not_a_contribution(monkeypatch):
     x, _, mask = res
     cut = build("qz", "q", [pos[0], pos[1], 0.0], 0.4, x)
     r = accumulate(cut, q, inten, hc.Footprint.point())
-    assert r.skipped["non_finite"] == len(hit)
+    assert r.skipped["BadCount"] == len(hit)
+    # the counts rank ahead of the weight: weight 0 is Opaque only where the counts are finite
+    w = np.ones(N)
+    w[hit] = w[sel[1]] = 0.0
+    r0 = accumulate(cut, q, inten, hc.Footprint.point(), weight=w)
+    assert (r0.skipped["BadCount"], r0.skipped["Opaque"]) == (len(hit), 1)
     # xu's mask is per pixel and still marks the NaN pixels used, though its gridder drops them
     assert int(mask.sum()) == len(sel) and mask.ravel()[hit].all()
     assert int(r.contributions.sum()) == len(sel) - len(hit)

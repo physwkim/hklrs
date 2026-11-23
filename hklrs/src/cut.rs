@@ -319,10 +319,10 @@ impl Bin {
 /// in the first cause that applies, in the order of the fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Skipped {
+    /// By reason; counts that are NaN or infinite are `BadCount`, as
+    /// `Normalised::new` refuses them. xu reports such a pixel as used
+    /// while its gridder drops it (XU-19).
     masked: [u64; MASKED.len()],
-    /// An accumulated `Normalised` whose counts are NaN or infinite. xu
-    /// reports such a pixel as used while its gridder drops it (XU-19).
-    pub non_finite: u64,
     /// No usable coordinate: the Q is beyond 2k or out of reach of the cut
     /// so the distance is NaN, or the coordinate has no bin.
     pub no_coordinate: u64,
@@ -365,14 +365,13 @@ impl Skipped {
     }
 
     pub fn total(&self) -> u64 {
-        self.masked.iter().sum::<u64>() + self.non_finite + self.no_coordinate + self.outside
+        self.masked.iter().sum::<u64>() + self.no_coordinate + self.outside
     }
 
     fn add(&mut self, other: &Self) {
         for (a, b) in self.masked.iter_mut().zip(other.masked) {
             *a += b;
         }
-        self.non_finite += other.non_finite;
         self.no_coordinate += other.no_coordinate;
         self.outside += other.outside;
     }
@@ -446,8 +445,8 @@ impl CutResult {
 
     fn put(&mut self, bin: i64, fraction: f64, n: &Normalised) {
         let b = self.bins.entry(bin).or_default();
-        b.counts += fraction * n.counts;
-        b.weight += fraction * n.weight.get();
+        b.counts += fraction * n.counts();
+        b.weight += fraction * n.weight().get();
         b.contributions += 1;
     }
 }
@@ -487,10 +486,6 @@ impl Cut {
                     continue;
                 }
             };
-            if !n.counts.is_finite() {
-                out.skipped.non_finite += 1;
-                continue;
-            }
             let c = self.cutting(&q, wavelength);
             if c.perp.is_nan() || !c.along.is_finite() {
                 out.skipped.no_coordinate += 1;
@@ -634,10 +629,7 @@ mod tests {
         let weight = Weight::new(5e-324, Masked::Opaque).unwrap();
         let px = [(
             Vector3::new(0.0, 0.0, 1.25),
-            Ok(Normalised {
-                counts: 8.0,
-                weight,
-            }),
+            Normalised::new(8.0, Ok(weight)),
         )];
         // [0.75, 1.75]: a quarter in bin 0, three quarters in bin 1
         let r = c.accumulate(lam(), Footprint::Width(1.0), px).unwrap();
@@ -647,6 +639,29 @@ mod tests {
         let v: Vec<_> = r.intensity().collect();
         assert_eq!(v[0], (0, None));
         assert!(matches!(v[1], (1, Some(_))));
+    }
+
+    #[test]
+    fn a_nan_count_is_masked_as_bad_count_and_adds_nothing() {
+        let c = Cut::new(
+            CutKind::Qz,
+            IntDir::Q,
+            [0.0; 3],
+            1.0,
+            Binning::new(1.0, 0.0).unwrap(),
+        )
+        .unwrap();
+        let one = Weight::new(1.0, Masked::Opaque);
+        let q = Vector3::new(0.0, 0.0, 0.5);
+        let px = [
+            (q, Normalised::new(2.0, one)),
+            (q, Normalised::new(f64::NAN, one)),
+        ];
+        let r = c.accumulate(lam(), Footprint::Point, px).unwrap();
+        assert_eq!(r.skipped().masked(Masked::BadCount), 1);
+        assert_eq!(r.skipped().total(), 1);
+        let b = r.get(0).unwrap();
+        assert_eq!((b.counts, b.weight, b.contributions), (2.0, 1.0, 1));
     }
 
     #[test]

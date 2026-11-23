@@ -198,8 +198,9 @@ impl PyCut {
 
     /// Sums the pixels over the cut. `q` is (N, 3) in Å⁻¹, `counts` and
     /// `weight` are length N, `reasons` is a length-N uint8 array of
-    /// `Masked` codes, 0 for a pixel with a value; a reason wins over the
-    /// weight, and a weight that is not positive and finite is `Opaque`.
+    /// `Masked` codes, 0 for a pixel with a value. A reason wins over the
+    /// counts, counts that are not finite are `BadCount`, and then a weight
+    /// that is not positive and finite is `Opaque`.
     fn accumulate(
         &self,
         wavelength: f64,
@@ -239,10 +240,7 @@ impl PyCut {
             .map(|i| {
                 let value = match reason(reasons[i])? {
                     Some(m) => Err(m),
-                    None => Weight::new(weight[i], Masked::Opaque).map(|weight| Normalised {
-                        counts: counts[i],
-                        weight,
-                    }),
+                    None => Normalised::new(counts[i], Weight::new(weight[i], Masked::Opaque)),
                 };
                 Ok((Vector3::new(q[[i, 0]], q[[i, 1]], q[[i, 2]]), value))
             })
@@ -329,7 +327,7 @@ impl PyCutResult {
     }
 
     /// Pixels not accumulated, by cause: every `Masked` name, then
-    /// "non_finite", "no_coordinate" and "outside".
+    /// "no_coordinate" and "outside".
     #[getter]
     fn skipped<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let s = self.result.skipped();
@@ -337,7 +335,6 @@ impl PyCutResult {
         for m in MASKED {
             d.set_item(format!("{m:?}"), s.masked(m))?;
         }
-        d.set_item("non_finite", s.non_finite)?;
         d.set_item("no_coordinate", s.no_coordinate)?;
         d.set_item("outside", s.outside)?;
         Ok(d)

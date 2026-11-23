@@ -261,8 +261,9 @@ fn width_footprint_is_xu_fuzzy_gridder1d() {
 }
 
 /// XU-19: xu's used-mask counts a selected pixel whose intensity is NaN
-/// although its gridder drops it; here it is counted as non-finite and
-/// contributes to no bin, and the other pixels still give xu's gridded values.
+/// although its gridder drops it; here `Normalised::new` masks it as
+/// `BadCount`, it contributes to no bin, and the other pixels still give
+/// xu's gridded values.
 #[test]
 fn xu_19_nan_intensity_is_not_a_contribution() {
     let doc = load("xu_cuts.json");
@@ -281,13 +282,9 @@ fn xu_19_nan_intensity_is_not_a_contribution() {
         .collect();
     assert!(hit.len() > 3);
     let mut px = unit_pixels(&intensity(&doc, c));
-    // the normaliser itself masks a NaN raw count
-    let w = px[0].unwrap().weight;
+    let w = px[0].unwrap().weight();
     for &i in &hit {
-        px[i] = Ok(Normalised {
-            counts: f64::NAN,
-            weight: w,
-        });
+        px[i] = Normalised::new(f64::NAN, Ok(w));
     }
     let xu_used: i64 = c["mask"]
         .as_array()
@@ -303,7 +300,7 @@ fn xu_19_nan_intensity_is_not_a_contribution() {
         .cut
         .accumulate(s.wl, Footprint::Width(s.width), zip(&s.q, px.clone()))
         .unwrap();
-    assert_eq!(r.skipped().non_finite as usize, hit.len());
+    assert_eq!(r.skipped().masked(Masked::BadCount) as usize, hit.len());
     // a point footprint puts one contribution per accepted pixel
     let p = s
         .cut
@@ -311,7 +308,7 @@ fn xu_19_nan_intensity_is_not_a_contribution() {
         .unwrap();
     let contributing: u64 = p.bins().map(|(_, b)| b.contributions).sum();
     assert_eq!(contributing as i64, xu_used - hit.len() as i64);
-    assert_eq!(p.skipped().non_finite as usize, hit.len());
+    assert_eq!(p.skipped().masked(Masked::BadCount) as usize, hit.len());
     assert!(
         r.bins()
             .all(|(_, b)| b.counts.is_finite() && b.weight.is_finite())
@@ -334,7 +331,6 @@ fn a_nan_raw_count_is_masked_by_the_normaliser_and_counted_by_reason() {
         .unwrap();
     assert_eq!(r.skipped().masked(Masked::BadCount), 1);
     assert_eq!(r.skipped().masked(Masked::Unlit), 0);
-    assert_eq!(r.skipped().non_finite, 0);
 }
 
 #[test]

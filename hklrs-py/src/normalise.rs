@@ -213,7 +213,7 @@ impl PyNormaliser {
             .data
             .iter()
             .map(|p| match p {
-                Ok(p) => (p.counts, p.weight.get(), 0),
+                Ok(p) => (p.counts(), p.weight().get(), 0),
                 Err(m) => (f64::NAN, f64::NAN, masked_code(*m)),
             })
             .collect();
