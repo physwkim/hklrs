@@ -115,6 +115,8 @@ fn refusal(c: &Value, e: &Value, outcome: &Value) -> Option<PoniError> {
             pixel: (pitch(&e["pixel"][0]), pitch(&e["pixel"][1])),
             binning: ints(&e["binning"]),
             shape: ints(&e["shape"]),
+            class_pixel: (pitch(&c["pixel"][0]), pitch(&c["pixel"][1])),
+            class_binning: (ints(&c["binning"]).0 as u64, ints(&c["binning"]).1 as u64),
         });
     }
     let (n0, n1) = pair(&e["shape"]);
@@ -315,14 +317,25 @@ fn config_other_than_the_default_instance_is_refused() {
         assert_eq!(det.shape(), shape, "{name} {b}");
     }
     // Detector.__init__ keeps a pitch Pilatus1M's is not, unbinned
+    let refused = file("Pilatus1M", r#"{"pixel1": 1e-4}"#).detector(&lab);
     assert_eq!(
-        file("Pilatus1M", r#"{"pixel1": 1e-4}"#).detector(&lab),
+        refused,
         Err(PoniError::Inconsistent {
             class: "Pilatus1M",
             pixel: (1e-4, 172e-6),
             binning: (1, 1),
-            shape: (1043, 981)
+            shape: (1043, 981),
+            class_pixel: (172e-6, 172e-6),
+            class_binning: (1, 1),
         })
+    );
+    let text = refused.unwrap_err().to_string();
+    assert!(
+        text.ends_with(
+            "Pilatus1M defines its own pixel, (0.000172, 0.000172) at binning (1, 1), \
+             and another pitch belongs on the generic Detector"
+        ),
+        "{text}"
     );
     // ImXPad's chip edges span max_shape whatever the binning
     assert!(matches!(

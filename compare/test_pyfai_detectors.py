@@ -60,6 +60,12 @@ def agrees(c, e):
     return True
 
 
+def rust_f64(text):
+    """Rust's Debug of the float `text`: Python's repr, its exponent unpadded"""
+    m = re.fullmatch(r"(.*)e([+-])0*(\d+)", repr(float(text)))
+    return f"{m[1]}e{'-' if m[2] == '-' else ''}{m[3]}" if m else repr(float(text))
+
+
 def refusal(c, e, outcome):
     """the ValueError text of a file of class c that pyFAI reads as e, its
     instance's facts, with outcome the exception the read or the mask
@@ -73,7 +79,10 @@ def refusal(c, e, outcome):
         if e["pixel"][k] is None:
             return f"pyFAI builds detector {name} from the file with no pixel{k + 1}"
     if not agrees(c, e):
-        return f"pyFAI builds detector {name} of pitch .* which disagree"
+        own = ", ".join(rust_f64(p) for p in c["pixel"])
+        return f"pyFAI builds detector {name} of pitch .* which disagree; " + re.escape(
+            f"{name} defines its own pixel, ({own}) at binning {tuple(c['binning'])}, "
+            "and another pitch belongs on the generic Detector")
     if 0 in e["shape"]:
         return "detector shape must be non-zero"
     if "mask_error" in outcome:

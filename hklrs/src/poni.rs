@@ -62,13 +62,16 @@ pub enum PoniError {
         key: &'static str,
     },
     #[error(
-        "pyFAI builds detector {class} of pitch {pixel:?}, binning {binning:?} and shape {shape:?} from the file, which disagree as the class's do not"
+        "pyFAI builds detector {class} of pitch {pixel:?}, binning {binning:?} and shape {shape:?} from the file, which disagree; {class} defines its own pixel, {class_pixel:?} at binning {class_binning:?}, and another pitch belongs on the generic Detector"
     )]
     Inconsistent {
         class: &'static str,
         pixel: (f64, f64),
         binning: (i64, i64),
         shape: (i64, i64),
+        /// The pitch and binning of the class's default instance.
+        class_pixel: (f64, f64),
+        class_binning: (u64, u64),
     },
     #[error(
         "pyFAI detector {class} binned {binning:?}: its mask over {max_shape:?} does not bin, and pyFAI's Detector.mask raises"
@@ -705,6 +708,8 @@ impl PoniFile {
                     ),
                     binning: (built.binning[0], built.binning[1]),
                     shape: (built.shape[0], built.shape[1]),
+                    class_pixel: grid.pixel,
+                    class_binning: grid.binning,
                 },
             })?;
         let orientation = match d.orientation.filter(|_| takes("orientation")) {
