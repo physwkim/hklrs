@@ -4,6 +4,7 @@
 mod calib;
 mod cut;
 mod normalise;
+mod pseudo_set;
 
 use hklrs::absorption::{Absorber, Beam, DetectorPath, Face, Layer, Masked, Slab};
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
@@ -1446,6 +1447,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(psi, m)?)?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(pseudo, m)?)?;
+    pseudo_set::register(m)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
     m.add_function(wrap_pyfunction!(detectors, m)?)?;
     m.add_function(wrap_pyfunction!(detector, m)?)?;
