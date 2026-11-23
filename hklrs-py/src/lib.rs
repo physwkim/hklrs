@@ -2,7 +2,7 @@
 //! translations metres, wavelength Å.
 
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
-use hklrs::xu;
+use hklrs::{poni, xu};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -501,7 +501,8 @@ fn pseudo(
 }
 
 /// Pixels in the detector-arm frame (all axes zero), metres. Built by the
-/// xu importers; opaque apart from its shape, mask and pixel positions.
+/// xu and PONI importers; opaque apart from its shape, mask and pixel
+/// positions.
 #[pyclass(name = "PixelDetector", frozen)]
 struct PyPixelDetector(hklrs::PixelDetector);
 
@@ -563,16 +564,15 @@ fn xu_direction(text: &str) -> PyResult<xu::Direction> {
     text.parse().map_err(err)
 }
 
-/// `r_i` of the frame the direction strings are given in.
-fn xu_beam(beam: [f64; 3]) -> PyResult<Unit<Vector3<f64>>> {
-    let v = Vector3::from(beam);
+fn unit(what: &str, v: [f64; 3]) -> PyResult<Unit<Vector3<f64>>> {
+    let v = Vector3::from(v);
     v.iter()
         .all(|x| x.is_finite())
         .then(|| Unit::try_new(v, 0.0))
         .flatten()
         .ok_or_else(|| {
             err(hklrs::Error::ZeroVector {
-                what: "xu beam".to_owned(),
+                what: what.to_owned(),
             })
         })
 }
@@ -656,7 +656,7 @@ impl PyXuArea {
     /// strings are given in.
     fn detector(&self, beam: [f64; 3]) -> PyResult<PyPixelDetector> {
         self.0
-            .detector(xu_beam(beam)?)
+            .detector(unit("xu beam", beam)?)
             .map(PyPixelDetector)
             .map_err(err)
     }
@@ -719,10 +719,241 @@ impl PyXuLinear {
     /// string is given in.
     fn detector(&self, beam: [f64; 3]) -> PyResult<PyPixelDetector> {
         self.0
-            .detector(xu_beam(beam)?)
+            .detector(unit("xu beam", beam)?)
             .map(PyPixelDetector)
             .map_err(err)
     }
+}
+
+fn poni_err(e: poni::PoniError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+fn orientation(n: u32) -> PyResult<poni::Orientation> {
+    poni::Orientation::try_from(n).map_err(poni_err)
+}
+
+/// pyFAI's axes in the lab: axis 3 along `beam`, axis 1 along the part of
+/// `up` normal to it.
+fn lab_axes(beam: [f64; 3], up: [f64; 3]) -> PyResult<poni::LabAxes> {
+    poni::LabAxes::new(unit("beam", beam)?, unit("up", up)?).map_err(poni_err)
+}
+
+fn degrees(r: hklrs::Rad) -> f64 {
+    hklrs::Deg::from(r).0
+}
+
+fn radians(d: f64) -> hklrs::Rad {
+    hklrs::Deg(d).into()
+}
+
+/// pyFAI's geometry of a flat detector, lengths in metres and rotations in
+/// degrees (a `.poni` file's are radians): `Poni(dist, (poni1, poni2),
+/// (rot1, rot2, rot3), (pixel1, pixel2), shape, orientation)`, `shape` being
+/// (slow, fast) = pyFAI's (dim1, dim2) and `orientation` pyFAI's 1-4.
+#[pyclass(name = "Poni", module = "hklrs.poni", frozen)]
+struct PyPoni(poni::Poni);
+
+#[pymethods]
+impl PyPoni {
+    #[new]
+    fn new(
+        dist: f64,
+        poni: [f64; 2],
+        rot: [f64; 3],
+        pixel: [f64; 2],
+        shape: (usize, usize),
+        orientation: u32,
+    ) -> PyResult<Self> {
+        Ok(Self(poni::Poni {
+            dist,
+            poni1: poni[0],
+            poni2: poni[1],
+            rot1: radians(rot[0]),
+            rot2: radians(rot[1]),
+            rot3: radians(rot[2]),
+            pixel1: pixel[0],
+            pixel2: pixel[1],
+            shape,
+            orientation: self::orientation(orientation)?,
+        }))
+    }
+
+    /// The PONI of `detector` read in `orientation`, lab axes as for
+    /// `detector`, whose `detector` gives `detector` back. rot2 comes out in
+    /// [-90, 90] and rot1, rot3 in [-180, 180].
+    #[staticmethod]
+    fn from_detector(
+        detector: &PyPixelDetector,
+        orientation: u32,
+        beam: [f64; 3],
+        up: [f64; 3],
+    ) -> PyResult<Self> {
+        let lab = lab_axes(beam, up)?;
+        poni::Poni::from_detector(&detector.0, self::orientation(orientation)?, &lab)
+            .map(Self)
+            .map_err(poni_err)
+    }
+
+    /// The detector with pyFAI's axis 3 along `beam` and axis 1 along the
+    /// part of `up` normal to it, positions relative to the sample.
+    fn detector(&self, beam: [f64; 3], up: [f64; 3]) -> PyResult<PyPixelDetector> {
+        self.0
+            .detector(&lab_axes(beam, up)?)
+            .map(PyPixelDetector)
+            .map_err(poni_err)
+    }
+
+    #[getter]
+    fn dist(&self) -> f64 {
+        self.0.dist
+    }
+
+    #[getter]
+    fn poni1(&self) -> f64 {
+        self.0.poni1
+    }
+
+    #[getter]
+    fn poni2(&self) -> f64 {
+        self.0.poni2
+    }
+
+    #[getter]
+    fn rot1(&self) -> f64 {
+        degrees(self.0.rot1)
+    }
+
+    #[getter]
+    fn rot2(&self) -> f64 {
+        degrees(self.0.rot2)
+    }
+
+    #[getter]
+    fn rot3(&self) -> f64 {
+        degrees(self.0.rot3)
+    }
+
+    #[getter]
+    fn pixel1(&self) -> f64 {
+        self.0.pixel1
+    }
+
+    #[getter]
+    fn pixel2(&self) -> f64 {
+        self.0.pixel2
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        self.0.shape
+    }
+
+    #[getter]
+    fn orientation(&self) -> u32 {
+        self.0.orientation as u32
+    }
+}
+
+/// A `.poni` file as pyFAI reads it, lengths in metres and rotations in
+/// degrees. `detector` is pyFAI's detector name; `orientation` is None where
+/// the file gives none, which is 3 for pyFAI's generic `Detector`.
+#[pyclass(name = "PoniFile", module = "hklrs.poni", frozen)]
+struct PyPoniFile(poni::PoniFile);
+
+#[pymethods]
+impl PyPoniFile {
+    /// The PONI of pyFAI's generic flat detector. A named detector takes its
+    /// pixels, shape and default orientation from pyFAI, so it is a
+    /// ValueError here, as are a spline, parallax and binning.
+    fn poni(&self) -> PyResult<PyPoni> {
+        self.0.poni().map(PyPoni).map_err(poni_err)
+    }
+
+    /// `poni_version` as pyFAI raises it from the file's contents.
+    #[getter]
+    fn version(&self) -> f64 {
+        self.0.version
+    }
+
+    #[getter]
+    fn detector(&self) -> &str {
+        &self.0.detector.name
+    }
+
+    #[getter]
+    fn pixel1(&self) -> Option<f64> {
+        self.0.detector.pixel1
+    }
+
+    #[getter]
+    fn pixel2(&self) -> Option<f64> {
+        self.0.detector.pixel2
+    }
+
+    #[getter]
+    fn max_shape(&self) -> Option<(usize, usize)> {
+        self.0.detector.max_shape
+    }
+
+    #[getter]
+    fn orientation(&self) -> Option<u32> {
+        self.0.detector.orientation.map(|o| o as u32)
+    }
+
+    #[getter]
+    fn binning(&self) -> (u64, u64) {
+        self.0.detector.binning
+    }
+
+    #[getter]
+    fn splinefile(&self) -> Option<&str> {
+        self.0.detector.splinefile.as_deref()
+    }
+
+    #[getter]
+    fn parallax(&self) -> bool {
+        self.0.parallax
+    }
+
+    #[getter]
+    fn dist(&self) -> f64 {
+        self.0.dist
+    }
+
+    #[getter]
+    fn poni1(&self) -> f64 {
+        self.0.poni1
+    }
+
+    #[getter]
+    fn poni2(&self) -> f64 {
+        self.0.poni2
+    }
+
+    #[getter]
+    fn rot1(&self) -> f64 {
+        degrees(self.0.rot1)
+    }
+
+    #[getter]
+    fn rot2(&self) -> f64 {
+        degrees(self.0.rot2)
+    }
+
+    #[getter]
+    fn rot3(&self) -> f64 {
+        degrees(self.0.rot3)
+    }
+}
+
+/// The `.poni` text as pyFAI reads it, and beside it the file's wavelength
+/// (Å), None if it gives none.
+#[pyfunction]
+fn parse(text: &str) -> PyResult<(PyPoniFile, Option<f64>)> {
+    let file = poni::PoniFile::parse(text).map_err(poni_err)?;
+    let wavelength = file.wavelength.map(hklrs::Wavelength::angstrom);
+    Ok((PyPoniFile(file), wavelength))
 }
 
 type Planes<'py> = (
@@ -777,6 +1008,21 @@ fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
 }
 
+fn submodule(
+    m: &Bound<'_, PyModule>,
+    name: &str,
+    fill: impl FnOnce(&Bound<'_, PyModule>) -> PyResult<()>,
+) -> PyResult<()> {
+    let sub = PyModule::new(m.py(), name)?;
+    fill(&sub)?;
+    m.add_submodule(&sub)?;
+    // lets `import hklrs.<name>` find the submodule of an extension module
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item(format!("hklrs.{name}"), &sub)
+}
+
 #[pymodule]
 #[pyo3(name = "hklrs")]
 fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -786,15 +1032,15 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySample>()?;
     m.add_class::<PyMode>()?;
     m.add_class::<PyPixelDetector>()?;
-    let xu = PyModule::new(m.py(), "xu")?;
-    xu.add_class::<PyXuArea>()?;
-    xu.add_class::<PyXuLinear>()?;
-    m.add_submodule(&xu)?;
-    // lets `import hklrs.xu` find the submodule of an extension module
-    m.py()
-        .import("sys")?
-        .getattr("modules")?
-        .set_item("hklrs.xu", &xu)?;
+    submodule(m, "xu", |xu| {
+        xu.add_class::<PyXuArea>()?;
+        xu.add_class::<PyXuLinear>()
+    })?;
+    submodule(m, "poni", |p| {
+        p.add_class::<PyPoni>()?;
+        p.add_class::<PyPoniFile>()?;
+        p.add_function(wrap_pyfunction!(parse, p)?)
+    })?;
     m.add("InverseError", m.py().get_type::<InverseError>())?;
     m.add("Unreachable", m.py().get_type::<Unreachable>())?;
     m.add("NoSolution", m.py().get_type::<NoSolution>())?;
