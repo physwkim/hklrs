@@ -169,6 +169,17 @@ impl KappaAxes {
     pub fn axes(&self) -> [usize; 3] {
         self.axes
     }
+
+    /// `values` (every axis) with the arm at its [`KappaArm::twin`]: the
+    /// same sample rotation.
+    pub(super) fn twin(&self, values: &[f64]) -> Vec<f64> {
+        let mut twin = values.to_vec();
+        let k = self.arm.twin(self.axes.map(|i| values[i]));
+        for (&i, v) in self.axes.iter().zip(k) {
+            twin[i] = v;
+        }
+        twin
+    }
 }
 
 #[cfg(test)]

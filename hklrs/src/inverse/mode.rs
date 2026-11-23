@@ -148,7 +148,8 @@ impl<'g> Mode<'g> {
     /// [`Mode::new`] on a geometry whose sample axes `kappa` (komega, kappa,
     /// kphi) are a kappa arm: adjacent in the sample stack in that order,
     /// komega and kphi about one direction d, kappa about k with
-    /// α = acos(d·k) ∈ (0, π/2]. Its equations may hold the arm's eulerians.
+    /// α = acos(d·k) ∈ (0, π/2]. Its equations may hold the arm's eulerians,
+    /// and the kappa twin of each solution is a candidate solution too.
     pub fn new_kappa(
         geometry: &'g Geometry,
         name: &str,

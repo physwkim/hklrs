@@ -1,7 +1,9 @@
 //! Deterministic search: Levenberg-Marquardt from the sector images
 //! {x, π−x, π+x, −x} (per written axis) of every solution admitted,
 //! starting from `current`'s images until the first one is, and stopping
-//! at the first singular one.
+//! at the first singular one. A kappa mode offers the kappa twin of every
+//! solution reached as well; the validator rejects it when it moves a held
+//! axis.
 
 use std::collections::VecDeque;
 use std::f64::consts::PI;
@@ -28,16 +30,25 @@ struct Search<'a> {
 
 impl<'a> Search<'a> {
     /// Solves from `seed` unless it was tried or the set is degenerate;
-    /// returns the written values of the solution reached when the set
-    /// admits it.
-    fn seed(&mut self, seed: Vec<f64>) -> Option<Vec<f64>> {
+    /// returns the written values of the solution reached and of its kappa
+    /// twin, those the set admits.
+    fn seed(&mut self, seed: Vec<f64>) -> Vec<Vec<f64>> {
         if self.set.is_degenerate() || self.tried.iter().any(|t| same(t, &seed)) {
-            return None;
+            return Vec::new();
         }
         let x = levenberg_marquardt(self.system, &seed);
         self.tried.push(seed);
-        let new = self.set.offer(&self.system.values(&x))?;
-        Some(self.system.written_values(new))
+        let reached = self.system.values(&x);
+        let twin = self.system.kappa().map(|k| k.twin(&reached));
+        [Some(reached), twin]
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                self.set
+                    .offer(&c)
+                    .map(|new| self.system.written_values(new))
+            })
+            .collect()
     }
 }
 
@@ -51,9 +62,10 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> SolutionSet<'a> {
     // a solution's own images take over.
     let start = system.written_values(system.current());
     let mut roots: VecDeque<_> = images(&start)
-        .find_map(|seed| s.seed(seed))
-        .into_iter()
-        .collect();
+        .map(|seed| s.seed(seed))
+        .find(|found| !found.is_empty())
+        .unwrap_or_default()
+        .into();
     let mut seeded = 0;
     while let Some(root) = roots.pop_front() {
         if seeded == MAX_ROOTS {
@@ -137,4 +149,37 @@ fn levenberg_marquardt(system: &System, seed: &[f64]) -> Vec<f64> {
         }
     }
     x.as_slice().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use nalgebra::{Matrix3, Vector3};
+
+    use super::*;
+    use crate::inverse::{Equation, Eulerian, Mode};
+    use crate::presets::preset;
+
+    /// The seed that reaches the first solution also yields its kappa twin,
+    /// whether or not the sector images would reach it.
+    #[test]
+    fn a_seed_offers_the_kappa_twin() {
+        let geo = preset("K4CV").unwrap();
+        let held = vec![Equation::Kappa(Eulerian::Chi(-0.6))];
+        let mode = Mode::new_kappa(&geo, "m", [0, 1, 2], &[0, 1, 2, 3], held).unwrap();
+        let current = [0.2, -0.9, 0.5, 0.7];
+        let q = Vector3::new(0.3, -0.2, 0.4);
+        let system = System::new(&mode, Matrix3::identity(), q, &current);
+        let mut s = Search {
+            system: &system,
+            set: SolutionSet::new(&system),
+            tried: Vec::new(),
+        };
+        let roots = images(&current)
+            .map(|seed| s.seed(seed))
+            .find(|found| !found.is_empty())
+            .unwrap();
+        let twin = mode.kappa().unwrap().twin(&system.values(&roots[0]));
+        assert_eq!(roots.len(), 2);
+        assert!(same(&roots[1], &system.written_values(&twin)));
+    }
 }

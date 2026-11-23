@@ -126,6 +126,10 @@ impl<'a> System<'a> {
         self.current
     }
 
+    pub fn kappa(&self) -> Option<&'a KappaAxes> {
+        self.kappa
+    }
+
     pub fn is_written(&self, axis: usize) -> bool {
         self.written.contains(&axis)
     }

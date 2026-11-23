@@ -1,5 +1,5 @@
-//! Inverse invariants on E4CV and E4CH: every solution forwards back to the
-//! target and satisfies its mode, held axes never move, the search is
+//! Inverse invariants on E4CV, E4CH and K4CV: every solution forwards back
+//! to the target and satisfies its mode, held axes never move, the search is
 //! deterministic, axis limits only filter the solutions after the cut-point
 //! wrap, out-of-sphere targets and bad inputs are errors.
 
@@ -276,6 +276,49 @@ fn mode_construction_errors() {
             name: "chi".into()
         }))
     );
+}
+
+/// With the whole arm written, every solution's kappa twin is one too;
+/// with kphi held, no twin is (it would move kphi) and kphi never moves.
+#[test]
+fn kappa_twin_is_admitted_unless_it_moves_a_held_axis() {
+    let geo = preset("K4CV").unwrap();
+    let current = current(&geo);
+    let hkl = Vector3::new(1.0, 2.0, 1.0);
+    let held = [
+        Eulerian::Omega(0.3),
+        Eulerian::Chi(-0.6),
+        Eulerian::Phi(-0.4),
+        Eulerian::Bisector { detector: 3 },
+    ];
+    for e in held {
+        let mode = Mode::new_kappa(
+            &geo,
+            "m",
+            [0, 1, 2],
+            &[0, 1, 2, 3],
+            vec![Equation::Kappa(e)],
+        )
+        .unwrap();
+        let arm = mode.kappa().unwrap().arm();
+        let solutions = request(&mode, hkl, &current).solve().unwrap();
+        for s in &solutions {
+            assert_solution(&mode, &hkl, &current, s);
+            let [ko, ka, kp] = arm.twin([s[0], s[1], s[2]]);
+            let twin = [ko, ka, kp, s[3]];
+            assert!(
+                solutions
+                    .iter()
+                    .any(|t| t.iter().zip(&twin).all(|(a, b)| wrap(a - b).abs() <= 1e-9)),
+                "{e:?}: twin of {s:?} missing"
+            );
+        }
+    }
+    let mode = Mode::new_kappa(&geo, "m", [0, 1, 2], &[0, 1, 3], vec![]).unwrap();
+    let solutions = request(&mode, hkl, &current).solve().unwrap();
+    for s in &solutions {
+        assert_solution(&mode, &hkl, &current, s);
+    }
 }
 
 #[test]
