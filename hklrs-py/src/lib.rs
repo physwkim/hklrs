@@ -153,14 +153,23 @@ impl PyGeometry {
 
 /// Axis values (degrees / metres, geometry axis order), wavelength (Å) and
 /// detector point (detector-arm frame, metres; default 1 m along the beam).
+fn frame(geo: &hklrs::Geometry, axes: &[f64], wavelength: f64) -> PyResult<hklrs::Frame> {
+    Ok(hklrs::Frame {
+        values: geo.values_from_degrees(axes).map_err(err)?,
+        wavelength: hklrs::Wavelength::new(wavelength).map_err(err)?,
+    })
+}
+
 fn kernel_inputs(
     geo: &hklrs::Geometry,
     axes: &[f64],
     wavelength: f64,
     point: Option<[f64; 3]>,
 ) -> PyResult<(Vec<f64>, hklrs::Wavelength, Point3<f64>)> {
-    let values = geo.values_from_degrees(axes).map_err(err)?;
-    let wl = hklrs::Wavelength::new(wavelength).map_err(err)?;
+    let hklrs::Frame {
+        values,
+        wavelength: wl,
+    } = frame(geo, axes, wavelength)?;
     let p = point.map_or_else(
         || Point3::from(geo.beam_direction().into_inner()),
         Point3::from,
@@ -716,6 +725,53 @@ impl PyXuLinear {
     }
 }
 
+type Planes<'py> = (
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray2<f64>>,
+);
+
+fn planes(py: Python<'_>, p: hklrs::Planes) -> PyResult<Planes<'_>> {
+    let shape = p.shape();
+    let plane = |v: Vec<f64>| PyArray1::from_vec(py, v).reshape(shape);
+    Ok((plane(p.x)?, plane(p.y)?, plane(p.z)?))
+}
+
+/// Q in the sample frame (Å⁻¹, with 2π) of every pixel of `detector` at
+/// `axes` (geometry axis order, degrees / metres): (qx, qy, qz), each a
+/// (slow, fast) array.
+#[pyfunction]
+fn q_map<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+) -> PyResult<Planes<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let frame = frame(geo, &axes, wavelength)?;
+    let q = py.detach(|| hklrs::q_map(geo, &frame, det)).map_err(err)?;
+    planes(py, q)
+}
+
+/// Pixel positions relative to the sample in the lab frame (metres) at
+/// `axes`, arguments as for `q_map`: (x, y, z), each a (slow, fast) array.
+#[pyfunction]
+fn detector_positions<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+) -> PyResult<Planes<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let frame = frame(geo, &axes, wavelength)?;
+    let p = py
+        .detach(|| hklrs::detector_positions(geo, &frame, det))
+        .map_err(err)?;
+    planes(py, p)
+}
+
 #[pyfunction]
 fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
@@ -748,5 +804,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(pseudo, m)?)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
+    m.add_function(wrap_pyfunction!(q_map, m)?)?;
+    m.add_function(wrap_pyfunction!(detector_positions, m)?)?;
     Ok(())
 }
