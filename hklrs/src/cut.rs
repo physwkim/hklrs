@@ -1,6 +1,9 @@
-//! Line cuts through reciprocal space (design §5, §7), geometry only: per
-//! pixel Q, the coordinate along the cut and the distance from it, and the
-//! bin and selection those give. Accumulation is a later phase.
+//! Line cuts through reciprocal space (design §5, §7): per pixel Q, the
+//! coordinate along the cut and the distance from it, the bin and selection
+//! those give, and the sums of counts and weights per bin
+//! ([`Cut::accumulate`]). No estimator: a bin holds Σcounts and Σweight
+//! apart, and whether its value is their ratio or a mean of corrected
+//! pixels is the consumer's choice.
 //!
 //! Q is in the cut frame of xrayutilities' `HXRD([1,0,0],[0,0,1])` with
 //! `trans=False`: x normal to the scattering plane, y along the in-plane
@@ -10,11 +13,14 @@
 //! [`Cut`]: one half-width, the bin rule of [`Binning`], and a defined
 //! outcome for a pixel without coordinates.
 
+use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
 use nalgebra::Vector3;
 
+use crate::absorption::Masked;
 use crate::grid::Binning;
+use crate::normalise::Normalised;
 use crate::{Error, Wavelength};
 
 /// What the cut runs along.
@@ -49,6 +55,8 @@ pub enum IntDir {
 pub enum CutError {
     #[error("a {kind} cut has no {intdir:?} integration direction")]
     IntDir { kind: &'static str, intdir: IntDir },
+    #[error("cut results have different footprints: {left:?} vs {right:?}")]
+    Footprint { left: Footprint, right: Footprint },
     #[error(transparent)]
     Value(#[from] Error),
 }
@@ -273,6 +281,240 @@ impl Cut {
         }
         let bin = self.binning.bin(cutting.along)?;
         Ok(Some(Located { cutting, bin }))
+    }
+}
+
+/// How a pixel's weight is laid on the cut axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Footprint {
+    /// All of it in the bin of the pixel's coordinate.
+    Point,
+    /// A pixel spans `width` along the cut, centred on its coordinate (same
+    /// units as the coordinate), and its counts and weight are shared out
+    /// over the bins it overlaps in proportion to the overlap: xu's
+    /// `FuzzyGridder1D`, whose fractions these are. A bin of the global
+    /// lattice exists wherever the footprint reaches, so unlike xu nothing
+    /// is clamped at a grid end.
+    Width(f64),
+}
+
+/// What one bin of a cut holds. The two sums stay apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bin {
+    /// Σ counts (× overlap fraction under [`Footprint::Width`]).
+    pub counts: f64,
+    /// Σ weight (× overlap fraction).
+    pub weight: f64,
+    /// Pixels that put anything in the bin.
+    pub contributions: u64,
+}
+
+/// Pixels that were not accumulated, by cause. Each pixel is counted once,
+/// in the first cause that applies, in the order of the fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Skipped {
+    masked: [u64; MASKED.len()],
+    /// An accumulated `Normalised` whose counts are NaN or infinite. xu
+    /// reports such a pixel as used while its gridder drops it (XU-19).
+    pub non_finite: u64,
+    /// No usable coordinate: the Q is beyond 2k or out of reach of the cut
+    /// so the distance is NaN, or the coordinate has no bin.
+    pub no_coordinate: u64,
+    /// A coordinate, but the distance is not `< half_width`.
+    pub outside: u64,
+}
+
+const MASKED: [Masked; 9] = [
+    Masked::Unlit,
+    Masked::GrazingExit,
+    Masked::ThroughBulk,
+    Masked::Opaque,
+    Masked::EdgeOn,
+    Masked::Extinct,
+    Masked::Detector,
+    Masked::BadFlat,
+    Masked::BadCount,
+];
+
+/// Position in [`MASKED`]; exhaustive, so a new reason does not compile
+/// until it has a counter.
+fn masked_index(m: Masked) -> usize {
+    match m {
+        Masked::Unlit => 0,
+        Masked::GrazingExit => 1,
+        Masked::ThroughBulk => 2,
+        Masked::Opaque => 3,
+        Masked::EdgeOn => 4,
+        Masked::Extinct => 5,
+        Masked::Detector => 6,
+        Masked::BadFlat => 7,
+        Masked::BadCount => 8,
+    }
+}
+
+impl Skipped {
+    /// Pixels skipped because their weight was masked for `reason`.
+    pub fn masked(&self, reason: Masked) -> u64 {
+        self.masked[masked_index(reason)]
+    }
+
+    pub fn total(&self) -> u64 {
+        self.masked.iter().sum::<u64>() + self.non_finite + self.no_coordinate + self.outside
+    }
+
+    fn add(&mut self, other: &Self) {
+        for (a, b) in self.masked.iter_mut().zip(other.masked) {
+            *a += b;
+        }
+        self.non_finite += other.non_finite;
+        self.no_coordinate += other.no_coordinate;
+        self.outside += other.outside;
+    }
+}
+
+/// The sums of one cut, per global bin of its [`Binning`], sparse and
+/// ascending.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CutResult {
+    binning: Binning,
+    footprint: Footprint,
+    bins: BTreeMap<i64, Bin>,
+    skipped: Skipped,
+}
+
+impl CutResult {
+    pub fn binning(&self) -> Binning {
+        self.binning
+    }
+
+    pub fn footprint(&self) -> Footprint {
+        self.footprint
+    }
+
+    /// The bins that received anything, as (global bin, sums), ascending.
+    pub fn bins(&self) -> impl Iterator<Item = (i64, &Bin)> {
+        self.bins.iter().map(|(k, b)| (*k, b))
+    }
+
+    pub fn get(&self, bin: i64) -> Option<&Bin> {
+        self.bins.get(&bin)
+    }
+
+    pub fn skipped(&self) -> &Skipped {
+        &self.skipped
+    }
+
+    /// The sum of two results of the same binning and footprint, for
+    /// frames accumulated apart. A result with no pixel at all is the
+    /// identity.
+    pub fn merge(mut self, other: Self) -> Result<Self, CutError> {
+        if self.binning != other.binning {
+            let name = |b: Binning| vec![("cut".to_owned(), b.step(), b.anchor())];
+            return Err(Error::GridMismatch {
+                left: name(self.binning),
+                right: name(other.binning),
+            }
+            .into());
+        }
+        if self.footprint != other.footprint {
+            return Err(CutError::Footprint {
+                left: self.footprint,
+                right: other.footprint,
+            });
+        }
+        for (k, b) in other.bins {
+            let into = self.bins.entry(k).or_default();
+            into.counts += b.counts;
+            into.weight += b.weight;
+            into.contributions += b.contributions;
+        }
+        self.skipped.add(&other.skipped);
+        Ok(self)
+    }
+
+    fn put(&mut self, bin: i64, fraction: f64, n: &Normalised) {
+        let b = self.bins.entry(bin).or_default();
+        b.counts += fraction * n.counts;
+        b.weight += fraction * n.weight.get();
+        b.contributions += 1;
+    }
+}
+
+impl Cut {
+    /// Sums `pixels` (Q and normalised value, or why there is none) over
+    /// the cut. A pixel is skipped, and counted once under its cause in
+    /// [`Skipped`], when it is masked, when its counts are not finite, when
+    /// it has no coordinate, or when it is outside the window; all else is
+    /// laid on the axis by `footprint`. The one error is a footprint width
+    /// that is not positive and finite.
+    pub fn accumulate(
+        &self,
+        wavelength: Wavelength,
+        footprint: Footprint,
+        pixels: impl IntoIterator<Item = (Vector3<f64>, Result<Normalised, Masked>)>,
+    ) -> Result<CutResult, Error> {
+        if let Footprint::Width(w) = footprint {
+            if !(w.is_finite() && w > 0.0) {
+                return Err(Error::NotPositive {
+                    what: "footprint width",
+                    value: w,
+                });
+            }
+        }
+        let mut out = CutResult {
+            binning: self.binning,
+            footprint,
+            bins: BTreeMap::new(),
+            skipped: Skipped::default(),
+        };
+        for (q, value) in pixels {
+            let n = match value {
+                Ok(n) => n,
+                Err(m) => {
+                    out.skipped.masked[masked_index(m)] += 1;
+                    continue;
+                }
+            };
+            if !n.counts.is_finite() {
+                out.skipped.non_finite += 1;
+                continue;
+            }
+            let c = self.cutting(&q, wavelength);
+            if c.perp.is_nan() || !c.along.is_finite() {
+                out.skipped.no_coordinate += 1;
+                continue;
+            }
+            if !self.selects(c.perp) {
+                out.skipped.outside += 1;
+                continue;
+            }
+            let b = self.binning;
+            match footprint {
+                Footprint::Point => match b.bin(c.along) {
+                    Ok(k) => out.put(k, 1.0, &n),
+                    Err(_) => out.skipped.no_coordinate += 1,
+                },
+                Footprint::Width(w) => {
+                    let (lo, hi) = (c.along - w / 2.0, c.along + w / 2.0);
+                    let (Ok(k0), Ok(k1)) = (b.bin(lo), b.bin(hi)) else {
+                        out.skipped.no_coordinate += 1;
+                        continue;
+                    };
+                    for k in k0..=k1 {
+                        let f = if k0 == k1 {
+                            1.0
+                        } else {
+                            (hi.min(b.edge(k + 1)) - lo.max(b.edge(k))) / w
+                        };
+                        // a footprint ending exactly on an edge has no part in the bin above
+                        if f > 0.0 {
+                            out.put(k, f, &n);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
