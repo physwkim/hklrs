@@ -1,0 +1,16 @@
+[package]
+name = "hklrs-py"
+description = "Python bindings of hklrs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "hklrs_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+hklrs = { path = "../hklrs" }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
