@@ -18,7 +18,7 @@ impl Attenuation for PerMetre {
     }
 }
 
-/// Why a pixel has no sample weight. `s_i = −k̂i·n̂`, `s_f = k̂f·n̂`.
+/// Why a pixel has no weight. `s_i = −k̂i·n̂`, `s_f = k̂f·n̂`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Masked {
     /// `s_i ≤ 0`: the beam does not enter through the face.
@@ -27,6 +27,35 @@ pub enum Masked {
     GrazingExit,
     /// `s_f < 0` on a bulk sample: no beam leaves through the back.
     ThroughBulk,
+    /// The weight is not a positive finite number: the path transmits
+    /// nothing in f64.
+    Opaque,
+}
+
+/// An absorption weight, positive and finite by construction, so the
+/// correction can always divide by it.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Weight(f64);
+
+impl Weight {
+    /// The one gate every weight passes.
+    fn new(value: f64) -> Result<Self, Masked> {
+        if value > 0.0 && value.is_finite() {
+            Ok(Self(value))
+        } else {
+            Err(Masked::Opaque)
+        }
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+
+    /// The product of two weights, such as the sample and detector sides,
+    /// which can underflow where neither factor does.
+    pub fn times(self, other: Self) -> Result<Self, Masked> {
+        Self::new(self.0 * other.0)
+    }
 }
 
 fn unit(v: Vector3<f64>, what: &str) -> Result<Unit<Vector3<f64>>, Error> {
@@ -216,7 +245,9 @@ fn normal_mass(poly: &[[f64; 2]]) -> f64 {
 }
 
 /// Sample-side state of one frame: everything that depends on k̂i and R_s
-/// alone, so a pixel costs one dot product and two exponentials.
+/// alone, so a pixel costs one dot product and two exponentials. The face
+/// is assumed centred on the beam axis; that makes F a function of the
+/// sample rotation only.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlabFrame {
     /// n̂ in the lab frame.
@@ -287,7 +318,7 @@ impl SlabFrame {
     /// A = F ∫₀ᵗ exp(−μz/s_i − μ L_f(z)) dz in metres for the scattered
     /// direction `kf`; L_f = z/s_f in reflection, (t − z)/|s_f| in
     /// transmission.
-    pub fn weight(&self, kf: &Unit<Vector3<f64>>) -> Result<f64, Masked> {
+    pub fn weight(&self, kf: &Unit<Vector3<f64>>) -> Result<Weight, Masked> {
         let lit = self.lit?;
         let s_f = kf.dot(&self.normal);
         let b = self.mu / lit.s_i;
@@ -309,7 +340,7 @@ impl SlabFrame {
         } else {
             return Err(Masked::GrazingExit);
         };
-        Ok(lit.footprint * path)
+        Weight::new(lit.footprint * path)
     }
 }
 
@@ -348,8 +379,12 @@ pub struct DetectorPath {
 
 impl DetectorPath {
     /// Weight of the pixel at `p` from the sample, on a detector with
-    /// `normal` of either sense, lab frame.
-    pub fn weight(&self, p: &Vector3<f64>, normal: &Unit<Vector3<f64>>) -> Result<f64, Error> {
+    /// `normal` of either sense, lab frame. Fails only when `p` is zero.
+    pub fn weight(
+        &self,
+        p: &Vector3<f64>,
+        normal: &Unit<Vector3<f64>>,
+    ) -> Result<Result<Weight, Masked>, Error> {
         let (kf, distance) = Unit::try_new_and_get(*p, 0.0).ok_or(Error::DetectorAtSample)?;
         let cos = kf.dot(normal).abs();
         let air = self
@@ -357,7 +392,7 @@ impl DetectorPath {
             .map_or(1.0, |mu| (-mu.per_metre() * distance).exp());
         let window = self.window.map_or(1.0, |w| (-w.depth(cos)).exp());
         let sensor = self.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1());
-        Ok(air * window * sensor)
+        Ok(Weight::new(air * window * sensor))
     }
 }
 
@@ -453,7 +488,7 @@ mod tests {
         for m in [0.5, 1e3, 4e5] {
             for alpha in [0.01, 0.1, 0.5, 1.0, 1.5] {
                 let f = frame(&slab, &pencil(), m, alpha);
-                let a = f.weight(&kf(2.0 * alpha)).unwrap();
+                let a = f.weight(&kf(2.0 * alpha)).unwrap().get();
                 assert!(close(a, 1.0 / (2.0 * m), 1e-13), "μ {m} α {alpha}: {a}");
             }
         }
@@ -465,7 +500,7 @@ mod tests {
         let slab = Slab::new(face(1.0, 1.0), t).unwrap();
         for mt in [1e-3, 0.5, 3.0, 20.0] {
             let f = frame(&slab, &pencil(), mt / t, FRAC_PI_2);
-            let a = f.weight(&ki()).unwrap();
+            let a = f.weight(&ki()).unwrap().get();
             assert!(close(a, t * (-mt).exp(), 1e-14), "μt {mt}: {a}");
         }
     }
@@ -480,7 +515,7 @@ mod tests {
         for tth in [2.0 * alpha, 0.0, -0.2] {
             for mt in [1e-6, 1e-12, 1e-300] {
                 let f = frame(&slab, &pencil(), mt / t, alpha);
-                let a = f.weight(&kf(tth)).unwrap();
+                let a = f.weight(&kf(tth)).unwrap().get();
                 let s_f = kf(tth).dot(&(tilt(alpha) * Vector3::z_axis()));
                 let bound = mt * (1.0 / s_i + 1.0 / s_f.abs()) + 1e-15;
                 assert!(close(a, t / s_i, bound), "2θ {tth} μt {mt}: {a}");
@@ -496,13 +531,13 @@ mod tests {
             let f = frame(&slab, &pencil(), m, alpha);
             let s_i = -ki().dot(&(tilt(alpha) * Vector3::z_axis()));
             // k̂f = k̂i gives s_f = −s_i bit for bit: b = c, φ(0) = 1
-            let a = f.weight(&ki()).unwrap();
+            let a = f.weight(&ki()).unwrap().get();
             let want = f.footprint().unwrap() * t * (-m * t / s_i).exp();
             assert!(close(a, want, 4.0 * f64::EPSILON), "α {alpha}: {a}");
             // and the neighbours on either side agree with it to first
             // order: δA/A ≈ (μt/2) δ|s_f| / s_i²
             for d in [-1e-9, 1e-9] {
-                let near = f.weight(&kf(d)).unwrap();
+                let near = f.weight(&kf(d)).unwrap().get();
                 let bound = m * t * d.abs() / (s_i * s_i);
                 assert!(close(near, a, bound), "α {alpha} 2θ {d}: {near}");
             }
@@ -538,7 +573,7 @@ mod tests {
                     * h
                     / 3.0;
                 let f = frame(&slab, &pencil(), m, alpha);
-                let a = f.weight(&k).unwrap();
+                let a = f.weight(&k).unwrap().get();
                 let want = f.footprint().unwrap() * simpson;
                 assert!(close(a, want, 1e-11), "α {alpha} 2θ {tth}: {a} vs {want}");
             }
@@ -728,8 +763,47 @@ mod tests {
         assert_eq!(f.weight(&exit), Err(Masked::ThroughBulk));
         // the same exit through a slab has a weight
         let slab = Slab::new(face(1.0, 1.0), 1e-3).unwrap();
-        let a = frame(&slab, &pencil(), 10.0, 0.3).weight(&exit).unwrap();
+        let a = frame(&slab, &pencil(), 10.0, 0.3)
+            .weight(&exit)
+            .unwrap()
+            .get();
         assert!(a > 0.0, "{a}");
+    }
+
+    #[test]
+    fn weight_masks_what_is_not_a_positive_finite_number() {
+        for v in [0.0, -0.0, -1.0, f64::INFINITY, f64::NAN] {
+            assert_eq!(Weight::new(v), Err(Masked::Opaque), "{v}");
+        }
+        for v in [f64::from_bits(1), 1.0, f64::MAX] {
+            assert_eq!(Weight::new(v).map(Weight::get), Ok(v));
+        }
+        let small = Weight::new(1e-200).unwrap();
+        assert_eq!(small.times(small), Err(Masked::Opaque));
+    }
+
+    /// exp(−μt) underflows to 0 past μt ≈ 745.
+    #[test]
+    fn mask_opaque_when_the_slab_transmits_nothing() {
+        let t = 2e-3;
+        let slab = Slab::new(face(1.0, 1.0), t).unwrap();
+        let weight = |mt: f64| frame(&slab, &pencil(), mt / t, FRAC_PI_2).weight(&ki());
+        assert!(weight(700.0).unwrap().get() > 0.0);
+        assert_eq!(weight(800.0), Err(Masked::Opaque));
+    }
+
+    /// An exit just above the face: s_f > 0 is not a grazing exit, but
+    /// μ/s_f overflows and the path is 0.
+    #[test]
+    fn mask_opaque_when_the_exit_runs_along_the_face() {
+        let face = Face::new(-Vector3::x(), Vector3::y(), 1.0, 1.0).unwrap();
+        let r_s = UnitQuaternion::identity();
+        for slab in [Slab::bulk(face), Slab::new(face, 1e-3).unwrap()] {
+            let f = SlabFrame::new(&slab, &pencil(), mu(10.0), &ki(), &r_s).unwrap();
+            let above = |s_f: f64| f.weight(&Unit::new_normalize(Vector3::new(-s_f, 0.0, 1.0)));
+            assert!(above(1e-3).unwrap().get() > 0.0);
+            assert_eq!(above(1e-320), Err(Masked::Opaque));
+        }
     }
 
     #[test]
@@ -760,7 +834,7 @@ mod tests {
     #[test]
     fn detector_terms_at_normal_incidence() {
         let (p, n) = (Vector3::new(0.0, 0.0, 0.5), Vector3::z_axis());
-        let alone = |path: DetectorPath| path.weight(&p, &n).unwrap();
+        let alone = |path: DetectorPath| path.weight(&p, &n).unwrap().unwrap().get();
         assert_eq!(alone(DetectorPath::default()), 1.0);
         let air = alone(DetectorPath {
             air: Some(mu(1.2)),
@@ -788,7 +862,7 @@ mod tests {
             window: Some(layer(1e4, 25e-6)),
             sensor: Some(layer(3e3, 450e-6)),
         };
-        let w = all.weight(&p, &n).unwrap();
+        let w = all.weight(&p, &n).unwrap().unwrap().get();
         assert!(close(w, air * window * sensor, 2.0 * f64::EPSILON), "{w}");
     }
 
@@ -804,7 +878,7 @@ mod tests {
         };
         let want = (-0.6f64).exp() * (-0.5f64).exp() * -(-2.7f64).exp_m1();
         for n in [Vector3::z_axis(), -Vector3::z_axis()] {
-            let w = path.weight(&p, &n).unwrap();
+            let w = path.weight(&p, &n).unwrap().unwrap().get();
             assert!(close(w, want, 1e-15), "{n:?}: {w}");
         }
     }
@@ -816,8 +890,29 @@ mod tests {
             sensor: Some(layer(1e-14, 1e-6)),
             ..Default::default()
         };
-        let w = path.weight(&Vector3::z(), &Vector3::z_axis()).unwrap();
+        let w = path
+            .weight(&Vector3::z(), &Vector3::z_axis())
+            .unwrap()
+            .unwrap()
+            .get();
         assert!(close(w, 1e-20, 4.0 * f64::EPSILON), "{w}");
+    }
+
+    /// Along the detector plane cos θ = 0: a window transmits nothing, a
+    /// sensor absorbs everything.
+    #[test]
+    fn mask_opaque_when_the_detector_ray_runs_along_a_window() {
+        let (p, n) = (Vector3::x(), Vector3::z_axis());
+        let window = DetectorPath {
+            window: Some(layer(1e4, 25e-6)),
+            ..Default::default()
+        };
+        assert_eq!(window.weight(&p, &n).unwrap(), Err(Masked::Opaque));
+        let sensor = DetectorPath {
+            sensor: Some(layer(3e3, 450e-6)),
+            ..Default::default()
+        };
+        assert_eq!(sensor.weight(&p, &n).unwrap().map(Weight::get), Ok(1.0));
     }
 
     #[test]
