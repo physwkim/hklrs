@@ -5,6 +5,7 @@
 
 pub mod absorption;
 mod detector;
+mod detector_table;
 mod error;
 mod forward;
 mod geometry;
@@ -18,6 +19,7 @@ mod units;
 pub mod xu;
 
 pub use detector::PixelDetector;
+pub use detector_table::{Detector, Layout, Row, Strip, Tiling};
 pub use error::Error;
 pub use forward::{Forward, Scattering, angle_between, forward, scattering, scattering_at};
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
