@@ -9,9 +9,12 @@
 //! checked separately (`translations_move_the_detector_point`). A translation
 //! along the ray (CRISTAL K4C `dtx`, PYFAI `sdd`) changes nothing in either.
 
-use hklrs::nalgebra::{Matrix3, Vector3};
+mod common;
+
+use common::{canonical_to_user, f, hkl_b_correct, lattice, load, mat, vec3};
+use hklrs::nalgebra::Vector3;
 use hklrs::{
-    AxisKind, Lattice, Orientation, PixelDetector, Sample, Wavelength, forward, presets, scattering,
+    AxisKind, Orientation, PixelDetector, Sample, Wavelength, forward, presets, scattering,
 };
 use serde_json::Value;
 
@@ -38,11 +41,6 @@ fn detector_point(name: &str, geo: &hklrs::Geometry) -> hklrs::nalgebra::Point3<
 /// Presets hkl has no "hkl" engine for: the axis table only.
 const NO_ENGINE: &[&str] = &["TwoC"];
 
-fn load(file: &str) -> Value {
-    let path = format!("{}/../golden/{file}", env!("CARGO_MANIFEST_DIR"));
-    serde_json::from_str(&std::fs::read_to_string(&path).expect(&path)).unwrap()
-}
-
 /// Both golden files merged: geometries by name, cases concatenated.
 fn golden() -> Value {
     let mut g = load("hkl_forward.json");
@@ -59,18 +57,6 @@ fn golden() -> Value {
 
 fn is_off_ray(geometry: &str, axis: &str) -> bool {
     OFF_RAY.contains(&(geometry, axis))
-}
-
-fn f(v: &Value) -> f64 {
-    v.as_f64().unwrap()
-}
-
-fn mat(v: &Value) -> Matrix3<f64> {
-    Matrix3::from_fn(|i, j| f(&v[i][j]))
-}
-
-fn vec3(v: &Value) -> Vector3<f64> {
-    Vector3::new(f(&v[0]), f(&v[1]), f(&v[2]))
 }
 
 #[test]
@@ -134,16 +120,7 @@ fn forward_hkl_matches_hkl_engine() {
         }
         assert!(case.get("error").is_none(), "{name}: {}", case["error"]);
         let geo = presets::preset(name).unwrap();
-        let l = &case["lattice"];
-        let lattice = Lattice::from_degrees(
-            f(&l["a"]),
-            f(&l["b"]),
-            f(&l["c"]),
-            f(&l["alpha"]),
-            f(&l["beta"]),
-            f(&l["gamma"]),
-        )
-        .unwrap();
+        let lattice = lattice(&case["lattice"]);
         let sample = Sample::new(
             "golden",
             lattice,
@@ -154,10 +131,9 @@ fn forward_hkl_matches_hkl_engine() {
             case["sample"], case["wavelength"], case["index"]
         );
 
-        // hkl's B is wrong unless beta = gamma = 90° (upstream-defects.md
-        // HKL-12), so the full UB chain is compared only for those cells; the
-        // geometry is compared for every cell through hkl's own UB below.
-        let hkl_b_valid = f(&l["beta"]) == 90.0 && f(&l["gamma"]) == 90.0;
+        // the full UB chain is compared only where hkl's B is right (HKL-12);
+        // the geometry is compared for every cell through hkl's own UB below
+        let hkl_b_valid = hkl_b_correct(&lattice);
         let hkl_ub = mat(&case["UB"]);
         if hkl_b_valid {
             let ub_err = (sample.ub() - hkl_ub).abs().max();
@@ -173,16 +149,10 @@ fn forward_hkl_matches_hkl_engine() {
                 if EXTRA_AXES.contains(&(name, a.name())) {
                     return hklrs::Deg::from(presets::lisa_tilt(wl).unwrap()).0;
                 }
-                let v = f(&case["axes_canonical_deg_mm"][a.name()]);
                 if is_off_ray(name, a.name()) {
                     0.0
-                } else if matches!(
-                    a.kind(),
-                    AxisKind::Rotation { .. } | AxisKind::RotationAbout { .. }
-                ) {
-                    v
                 } else {
-                    v * 1e-3 // mm -> m, translations and length parameters
+                    canonical_to_user(a, f(&case["axes_canonical_deg_mm"][a.name()]))
                 }
             })
             .collect();
@@ -229,8 +199,7 @@ fn translations_move_the_detector_point() {
                 .iter()
                 .map(|a| match a.kind() {
                     AxisKind::Translation { .. } if zero => 0.0,
-                    AxisKind::Translation { .. } => canon(a.name()) * 1e-3,
-                    _ => canon(a.name()),
+                    _ => canonical_to_user(a, canon(a.name())),
                 })
                 .collect();
             geo.values_from_degrees(&user).unwrap()
