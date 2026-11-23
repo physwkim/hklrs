@@ -27,7 +27,7 @@ impl From<Rad> for Deg {
     }
 }
 
-fn positive(what: &'static str, value: f64) -> Result<f64, Error> {
+pub(crate) fn positive(what: &'static str, value: f64) -> Result<f64, Error> {
     if value.is_finite() && value > 0.0 {
         Ok(value)
     } else {
