@@ -607,8 +607,8 @@ fn pseudo(
 }
 
 /// Pixels in the detector-arm frame (all axes zero), metres. Built by the
-/// xu and PONI importers; opaque apart from its shape, mask and pixel
-/// positions.
+/// detector table (`detector`) and the xu and PONI importers; opaque apart
+/// from its shape, mask and pixel positions.
 #[pyclass(name = "PixelDetector", frozen)]
 struct PyPixelDetector(hklrs::PixelDetector);
 
@@ -1217,6 +1217,30 @@ fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
 }
 
+/// Names of the binoculars detector table rows, in binoculars id order.
+#[pyfunction]
+fn detectors() -> Vec<&'static str> {
+    hklrs::Detector::ALL.map(hklrs::Detector::name).to_vec()
+}
+
+/// The binoculars detector table row `name`, with its mask, in binoculars'
+/// frame: pixel (slow, fast) is image (row, column), columns run along -y
+/// and rows along +z or -z from a pixel corner at the origin, and x is 0
+/// except on the Cirpad.
+#[pyfunction]
+fn detector(name: &str) -> PyResult<PyPixelDetector> {
+    hklrs::Detector::ALL
+        .into_iter()
+        .find(|d| d.name() == name)
+        .map(|d| PyPixelDetector(d.pixel_detector()))
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown detector {name:?}; one of {:?}",
+                detectors()
+            ))
+        })
+}
+
 fn submodule(
     m: &Bound<'_, PyModule>,
     name: &str,
@@ -1264,6 +1288,8 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(pseudo, m)?)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
+    m.add_function(wrap_pyfunction!(detectors, m)?)?;
+    m.add_function(wrap_pyfunction!(detector, m)?)?;
     m.add_function(wrap_pyfunction!(q_map, m)?)?;
     m.add_function(wrap_pyfunction!(detector_positions, m)?)?;
     m.add_function(wrap_pyfunction!(solid_angle, m)?)?;
