@@ -1,6 +1,7 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
 //! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C, the SOLEIL SIXS MED
-//! presets, SOLEIL MARS, PETRA3 P23 4C, APS POLAR and PETRA3 P09 EH2 but their
+//! presets, SOLEIL MARS, PETRA3 P23 4C, PETRA3 P23 6C (through the E6C arms,
+//! which `petra3_p23_6c` re-exports), APS POLAR and PETRA3 P09 EH2 but their
 //! "zaxis + beta-fixed", which hkl solves over other axes (see
 //! `aps_04id_polar::zaxis_beta_fixed`).
 //!
@@ -525,4 +526,17 @@ golden! {
     p23_4c_lifting_detector_mu: "PETRA3 P23 4C" "lifting_detector_mu",
     p23_4c_bissector_horizontal: "PETRA3 P23 4C" "bissector_horizontal",
     p23_4c_psi_constant: "PETRA3 P23 4C" "psi_constant",
+    p23_6c_bissector_vertical: "PETRA3 P23 6C" "bissector_vertical",
+    p23_6c_constant_omega_vertical: "PETRA3 P23 6C" "constant_omega_vertical",
+    p23_6c_constant_chi_vertical: "PETRA3 P23 6C" "constant_chi_vertical",
+    p23_6c_constant_phi_vertical: "PETRA3 P23 6C" "constant_phi_vertical",
+    p23_6c_lifting_detector_phi: "PETRA3 P23 6C" "lifting_detector_phi",
+    p23_6c_lifting_detector_omega: "PETRA3 P23 6C" "lifting_detector_omega",
+    p23_6c_lifting_detector_mu: "PETRA3 P23 6C" "lifting_detector_mu",
+    p23_6c_double_diffraction_vertical: "PETRA3 P23 6C" "double_diffraction_vertical",
+    p23_6c_bissector_horizontal: "PETRA3 P23 6C" "bissector_horizontal",
+    p23_6c_double_diffraction_horizontal: "PETRA3 P23 6C" "double_diffraction_horizontal",
+    p23_6c_psi_constant_vertical: "PETRA3 P23 6C" "psi_constant_vertical",
+    p23_6c_psi_constant_horizontal: "PETRA3 P23 6C" "psi_constant_horizontal",
+    p23_6c_constant_mu_horizontal: "PETRA3 P23 6C" "constant_mu_horizontal",
 }
