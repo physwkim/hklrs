@@ -1,11 +1,12 @@
 //! PONI import against pyFAI 2026.9.0 `Geometry.calc_pos_zyx`
-//! (golden/pyfai_poni.py).
+//! (golden/pyfai_poni.py), and `.poni` files pyFAI wrote
+//! (golden/pyfai_poni_files.py).
 
 pub mod common;
 
 use common::{f, load};
 use hklrs::nalgebra::{Point3, Unit, Vector3};
-use hklrs::poni::{LabAxes, Orientation, Poni};
+use hklrs::poni::{LabAxes, Orientation, Poni, PoniError, PoniFile};
 use hklrs::{Rad, presets};
 use serde_json::Value;
 
@@ -181,4 +182,98 @@ fn hkl_37_pyfai_preset_turns_rot3_as_pyfai_does() {
         }
     }
     assert_eq!(n, 3, "rot3, all and all_large");
+}
+
+/// Every `.poni` file pyFAI wrote reads as pyFAI reads it back, field by
+/// field, and places the pixels where pyFAI's `Geometry.load` of it does.
+#[test]
+fn parse_reads_pyfai_s_own_files() {
+    let g = load("pyfai_poni_files.json");
+    let mut seen = Vec::new();
+    for file in g["files"].as_array().unwrap() {
+        let name = file["file"].as_str().unwrap();
+        let path = format!("{}/../golden/poni/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).expect(&path);
+        let pf = PoniFile::parse(&text).unwrap();
+        let d = &pf.detector;
+        assert_eq!(pf.version, f(&file["version"]), "{name}");
+        assert_eq!(d.name, file["detector"].as_str().unwrap(), "{name}");
+        assert_eq!(d.pixel1, Some(f(&file["pixel1"])), "{name}");
+        assert_eq!(d.pixel2, Some(f(&file["pixel2"])), "{name}");
+        assert_eq!(
+            d.orientation.map_or(3, |o| o as u64),
+            file["orientation"].as_u64().unwrap(),
+            "{name}"
+        );
+        for (ours, key) in [
+            (pf.dist, "dist"),
+            (pf.poni1, "poni1"),
+            (pf.poni2, "poni2"),
+            (pf.rot1.0, "rot1"),
+            (pf.rot2.0, "rot2"),
+            (pf.rot3.0, "rot3"),
+        ] {
+            assert_eq!(ours, f(&file[key]), "{name} {key}");
+        }
+        match (pf.wavelength, file["wavelength"].as_f64()) {
+            (None, None) => {}
+            (Some(w), Some(m)) => {
+                let rel = (w.angstrom() * 1e-10 - m).abs() / m;
+                assert!(rel <= 2.0 * f64::EPSILON, "{name} wavelength {rel:e}");
+            }
+            other => panic!("{name} wavelength {other:?}"),
+        }
+        assert_eq!(pf.parallax, file["parallax"].as_bool().unwrap(), "{name}");
+        let max_shape = file["max_shape"].as_array().map(|s| {
+            (
+                s[0].as_u64().unwrap() as usize,
+                s[1].as_u64().unwrap() as usize,
+            )
+        });
+        seen.push((name, pf.version));
+
+        if pf.parallax {
+            assert_eq!(
+                pf.poni(),
+                Err(PoniError::Unsupported("parallax correction"))
+            );
+            continue;
+        }
+        let p = if d.name == "Detector" {
+            assert_eq!(d.max_shape, max_shape, "{name}");
+            let mut pf = pf.clone();
+            if pf.detector.max_shape.is_none() {
+                // version 1 has no shape, which the native orientation does
+                // not need; any that holds the pixels
+                assert_eq!(pf.detector.orientation, None, "{name}");
+                pf.detector.max_shape = Some((213, 347));
+            }
+            pf.poni().unwrap()
+        } else {
+            // pyFAI's class gives the shape, not the file
+            assert_eq!(d.max_shape, None, "{name}");
+            assert_eq!(pf.poni(), Err(PoniError::NamedDetector(d.name.clone())));
+            // the caller's route: the file's geometry on pyFAI's layout
+            Poni {
+                dist: pf.dist,
+                poni1: pf.poni1,
+                poni2: pf.poni2,
+                rot1: pf.rot1,
+                rot2: pf.rot2,
+                rot3: pf.rot3,
+                pixel1: f(&file["pixel1"]),
+                pixel2: f(&file["pixel2"]),
+                shape: max_shape.unwrap(),
+                orientation: d.orientation.unwrap(),
+            }
+        };
+        for (lab, beam, up) in labs() {
+            let w = worst_case(&g, file, &p, beam, up);
+            assert!(w <= TOL, "{name}, {lab} lab axes: {w} m");
+        }
+    }
+    let versioned = |v: f64| seen.iter().any(|&(_, s)| s == v);
+    assert!([1.0, 2.0, 2.1, 3.0].into_iter().all(versioned), "{seen:?}");
+    assert!(seen.iter().any(|&(n, _)| n == "v1_unversioned.poni"));
+    assert!(seen.iter().any(|&(n, _)| n == "pilatus1m.poni"));
 }

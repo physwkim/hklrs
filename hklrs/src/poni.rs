@@ -5,11 +5,15 @@
 //! with `p = pixel · (physical index + ½)` and `R = R3(rot3)·R2(rot2)·R1(rot1)`
 //! (`Geometry.rotation_matrix`). The orientation maps the image index to
 //! the physical index (`Detector._reorder_indexes_from_orientation`).
+//! [`PoniFile`] reads pyFAI's `.poni` text.
+
+use std::collections::HashMap;
 
 use nalgebra::{Matrix3, Unit, Vector3};
+use serde_json::Value;
 use thiserror::Error;
 
-use crate::{Error, PixelDetector, Rad};
+use crate::{Error, PixelDetector, Rad, Wavelength};
 
 /// Smallest sine of the angle between `up` and the beam for them to define
 /// pyFAI's axis 1.
@@ -31,6 +35,16 @@ pub enum PoniError {
     TooFewPixels { slow: usize, fast: usize },
     #[error("the pixel axes are not perpendicular (cos of their angle = {cos:e})")]
     Skewed { cos: f64 },
+    #[error("{key}: {value:?} is not what pyFAI reads there")]
+    Syntax { key: String, value: String },
+    #[error("PONI version {0} is neither 1 nor in 2-3")]
+    Version(f64),
+    #[error("the PONI file gives no {0}")]
+    Missing(&'static str),
+    #[error("pyFAI detector {0:?} takes its pixel layout from pyFAI, not the file")]
+    NamedDetector(String),
+    #[error("pyFAI's {0} moves the pixels in a way a PONI importer does not model")]
+    Unsupported(&'static str),
     #[error(transparent)]
     Core(#[from] Error),
 }
@@ -246,6 +260,254 @@ impl Poni {
     }
 }
 
+/// Name of pyFAI's generic flat detector, the one whose layout a PONI file
+/// gives in full; `Detector.factory` also finds it by its lower-case name.
+const GENERIC: &str = "detector";
+
+/// A `.poni` file as pyFAI 2026.9.0 reads it (`io/ponifile.py`
+/// `PoniFile.read_from_file` and `read_from_dict`). Lengths in metres.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoniFile {
+    /// The `poni_version` written (1 if none), raised as pyFAI does: to 2 by
+    /// a `Detector_config`, to 2.1 when that mentions an orientation, to 3
+    /// by `Parallax`.
+    pub version: f64,
+    pub detector: DetectorConfig,
+    pub parallax: bool,
+    pub dist: f64,
+    pub poni1: f64,
+    pub poni2: f64,
+    pub rot1: Rad,
+    pub rot2: Rad,
+    pub rot3: Rad,
+    /// The file's; hklrs takes the wavelength per request, not from the
+    /// detector.
+    pub wavelength: Option<Wavelength>,
+}
+
+/// The detector as a PONI file names it: version 1's `pixelsize1/2` and
+/// `splinefile`, or the `Detector_config` entries pyFAI's generic detector
+/// takes (`Detector.__init__`, `Detector.factory`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetectorConfig {
+    /// pyFAI detector name; `Detector` is the generic flat one.
+    pub name: String,
+    pub pixel1: Option<f64>,
+    pub pixel2: Option<f64>,
+    /// Never in a version 1 file, nor for a named detector of the shape
+    /// pyFAI gives its class.
+    pub max_shape: Option<(usize, usize)>,
+    /// `None` where the file has none or 0: the detector class's default.
+    pub orientation: Option<Orientation>,
+    pub binning: (u64, u64),
+    pub splinefile: Option<String>,
+}
+
+fn syntax(key: &str, value: impl ToString) -> PoniError {
+    PoniError::Syntax {
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
+
+fn count(key: &str, v: &Value) -> Result<u64, PoniError> {
+    v.as_u64().ok_or_else(|| syntax(key, v))
+}
+
+fn pair(key: &str, v: &Value) -> Result<(u64, u64), PoniError> {
+    match v.as_array().map(Vec::as_slice) {
+        Some([a, b]) => Ok((count(key, a)?, count(key, b)?)),
+        _ => Err(syntax(key, v)),
+    }
+}
+
+impl DetectorConfig {
+    fn version_1(keys: &HashMap<String, &str>, name: Option<&str>) -> Result<Self, PoniError> {
+        let pixel = |key: &str| {
+            keys.get(key)
+                .map(|v| v.parse::<f64>().map_err(|_| syntax(key, v)))
+                .transpose()
+        };
+        Ok(Self {
+            name: name.unwrap_or("Detector").to_string(),
+            pixel1: pixel("pixelsize1")?,
+            pixel2: pixel("pixelsize2")?,
+            max_shape: None,
+            orientation: None,
+            binning: (1, 1),
+            splinefile: keys
+                .get("splinefile")
+                .filter(|s| s.to_lowercase() != "none")
+                .map(|s| s.to_string()),
+        })
+    }
+
+    fn from_json(name: &str, json: Option<&str>) -> Result<Self, PoniError> {
+        let config: HashMap<String, Value> = match json.map(serde_json::from_str) {
+            None => HashMap::new(),
+            // Detector.factory lower-cases the keys
+            Some(Ok(Value::Object(map))) => map
+                .into_iter()
+                .map(|(k, v)| (k.to_lowercase(), v))
+                .collect(),
+            Some(_) => return Err(syntax("detector_config", json.unwrap_or_default())),
+        };
+        let get = |key: &str| config.get(key).filter(|v| !v.is_null());
+        // Detector.__init__: a zero pitch is no pitch
+        let pixel = |key: &str| match get(key) {
+            None => Ok(None),
+            Some(v) => match v.as_f64() {
+                Some(x) => Ok((x != 0.0).then_some(x)),
+                None => Err(syntax(key, v)),
+            },
+        };
+        let max_shape = match get("max_shape") {
+            None => None,
+            Some(v) => {
+                let n = |x: u64| usize::try_from(x).map_err(|_| syntax("max_shape", v));
+                let (a, b) = pair("max_shape", v)?;
+                Some((n(a)?, n(b)?))
+            }
+        };
+        let orientation = match get("orientation") {
+            None => None,
+            Some(v) => match u32::try_from(count("orientation", v)?) {
+                Ok(0) => None,
+                Ok(n) => Some(Orientation::try_from(n)?),
+                Err(_) => return Err(syntax("orientation", v)),
+            },
+        };
+        // Detector.factory applies a binning only when it is truthy
+        let binning = match get("binning") {
+            None => (1, 1),
+            Some(v) if v.is_array() => pair("binning", v)?,
+            Some(v) => match count("binning", v)? {
+                0 => (1, 1),
+                n => (n, n),
+            },
+        };
+        if binning.0 == 0 || binning.1 == 0 {
+            return Err(syntax("binning", format!("{binning:?}")));
+        }
+        let splinefile = match get("splinefile") {
+            None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .ok_or_else(|| syntax("splinefile", v))?
+                    .to_string(),
+            ),
+        };
+        Ok(Self {
+            name: name.to_string(),
+            pixel1: pixel("pixel1")?,
+            pixel2: pixel("pixel2")?,
+            max_shape,
+            orientation,
+            binning,
+            splinefile,
+        })
+    }
+}
+
+impl PoniFile {
+    pub fn parse(text: &str) -> Result<Self, PoniError> {
+        // read_from_file: lines without ':' or from '#' are skipped and a
+        // later key wins; Python's text mode ends lines at \n, \r\n and \r
+        let mut keys = HashMap::new();
+        for line in text.split(['\n', '\r']) {
+            if line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                keys.insert(key.trim().to_lowercase(), value.trim());
+            }
+        }
+        let float = |key: &str| {
+            keys.get(key)
+                .map(|v| v.parse::<f64>().map_err(|_| syntax(key, v)))
+                .transpose()
+        };
+        let need = |key: &'static str| float(key)?.ok_or(PoniError::Missing(key));
+
+        let mut version = float("poni_version")?.unwrap_or(1.0);
+        // Python's max keeps a NaN that f64::max drops
+        if version.is_nan() {
+            return Err(PoniError::Version(version));
+        }
+        let json = keys.get("detector_config").copied();
+        if let Some(json) = json {
+            // pyFAI tests the JSON text, not its keys
+            version = version.max(if json.contains("orientation") {
+                2.1
+            } else {
+                2.0
+            });
+        }
+        let parallax = keys.get("parallax");
+        if parallax.is_some() {
+            version = version.max(3.0);
+        }
+        let name = keys.get("detector").copied();
+        let detector = if version == 1.0 {
+            DetectorConfig::version_1(&keys, name)?
+        } else if (2.0..=3.0).contains(&version) {
+            DetectorConfig::from_json(name.ok_or(PoniError::Missing("detector"))?, json)?
+        } else {
+            // pyFAI refuses above 3 and leaves the detector unset between
+            return Err(PoniError::Version(version));
+        };
+        let dist = match float("distance")? {
+            Some(d) => d,
+            None => float("dist")?.ok_or(PoniError::Missing("distance"))?,
+        };
+        Ok(PoniFile {
+            version,
+            detector,
+            parallax: parallax.is_some_and(|v| v.to_lowercase() == "true"),
+            dist,
+            poni1: need("poni1")?,
+            poni2: need("poni2")?,
+            rot1: Rad(need("rot1")?),
+            rot2: Rad(need("rot2")?),
+            rot3: Rad(need("rot3")?),
+            wavelength: float("wavelength")?
+                .map(|m| Wavelength::new(m * 1e10))
+                .transpose()?,
+        })
+    }
+
+    /// The PONI of pyFAI's generic flat detector. A named detector's pitch,
+    /// shape and default orientation come from pyFAI's class, so the caller
+    /// builds its [`Poni`] from these fields and that layout.
+    pub fn poni(&self) -> Result<Poni, PoniError> {
+        let d = &self.detector;
+        if d.name.to_lowercase() != GENERIC {
+            return Err(PoniError::NamedDetector(d.name.clone()));
+        }
+        if d.splinefile.is_some() {
+            return Err(PoniError::Unsupported("spline file"));
+        }
+        if self.parallax {
+            return Err(PoniError::Unsupported("parallax correction"));
+        }
+        if d.binning != (1, 1) {
+            return Err(PoniError::Unsupported("binning"));
+        }
+        Ok(Poni {
+            dist: self.dist,
+            poni1: self.poni1,
+            poni2: self.poni2,
+            rot1: self.rot1,
+            rot2: self.rot2,
+            rot3: self.rot3,
+            pixel1: d.pixel1.ok_or(PoniError::Missing("pixel1"))?,
+            pixel2: d.pixel2.ok_or(PoniError::Missing("pixel2"))?,
+            shape: d.max_shape.ok_or(PoniError::Missing("max_shape"))?,
+            orientation: d.orientation.unwrap_or(Orientation::BottomRight),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::f64::consts::{FRAC_PI_2, PI};
@@ -415,5 +677,143 @@ mod tests {
             Poni::from_detector(&skewed, o, &lab),
             Err(PoniError::Skewed { .. })
         ));
+    }
+
+    // Each text below was read by pyFAI 2026.9.0 `PoniFile(path)`; the
+    // comment before it gives what pyFAI made of it.
+    const GEOMETRY: &str =
+        "Distance: 0.31\nPoni1: 0.0071\nPoni2: 0.0253\nRot1: 0.21\nRot2: -0.13\nRot3: 0.37\n";
+
+    fn parse(head: &str) -> Result<PoniFile, PoniError> {
+        PoniFile::parse(&format!("{head}{GEOMETRY}"))
+    }
+
+    #[test]
+    fn parse_reads_lines_as_pyfai_does() {
+        // version 2.1, pixels 1e-4 and 2e-4, max_shape (10, 20), orientation 2
+        let text = "poni_version: 2.1\r\nDetector: Detector\rDetector_config: {\"pixel1\": 1e-4, \
+                    \"pixel2\": 2e-4, \"max_shape\": [10, 20], \"orientation\": 2}\r\n"
+            .to_string()
+            + &GEOMETRY.replace('\n', "\r");
+        let f = PoniFile::parse(&text).unwrap();
+        assert_eq!((f.version, f.dist, f.rot3), (2.1, 0.31, Rad(0.37)));
+        let p = f.poni().unwrap();
+        assert_eq!((p.pixel1, p.pixel2, p.shape), (1e-4, 2e-4, (10, 20)));
+        assert_eq!(p.orientation, Orientation::TopRight);
+
+        // pixel1 3e-4, dist 0.5, rot1 0.21, rot3 0.4: keys in any case and
+        // spacing, the later line wins, `dist` stands for `Distance`, and a
+        // commented line is not read
+        let f = PoniFile::parse(
+            "  DETECTOR  :  Detector \npixelsize1: 1e-4\nPIXELSIZE1: 3e-4\npixelsize2: 2e-4\n\
+             dist: 0.5\nPoni1: 0.0071\nPoni2: 0.0253\nRot1: 0.21\nRot2: -0.13\nRot3: 0.37\n\
+             Rot3: 0.4\n# Rot1: 9\n",
+        )
+        .unwrap();
+        assert_eq!(f.detector.pixel1, Some(3e-4));
+        assert_eq!((f.dist, f.rot1, f.rot3), (0.5, Rad(0.21), Rad(0.4)));
+        // dist 0.31: `Distance` over `dist`
+        let f = parse("dist: 0.5\n").unwrap();
+        assert_eq!(f.dist, 0.31);
+    }
+
+    #[test]
+    fn parse_reads_the_detector_as_pyfai_does() {
+        let v1 = "pixelsize1: 1e-4\npixelsize2: 2e-4\n";
+        // generic Detector without a spline; version 1 has no shape
+        for head in [
+            format!("Detector: Detector\n{v1}splinefile: NoNe\n"),
+            v1.to_string(),
+        ] {
+            let f = parse(&head).unwrap();
+            assert_eq!(f.version, 1.0);
+            assert_eq!(
+                (f.detector.name.as_str(), f.detector.splinefile.as_deref()),
+                ("Detector", None)
+            );
+            assert_eq!(f.poni(), Err(PoniError::Missing("max_shape")));
+        }
+        // version 2: a Detector_config raises the written 1
+        let f = parse(
+            "poni_version: 1\nDetector: Detector\nDetector_config: {\"pixel1\": 1e-4, \
+             \"pixel2\": 2e-4, \"max_shape\": [10, 20]}\n",
+        )
+        .unwrap();
+        assert_eq!(f.version, 2.0);
+        // generic, orientation 3: the name and the config keys in any case
+        let f = parse(
+            "poni_version: 2.1\nDetector: detector\nDetector_config: {\"Pixel1\": 1e-4, \
+             \"PIXEL2\": 2e-4, \"Max_Shape\": [10, 20], \"orientation\": 0}\n",
+        )
+        .unwrap();
+        assert_eq!(f.detector.orientation, None);
+        let p = f.poni().unwrap();
+        assert_eq!((p.pixel1, p.pixel2, p.shape), (1e-4, 2e-4, (10, 20)));
+        assert_eq!(p.orientation, Orientation::BottomRight);
+        // version 3, parallax on
+        let f = parse(
+            "poni_version: 2.1\nDetector: Detector\nDetector_config: {\"pixel1\": 1e-4, \
+             \"pixel2\": 2e-4, \"orientation\": 3}\nParallax:  TRUE \n",
+        )
+        .unwrap();
+        assert_eq!((f.version, f.parallax), (3.0, true));
+        assert_eq!(f.poni(), Err(PoniError::Unsupported("parallax correction")));
+        // binning (2, 2): pixels 2e-4 and 4e-4, shape (5, 10)
+        let f = parse(
+            "poni_version: 2\nDetector: Detector\nDetector_config: {\"pixel1\": 1e-4, \
+             \"pixel2\": 2e-4, \"max_shape\": [10, 20], \"binning\": [2, 2]}\n",
+        )
+        .unwrap();
+        assert_eq!(f.detector.binning, (2, 2));
+        assert_eq!(f.poni(), Err(PoniError::Unsupported("binning")));
+    }
+
+    #[test]
+    fn parse_refuses_what_pyfai_refuses_or_leaves_without_a_detector() {
+        let v1 = "Detector: Detector\npixelsize1: 1e-4\npixelsize2: 2e-4\n";
+        let config = "Detector_config: {\"pixel1\": 1e-4, \"pixel2\": 2e-4";
+        // no detector
+        assert_eq!(
+            parse(&format!("poni_version: 1.5\n{v1}")),
+            Err(PoniError::Version(1.5))
+        );
+        assert!(matches!(
+            parse(&format!("poni_version: nan\n{v1}")),
+            Err(PoniError::Version(v)) if v.is_nan()
+        ));
+        // RuntimeError: too recent
+        assert_eq!(
+            parse(&format!(
+                "poni_version: 4\nDetector: Detector\n{config}}}\n"
+            )),
+            Err(PoniError::Version(4.0))
+        );
+        // KeyError 'detector'
+        assert_eq!(
+            parse(&format!("poni_version: 2\n{config}}}\n")),
+            Err(PoniError::Missing("detector"))
+        );
+        // RuntimeError: unsupported orientation
+        assert_eq!(
+            parse(&format!(
+                "poni_version: 2.1\nDetector: Detector\n{config}, \"orientation\": 5}}\n"
+            )),
+            Err(PoniError::Orientation(5))
+        );
+        // JSONDecodeError
+        assert!(matches!(
+            parse(&format!("poni_version: 2\nDetector: Detector\n{config}\n")),
+            Err(PoniError::Syntax { key, .. }) if key == "detector_config"
+        ));
+        // ValueError: could not convert string to float
+        assert!(matches!(
+            PoniFile::parse(&format!("{v1}{}", GEOMETRY.replace("Rot1: 0.21", "Rot1: abc"))),
+            Err(PoniError::Syntax { key, value }) if key == "rot1" && value == "abc"
+        ));
+        // rot2 None, which hklrs refuses
+        assert_eq!(
+            PoniFile::parse(&format!("{v1}{}", GEOMETRY.replace("Rot2: -0.13\n", ""))),
+            Err(PoniError::Missing("rot2"))
+        );
     }
 }
