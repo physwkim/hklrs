@@ -13,6 +13,7 @@ pub mod esrf_bm28_psic;
 pub mod esrf_id01_psic;
 mod jet;
 pub mod k4c;
+pub mod k6c;
 pub mod kappa;
 mod mode;
 mod solve;
