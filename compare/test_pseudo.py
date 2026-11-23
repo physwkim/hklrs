@@ -1,10 +1,11 @@
 """hklrs.pseudo against libhkl 5.1.9 (gi, live): q, q2, tth2, qper_qpar,
 incidence, emergence over every preset the installed libhkl has them for.
 
-Not compared: the incidence azimuth. incidence and emergence both register
-the pseudo axis "azimuth", hkl shares one parameter between them and the
-engine computed last wins, so libhkl's incidence azimuth is not incidence's
-(hklrs/tests/hkl_pseudo.rs checks it against an independent value).
+HKL-20: incidence and emergence both register the pseudo axis "azimuth", hkl
+shares one parameter between them and the engine computed last wins, so
+libhkl's incidence azimuth is emergence's, taken with emergence's own normal.
+The incidence azimuth is therefore asserted to equal libhkl's emergence
+azimuth (normals differing), and hklrs's to equal an independent numpy value.
 Points with 2 theta < TTH_MIN are skipped (hkl_vector_angle's acos, HKL-11).
 """
 import math
@@ -14,10 +15,11 @@ import numpy as np
 import pytest
 
 import hklrs
-from test_hkl import UNIT, USER, Hkl
+from test_hkl import UNIT, USER, Hkl, quat_matrix as quat
 
 ENGINES = ("q", "q2", "tth2", "qper_qpar", "incidence", "emergence")
 NORMALS = ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 2.0, -3.0), (0.0, 3.0, 4.0))
+N_EMERGENCE = (2.0, -1.0, 5.0)  # emergence's normal while incidence's varies (HKL-20)
 WL = 1.54
 N_RANDOM = 12
 TTH_MIN = 0.1   # degrees
@@ -51,6 +53,16 @@ def configs(preset, geo):
                       else rng.uniform(-180.0, 180.0) for u in units]
 
 
+def numpy_azimuth(geo, smp, ki, n):
+    """Angle from y of the lab-frame normal projected on the plane normal to ki."""
+    nl = quat(geo.sample_rotation_get(smp)) @ np.array(n)
+    nl /= np.linalg.norm(nl)
+    pr = nl - ki * (nl @ ki)
+    if np.linalg.norm(pr) < 1e-9:
+        return None
+    return math.degrees(math.atan2(np.linalg.norm(np.cross(pr, [0, 1, 0])), pr[1]))
+
+
 @pytest.mark.parametrize("engine", ENGINES)
 def test_pseudo_against_libhkl(preset, engine):
     geo, smp, el, engines = rig(preset)
@@ -68,6 +80,8 @@ def test_pseudo_against_libhkl(preset, engine):
         for surf in rng_n:
             if surf is not None:
                 eng.parameters_values_set(list(surf), USER)
+            if engine == "incidence":
+                engines["emergence"].parameters_values_set(list(N_EMERGENCE), USER)
             assert el.get()
             theirs = [float(x) for x in eng.pseudo_axis_values_get(USER)]
             ours = hklrs.pseudo(g, engine, canon, WL, surface=surf)
@@ -75,6 +89,15 @@ def test_pseudo_against_libhkl(preset, engine):
             for i, (a, b) in enumerate(zip(ours, theirs)):
                 if engine in ("incidence", "emergence") and i == 1:
                     if engine == "incidence":
+                        ki = np.array(f["ki"])
+                        want = numpy_azimuth(geo, smp, ki, surf)
+                        if want is None:
+                            assert a is None
+                        else:
+                            assert abs(wrap(a - want)) < TOL, (preset, canon, surf, a, want)
+                            # HKL-20: libhkl's incidence azimuth is emergence's, with N_EMERGENCE
+                            em = hklrs.pseudo(g, "emergence", canon, WL, surface=N_EMERGENCE)[1]
+                            assert abs(wrap(b - em)) < TOL, (preset, canon, surf, b, em)
                         continue
                     if a is None:
                         assert abs(b) < TOL

@@ -126,10 +126,10 @@ fn pseudos_match_hkl() {
                     value.0.to_degrees(),
                     hkl(0)
                 );
-                // hkl's "azimuth" is one object shared by both engines, so its
-                // incidence azimuth is the emergence engine's (unassigned
-                // defect, see the task report); the independent value is the
-                // reference there. Emergence is computed last and is hkl's.
+                // HKL-20: hkl's "azimuth" is one object shared by both engines, so
+                // its incidence azimuth is the emergence engine's; the independent
+                // value is the reference there. Emergence is computed last and is
+                // hkl's. compare/test_pseudo.py asserts the sharing itself.
                 let want = if engine == "incidence" {
                     &case["numpy"]["azimuth_incidence"]
                 } else {
