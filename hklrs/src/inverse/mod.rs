@@ -26,6 +26,7 @@ pub mod soleil_nanoscopium_robot;
 pub mod soleil_sirius_turret;
 pub mod soleil_sixs_med;
 mod solve;
+mod spec;
 mod system;
 mod validate;
 pub mod zaxis;
@@ -37,6 +38,7 @@ use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use crate::{Error, Geometry, Wavelength};
 
 pub use mode::{Equation, Eulerian, Mode, Slits};
+pub use spec::ModeSpec;
 
 /// Relative excess of |Q| over 2k still solved, pulled onto 2k: UB·h alone
 /// rounds by ~1e-15, so a strict test would turn exact backscatter targets
@@ -130,6 +132,10 @@ pub enum InverseError {
     NotKappaArm { names: [String; 3] },
     #[error("a kappa equation needs a mode made with Mode::new_kappa")]
     NoKappaArm,
+    #[error("unknown mode {name:?}")]
+    UnknownMode { name: String },
+    #[error("mode {mode:?} needs {needs}")]
+    ModeParameter { mode: String, needs: &'static str },
     #[error(transparent)]
     Geometry(#[from] Error),
     #[error(

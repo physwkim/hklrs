@@ -204,6 +204,20 @@ def test_unreachable_raises(preset, mode):
             hklrs.pick(m, rig.sample, h, WL, start)
 
 
+def test_mode_raises_unknown_names_and_missing_parameters_by_type():
+    """Mode reads its name and parameters through the core's ModeSpec: an
+    unknown name and a missing parameter raise its variants' subclasses."""
+    g = hklrs.Geometry.preset("E4CV")
+    with pytest.raises(hklrs.UnknownMode) as e:
+        hklrs.Mode(g, "nope")
+    assert e.value.name == "nope" and isinstance(e.value, ValueError)
+    for mode, needs, kw in (("double_diffraction", "hkl2", {}),
+                            ("psi_constant", "reference and psi", {"reference": [1.0, 0.0, 0.0]})):
+        with pytest.raises(hklrs.ModeParameter) as e:
+            hklrs.Mode(g, mode, **kw)
+        assert (e.value.mode, e.value.needs) == (mode, needs)
+
+
 def libhkl_psi(rig, axes, ref):
     """(psi, ok): libhkl's read-only "psi" engine for `axes` and reference `ref`
     (degrees); ok is hkl_engine_list_get's AND over every engine."""

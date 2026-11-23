@@ -291,58 +291,16 @@ impl PySample {
 struct PyMode {
     /// Shared, not copied: limits set on it after the mode is made apply.
     geometry: Py<PyGeometry>,
-    name: String,
-    hkl2: Option<Vector3<f64>>,
-    reference: Option<Vector3<f64>>,
-    /// rad
-    psi: Option<f64>,
+    spec: hklrs::ModeSpec,
 }
 
 impl PyMode {
-    /// The one place a name meets its mode: unknown names and missing
-    /// parameters fail here, at construction and at every solve alike.
+    /// Unknown names and missing parameters fail here, at construction and
+    /// at every solve alike.
     fn build<'g>(&self, py: Python<'_>, g: &'g hklrs::Geometry) -> PyResult<hklrs::Mode<'g>> {
-        use hklrs::inverse::{e4c, e6c};
-        let name = self.name.as_str();
-        let missing = |what| PyValueError::new_err(format!("mode {name:?} needs {what}"));
-        let hkl2 = || self.hkl2.ok_or_else(|| missing("hkl2"));
-        let psi = || {
-            self.reference
-                .zip(self.psi)
-                .ok_or_else(|| missing("reference and psi"))
-        };
-        let mode = match name {
-            "bissector" => e4c::bissector(g),
-            "constant_omega" => e4c::constant_omega(g),
-            "constant_chi" => e4c::constant_chi(g),
-            "constant_phi" => e4c::constant_phi(g),
-            "double_diffraction" => e4c::double_diffraction(g, hkl2()?),
-            "psi_constant" => {
-                let (reference, psi) = psi()?;
-                e4c::psi_constant(g, reference, psi)
-            }
-            "bissector_vertical" => e6c::bissector_vertical(g),
-            "constant_omega_vertical" => e6c::constant_omega_vertical(g),
-            "constant_chi_vertical" => e6c::constant_chi_vertical(g),
-            "constant_phi_vertical" => e6c::constant_phi_vertical(g),
-            "lifting_detector_phi" => e6c::lifting_detector_phi(g),
-            "lifting_detector_omega" => e6c::lifting_detector_omega(g),
-            "lifting_detector_mu" => e6c::lifting_detector_mu(g),
-            "double_diffraction_vertical" => e6c::double_diffraction_vertical(g, hkl2()?),
-            "bissector_horizontal" => e6c::bissector_horizontal(g),
-            "double_diffraction_horizontal" => e6c::double_diffraction_horizontal(g, hkl2()?),
-            "psi_constant_vertical" => {
-                let (reference, psi) = psi()?;
-                e6c::psi_constant_vertical(g, reference, psi)
-            }
-            "psi_constant_horizontal" => {
-                let (reference, psi) = psi()?;
-                e6c::psi_constant_horizontal(g, reference, psi)
-            }
-            "constant_mu_horizontal" => e6c::constant_mu_horizontal(g),
-            _ => return Err(PyValueError::new_err(format!("unknown mode {name:?}"))),
-        };
-        mode.map_err(|e| inverse_error::to_py(py, g, e))
+        self.spec
+            .build(g)
+            .map_err(|e| inverse_error::to_py(py, g, e))
     }
 }
 
@@ -370,10 +328,13 @@ impl PyMode {
     ) -> PyResult<Self> {
         let mode = Self {
             geometry: geometry.clone().unbind(),
-            name: name.to_owned(),
-            hkl2: hkl2.map(Vector3::from),
-            reference: reference.map(Vector3::from),
-            psi: psi.map(f64::to_radians),
+            spec: hklrs::ModeSpec {
+                name: name.to_owned(),
+                hkl2: hkl2.map(Vector3::from),
+                psi: reference
+                    .zip(psi)
+                    .map(|(r, psi)| (Vector3::from(r), psi.to_radians())),
+            },
         };
         mode.build(py, &geometry.try_borrow()?.0)?;
         Ok(mode)
@@ -381,7 +342,7 @@ impl PyMode {
 
     #[getter]
     fn name(&self) -> &str {
-        &self.name
+        &self.spec.name
     }
 }
 
