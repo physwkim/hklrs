@@ -2,12 +2,45 @@
 //! translations metres, wavelength Å.
 
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
+use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 fn err(e: hklrs::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
+}
+
+create_exception!(hklrs, InverseError, PyValueError, "The inverse failed.");
+create_exception!(
+    hklrs,
+    Unreachable,
+    InverseError,
+    "|Q| exceeds 4 pi / wavelength; carries q and q_max (Å⁻¹)."
+);
+create_exception!(
+    hklrs,
+    NoSolution,
+    InverseError,
+    "No axis values satisfy the mode."
+);
+
+fn inverse_err(py: Python<'_>, e: hklrs::InverseError) -> PyErr {
+    use hklrs::InverseError as E;
+    let msg = e.to_string();
+    match e {
+        E::Unreachable { q, q_max } => {
+            let err = Unreachable::new_err(msg);
+            let v = err.value(py);
+            // Plain floats cannot fail to set on a fresh exception.
+            let _ = v.setattr("q", q);
+            let _ = v.setattr("q_max", q_max);
+            err
+        }
+        E::NoSolution => NoSolution::new_err(msg),
+        E::Geometry(g) => err(g),
+        _ => InverseError::new_err(msg),
+    }
 }
 
 fn rows(m: &Matrix3<f64>) -> [[f64; 3]; 3] {
@@ -204,6 +237,183 @@ impl PySample {
     }
 }
 
+/// An E4C inverse mode, validated against the geometry it was built for.
+#[pyclass(name = "Mode", frozen)]
+struct PyMode {
+    geometry: hklrs::Geometry,
+    name: String,
+    hkl2: Option<Vector3<f64>>,
+    reference: Option<Vector3<f64>>,
+    psi: f64,
+}
+
+impl PyMode {
+    fn build(&self) -> Result<hklrs::Mode<'_>, hklrs::InverseError> {
+        use hklrs::inverse::e4c;
+        let g = &self.geometry;
+        match self.name.as_str() {
+            "bissector" => e4c::bissector(g),
+            "constant_omega" => e4c::constant_omega(g),
+            "constant_chi" => e4c::constant_chi(g),
+            "constant_phi" => e4c::constant_phi(g),
+            "double_diffraction" => e4c::double_diffraction(g, self.hkl2.unwrap_or_default()),
+            _ => e4c::psi_constant(g, self.reference.unwrap_or_default(), self.psi),
+        }
+    }
+}
+
+const MODES: [&str; 6] = [
+    "bissector",
+    "constant_omega",
+    "constant_chi",
+    "constant_phi",
+    "double_diffraction",
+    "psi_constant",
+];
+
+#[pymethods]
+impl PyMode {
+    /// E4C mode by name: bissector, constant_omega, constant_chi,
+    /// constant_phi, double_diffraction (needs `hkl2`) or psi_constant
+    /// (needs `reference` and `psi`, degrees). The constant_* modes hold
+    /// their axis at the `current` passed to `solve`.
+    #[new]
+    #[pyo3(signature = (geometry, name, hkl2=None, reference=None, psi=None))]
+    fn new(
+        py: Python<'_>,
+        geometry: &PyGeometry,
+        name: &str,
+        hkl2: Option<[f64; 3]>,
+        reference: Option<[f64; 3]>,
+        psi: Option<f64>,
+    ) -> PyResult<Self> {
+        if !MODES.contains(&name) {
+            return Err(PyValueError::new_err(format!(
+                "unknown mode {name:?}; one of {MODES:?}"
+            )));
+        }
+        let need = |ok: bool, what: &str| {
+            if ok {
+                Ok(())
+            } else {
+                Err(PyValueError::new_err(format!("mode {name:?} needs {what}")))
+            }
+        };
+        match name {
+            "double_diffraction" => need(hkl2.is_some(), "hkl2")?,
+            "psi_constant" => need(reference.is_some() && psi.is_some(), "reference and psi")?,
+            _ => {}
+        }
+        let mode = Self {
+            geometry: geometry.0.clone(),
+            name: name.to_owned(),
+            hkl2: hkl2.map(Vector3::from),
+            reference: reference.map(Vector3::from),
+            psi: psi.map_or(0.0, f64::to_radians),
+        };
+        mode.build().map_err(|e| inverse_err(py, e))?;
+        Ok(mode)
+    }
+
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+fn request<'a>(
+    mode: &'a hklrs::Mode<'a>,
+    sample: &PySample,
+    hkl: [f64; 3],
+    wavelength: f64,
+    current: &'a [f64],
+) -> PyResult<hklrs::InverseRequest<'a>> {
+    Ok(hklrs::InverseRequest {
+        mode,
+        ub: sample.0.ub(),
+        wavelength: hklrs::Wavelength::new(wavelength).map_err(err)?,
+        target: hklrs::Target::Hkl(Vector3::from(hkl)),
+        current,
+    })
+}
+
+/// Every solution for `hkl`, nearest to `current` first. `current` and the
+/// results are all axes in geometry order, degrees / metres; held axes are
+/// returned as given. Raises `Unreachable` when |Q| > 4π/λ, `NoSolution`
+/// when the mode has none.
+#[pyfunction]
+fn solve(
+    py: Python<'_>,
+    mode: &PyMode,
+    sample: &PySample,
+    hkl: [f64; 3],
+    wavelength: f64,
+    current: Vec<f64>,
+) -> PyResult<Vec<Vec<f64>>> {
+    let ie = |e| inverse_err(py, e);
+    let m = mode.build().map_err(ie)?;
+    let geo = m.geometry();
+    let cur = geo.values_from_degrees(&current).map_err(err)?;
+    let all = request(&m, sample, hkl, wavelength, &cur)?
+        .solve()
+        .map_err(ie)?;
+    all.iter()
+        .map(|s| geo.values_to_degrees(s).map_err(err))
+        .collect()
+}
+
+/// One solution: `picker` "closest" (nearest to `current`) or "first" (the
+/// first the search reached). Arguments and errors as for `solve`.
+#[pyfunction]
+#[pyo3(signature = (mode, sample, hkl, wavelength, current, picker="closest"))]
+fn pick(
+    py: Python<'_>,
+    mode: &PyMode,
+    sample: &PySample,
+    hkl: [f64; 3],
+    wavelength: f64,
+    current: Vec<f64>,
+    picker: &str,
+) -> PyResult<Vec<f64>> {
+    let picker = match picker {
+        "closest" => hklrs::Picker::Closest,
+        "first" => hklrs::Picker::First,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "picker must be \"closest\" or \"first\", got {other:?}"
+            )));
+        }
+    };
+    let ie = |e| inverse_err(py, e);
+    let m = mode.build().map_err(ie)?;
+    let geo = m.geometry();
+    let cur = geo.values_from_degrees(&current).map_err(err)?;
+    let s = request(&m, sample, hkl, wavelength, &cur)?
+        .pick(picker)
+        .map_err(ie)?;
+    geo.values_to_degrees(&s).map_err(err)
+}
+
+/// ψ of `reference` (Miller indices) at `axes`, degrees.
+#[pyfunction]
+fn psi(
+    py: Python<'_>,
+    geometry: &PyGeometry,
+    sample: &PySample,
+    reference: [f64; 3],
+    axes: Vec<f64>,
+) -> PyResult<f64> {
+    let values = geometry.0.values_from_degrees(&axes).map_err(err)?;
+    hklrs::inverse::psi(
+        &geometry.0,
+        &sample.0.ub(),
+        &Vector3::from(reference),
+        &values,
+    )
+    .map(|p| hklrs::Deg::from(hklrs::Rad(p)).0)
+    .map_err(|e| inverse_err(py, e))
+}
+
 /// Forward for one detector point. `axes` in geometry axis order (degrees /
 /// metres); `point` in the detector-arm frame, metres, default 1 m along the
 /// beam. Returns a dict of hkl, q_lab, q_sample, kf, ki, tth (degrees) and q (Å⁻¹).
@@ -244,6 +454,13 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGeometry>()?;
     m.add_class::<PyReflection>()?;
     m.add_class::<PySample>()?;
+    m.add_class::<PyMode>()?;
+    m.add("InverseError", m.py().get_type::<InverseError>())?;
+    m.add("Unreachable", m.py().get_type::<Unreachable>())?;
+    m.add("NoSolution", m.py().get_type::<NoSolution>())?;
+    m.add_function(wrap_pyfunction!(solve, m)?)?;
+    m.add_function(wrap_pyfunction!(pick, m)?)?;
+    m.add_function(wrap_pyfunction!(psi, m)?)?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
     Ok(())
