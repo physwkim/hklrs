@@ -3,6 +3,7 @@
 //! Units are fixed: radians, Å for lattice and wavelength, metres for
 //! detector geometry and translations, keV for energy. Q includes 2π.
 
+pub mod absorption;
 mod detector;
 mod error;
 mod forward;
@@ -27,6 +28,6 @@ pub use qmap::{
     solid_angle,
 };
 pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
-pub use units::{Deg, Energy, HC_KEV_ANGSTROM, Rad, Wavelength};
+pub use units::{Deg, Energy, HC_KEV_ANGSTROM, PerMetre, Rad, Wavelength};
 
 pub use nalgebra;
