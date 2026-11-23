@@ -2,7 +2,7 @@
 
 use nalgebra::{Point3, Unit, Vector3};
 
-use crate::{Error, Geometry, Rad, Sample, Wavelength};
+use crate::{Error, Geometry, Poses, Rad, Sample, Wavelength};
 
 /// The sample-independent part of the forward kernel.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,21 +41,37 @@ pub fn scattering(
     point: &Point3<f64>,
 ) -> Result<Scattering, Error> {
     let poses = geometry.poses(values)?;
-    let scattered = poses.detector * point - poses.sample_position();
-    let kf = Unit::try_new(scattered, 0.0).ok_or(Error::DetectorAtSample)?;
+    Ok(scattering_at(geometry, &poses, wavelength, point)?.1)
+}
+
+/// The kernel behind [`scattering`] and the batch map: `poses` are those of
+/// one set of axis values, so a frame computes them once. Returns the
+/// detector point in the lab frame relative to the sample, metres, and its
+/// [`Scattering`].
+pub fn scattering_at(
+    geometry: &Geometry,
+    poses: &Poses,
+    wavelength: Wavelength,
+    point: &Point3<f64>,
+) -> Result<(Vector3<f64>, Scattering), Error> {
+    let p = poses.detector * point - poses.sample_position();
+    let kf = Unit::try_new(p, 0.0).ok_or(Error::DetectorAtSample)?;
     let ki = poses.source * geometry.beam_direction();
     let q_lab = wavelength.wavenumber() * (kf.into_inner() - ki.into_inner());
     let tth = angle_between(&ki, &kf);
-    Ok(Scattering {
-        kf,
-        ki,
-        q_lab,
-        q_sample: poses.sample.rotation.inverse() * q_lab,
-        tth,
-        // from 2θ, not |q_lab|: the difference of two unit vectors loses
-        // relative precision near the direct beam
-        q: 2.0 * wavelength.wavenumber() * (tth.0 / 2.0).sin(),
-    })
+    Ok((
+        p,
+        Scattering {
+            kf,
+            ki,
+            q_lab,
+            q_sample: poses.sample.rotation.inverse() * q_lab,
+            tth,
+            // from 2θ, not |q_lab|: the difference of two unit vectors loses
+            // relative precision near the direct beam
+            q: 2.0 * wavelength.wavenumber() * (tth.0 / 2.0).sin(),
+        },
+    ))
 }
 
 /// [`scattering`] plus the Miller indices of its Q for `sample`.
