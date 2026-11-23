@@ -342,7 +342,9 @@ impl<'a> System<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inverse::{aps_04id_polar as polar, e4c, e6c, soleil_sixs_med as med, zaxis};
+    use crate::inverse::{
+        aps_04id_polar as polar, e4c, e6c, petra3_p09_eh2 as p09, soleil_sixs_med as med, zaxis,
+    };
     use crate::presets::preset;
 
     fn modes<'g>(name: &str, geo: &'g Geometry) -> Vec<Mode<'g>> {
@@ -368,6 +370,11 @@ mod tests {
                 polar::zaxis_alpha_eq_beta(geo).unwrap(),
                 polar::bissecting_horizontal(geo).unwrap(),
                 polar::psi_constant_vertical(geo, reference, 0.4).unwrap(),
+            ],
+            "PETRA3 P09 EH2" => vec![
+                p09::zaxis_beta_fixed(geo).unwrap(),
+                p09::zaxis_alpha_eq_beta(geo).unwrap(),
+                p09::bissecting_horizontal(geo).unwrap(),
             ],
             "E6C" => vec![
                 e6c::bissector_vertical(geo).unwrap(),
@@ -483,9 +490,10 @@ mod tests {
     /// Analytic Jacobian against a central difference of the residual, for
     /// every E4C mode, every kind of E6C mode and an emergence one, both
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
-    /// stacks), APS POLAR ones writing tau (in both stacks), every kappa
-    /// eulerian row on K4CV and the surface rows on K6C, at points away from
-    /// the wrap cuts of the angular rows and from kappa = 0.
+    /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
+    /// (in both stacks), every kappa eulerian row on K4CV and the surface rows
+    /// on K6C, at points away from the wrap cuts of the angular rows and from
+    /// kappa = 0.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
@@ -505,6 +513,7 @@ mod tests {
             "SOLEIL SIXS MED1+2",
             "SOLEIL SIXS MED2+3",
             "APS POLAR",
+            "PETRA3 P09 EH2",
             "K4CV",
             "K6C",
         ] {

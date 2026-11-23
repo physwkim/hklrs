@@ -8,7 +8,8 @@ mod inverse_check;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use hklrs::inverse::{
-    self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, soleil_sixs_med, zaxis,
+    self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, petra3_p09_eh2,
+    soleil_sixs_med, zaxis,
 };
 use hklrs::nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
 use hklrs::presets::{KAPPA_ALPHA_DEG, kappa_axis, preset};
@@ -831,16 +832,17 @@ fn bm28_coplanar_at_chi_zero_reaches_only_q_normal_to_phi() {
     }
 }
 
-/// APS POLAR zaxis + beta-fixed from a position hkl's mode cannot hold:
-/// with the surface normal along mu's axis (chi = phi = 0), every solution
-/// keeps the exit β = delta and moves the incidence α = tau, and the
-/// position itself is among them. hkl 5.1.9 writes delta here.
-#[test]
-fn polar_beta_fixed_holds_the_exit_angle() {
-    let geo = preset("APS POLAR").unwrap();
-    let mode = aps_04id_polar::zaxis_beta_fixed(&geo).unwrap();
+/// zaxis + beta-fixed of `name`, whose axes 0 and 5 are α and β with the
+/// surface normal along z of the second sample axis (chi = phi = 0), from a
+/// position hkl's mode cannot hold: every solution keeps β and moves α, and
+/// the position itself is among them.
+fn beta_fixed_holds_the_exit_angle(
+    name: &str,
+    mode: fn(&Geometry) -> Result<Mode<'_>, InverseError>,
+) {
+    let geo = preset(name).unwrap();
+    let mode = mode(&geo).unwrap();
     let beam = geo.beam_direction().into_inner();
-    // tau, mu, chi, phi, gamma, delta
     let at = geo
         .values_from_degrees(&[3.0, 40.0, 0.0, 0.0, 25.0, 7.0])
         .unwrap();
@@ -866,6 +868,18 @@ fn polar_beta_fixed_holds_the_exit_angle() {
         assert!((n.dot(&kf) - current[5].sin()).abs() <= 1e-12, "{s:?}");
         assert!((-n.dot(&ki) - s[0].sin()).abs() <= 1e-12, "{s:?}");
     }
+}
+
+/// tau, mu, chi, phi, gamma, delta: β = delta, which hkl 5.1.9 writes.
+#[test]
+fn polar_beta_fixed_holds_the_exit_angle() {
+    beta_fixed_holds_the_exit_angle("APS POLAR", aps_04id_polar::zaxis_beta_fixed);
+}
+
+/// mu, omega, chi, phi, delta, gamma: β = gamma, which hkl 5.1.9 writes.
+#[test]
+fn p09_beta_fixed_holds_the_exit_angle() {
+    beta_fixed_holds_the_exit_angle("PETRA3 P09 EH2", petra3_p09_eh2::zaxis_beta_fixed);
 }
 
 type Solutions = Result<Vec<Vec<f64>>, InverseError>;
