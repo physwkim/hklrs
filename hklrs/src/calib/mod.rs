@@ -17,7 +17,10 @@ pub mod lm;
 mod model;
 pub mod peak;
 
-pub use fit::{AreaModel, AreaStart, LinearModel, LinearStart, calibrate_area, calibrate_linear};
+pub use fit::{
+    AreaHkl, AreaHklStart, AreaModel, AreaStart, LinearHkl, LinearHklStart, LinearModel,
+    LinearStart, calibrate_area, calibrate_area_hkl, calibrate_linear, calibrate_linear_hkl,
+};
 pub use lm::{Failure, Stop};
 pub use peak::{Peak, Peak1, Reject};
 
@@ -37,10 +40,15 @@ pub enum ParamId {
     AngleOffset,
     /// Wavelength in Å, fitted when reflection frames fix the scale (XU-7).
     Wavelength,
+    /// Tilt χ of the sample's orientation, degrees: `UB' = Rz(azimuth) ·
+    /// Ry(χ) · UB`, as in xu's `area_detector_calib_hkl`.
+    SampleTilt,
+    /// Azimuth φ of the sample tilt, degrees.
+    SampleAzimuth,
 }
 
 impl ParamId {
-    pub(crate) const COUNT: usize = 10;
+    pub(crate) const COUNT: usize = 12;
 
     pub(crate) fn index(self) -> usize {
         self as usize

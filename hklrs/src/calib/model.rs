@@ -114,7 +114,7 @@ impl<'a> Rig<'a> {
                 }
                 // the sample frame is where UB·hkl lives; the sample holder
                 // carries it into the lab
-                let ub = self.ub.expect("checked in Rig::new");
+                let ub = sample_tilt(v) * self.ub.expect("checked in Rig::new");
                 let q_lab = poses.sample.rotation * (ub * hkl);
                 (TAU / lambda) * ki.into_inner() + q_lab
             }
@@ -148,6 +148,14 @@ impl<'a> Rig<'a> {
             .map(|a| (at[a] - peak.pos[a]) / peak.sigma[a])
             .collect())
     }
+}
+
+/// xu's sample misorientation `Rz(azimuth) · Ry(tilt)` (`sample_align.py`
+/// `U1`); the identity at tilt 0 and azimuth 0.
+fn sample_tilt(v: &Values) -> Matrix3<f64> {
+    let (sp, cp) = v.get(ParamId::SampleAzimuth).to_radians().sin_cos();
+    let (sc, cc) = v.get(ParamId::SampleTilt).to_radians().sin_cos();
+    Matrix3::new(cp * cc, -sp, cp * sc, sp * cc, cp, sp * sc, -sc, 0.0, cc)
 }
 
 /// The image pixel (slow, fast) a peak position rounds to; `None` for a
