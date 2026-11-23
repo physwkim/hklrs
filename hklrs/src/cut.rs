@@ -1,9 +1,8 @@
 //! Line cuts through reciprocal space (design §5, §7): per pixel Q, the
 //! coordinate along the cut and the distance from it, the bin and selection
 //! those give, and the sums of counts and weights per bin
-//! ([`Cut::accumulate`]). No estimator: a bin holds Σcounts and Σweight
-//! apart, and whether its value is their ratio or a mean of corrected
-//! pixels is the consumer's choice.
+//! ([`Cut::accumulate`]). A bin holds Σcounts and Σweight apart; its value
+//! is their ratio ([`Bin::intensity`], [`CutResult::intensity`]).
 //!
 //! Q is in the cut frame of xrayutilities' `HXRD([1,0,0],[0,0,1])` with
 //! `trans=False`: x normal to the scattering plane, y along the in-plane
@@ -309,6 +308,13 @@ pub struct Bin {
     pub contributions: u64,
 }
 
+impl Bin {
+    /// Σcounts / Σweight; `None` where Σweight is 0.
+    pub fn intensity(&self) -> Option<f64> {
+        (self.weight > 0.0).then(|| self.counts / self.weight)
+    }
+}
+
 /// Pixels that were not accumulated, by cause. Each pixel is counted once,
 /// in the first cause that applies, in the order of the fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -402,6 +408,12 @@ impl CutResult {
 
     pub fn skipped(&self) -> &Skipped {
         &self.skipped
+    }
+
+    /// The value of each bin that received anything, as (global bin,
+    /// Σcounts / Σweight), ascending; `None` where Σweight is 0.
+    pub fn intensity(&self) -> impl Iterator<Item = (i64, Option<f64>)> {
+        self.bins.iter().map(|(k, b)| (*k, b.intensity()))
     }
 
     /// The sum of two results of the same binning and footprint, for
@@ -584,6 +596,7 @@ pub fn coplanar_om_tt_real(q: &Vector3<f64>, wavelength: Wavelength) -> (f64, f6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::absorption::Weight;
 
     fn lam() -> Wavelength {
         Wavelength::new(1.5406).unwrap()
@@ -591,6 +604,49 @@ mod tests {
 
     fn binning() -> Binning {
         Binning::new(0.5, 0.0).unwrap()
+    }
+
+    #[test]
+    fn intensity_is_the_ratio_of_the_sums() {
+        let b = |counts, weight| Bin {
+            counts,
+            weight,
+            contributions: 1,
+        };
+        assert_eq!(b(6.0, 4.0).intensity(), Some(1.5));
+        assert_eq!(b(6.0, 0.0).intensity(), None);
+        assert_eq!(b(0.0, 2.0).intensity(), Some(0.0));
+    }
+
+    /// Every `Weight` is positive, so a bin's Σweight is 0 only when
+    /// fraction · weight underflows: a quarter of the smallest subnormal
+    /// rounds to 0 while its counts do not.
+    #[test]
+    fn a_bin_whose_weight_underflows_has_no_intensity() {
+        let c = Cut::new(
+            CutKind::Qz,
+            IntDir::Q,
+            [0.0; 3],
+            1.0,
+            Binning::new(1.0, 0.0).unwrap(),
+        )
+        .unwrap();
+        let weight = Weight::new(5e-324, Masked::Opaque).unwrap();
+        let px = [(
+            Vector3::new(0.0, 0.0, 1.25),
+            Ok(Normalised {
+                counts: 8.0,
+                weight,
+            }),
+        )];
+        // [0.75, 1.75]: a quarter in bin 0, three quarters in bin 1
+        let r = c.accumulate(lam(), Footprint::Width(1.0), px).unwrap();
+        let b0 = r.get(0).unwrap();
+        assert_eq!((b0.counts, b0.weight, b0.contributions), (2.0, 0.0, 1));
+        assert_eq!(r.get(1).unwrap().weight, 5e-324);
+        let v: Vec<_> = r.intensity().collect();
+        assert_eq!(v[0], (0, None));
+        assert!(matches!(v[1], (1, Some(_))));
     }
 
     #[test]
