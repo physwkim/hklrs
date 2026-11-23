@@ -11,8 +11,9 @@ The C solver restarts with libc rand(); srand() is seeded per call through
 ctypes so the output is reproducible.
 Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c, -e6c.c, -k4c.c,
 -k6c.c, -zaxis.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
-_psi_constant_*); the ESRF BM28 PSIC modes only hold axes. Only hkl's own
-GError is recorded as a case error; a failure of the recording itself raises.
+_psi_constant_*); the ESRF BM28 and ID01 PSIC modes only hold axes. Only
+hkl's own GError is recorded as a case error; a failure of the recording
+itself raises.
 """
 import ctypes
 import json
@@ -35,7 +36,8 @@ WL = 1.54
 N_TARGETS = 40
 N_UNREACH = 4
 TOL = 1e-6
-GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS"]
+GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
+              "ESRF ID01 PSIC"]
 PARAM_MODES = ("double_diffraction", "psi_constant", "constant_incidence")
 UNIT = {"Degree": ("rot", 1.0), "Milli Radian": ("rot", math.pi / 180.0 * 1000.0),
         "Milli Meter": ("trans", 1.0), "Meter": ("trans", 1e-3)}
