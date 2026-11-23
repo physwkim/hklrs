@@ -102,6 +102,15 @@ impl PyGeometry {
     }
 
     #[getter]
+    fn source_axes(&self) -> Vec<String> {
+        self.0
+            .source_stack()
+            .iter()
+            .map(|&i| self.0.axes()[i].name().to_owned())
+            .collect()
+    }
+
+    #[getter]
     fn beam_direction(&self) -> [f64; 3] {
         v3(&self.0.beam_direction())
     }
@@ -132,7 +141,7 @@ impl PySample {
 
 /// Forward for one detector point. `axes` in geometry axis order (degrees /
 /// metres); `point` in the detector-arm frame, metres, default 1 m along the
-/// beam. Returns a dict of hkl, q_lab, q_sample, kf, tth (degrees) and q (Å⁻¹).
+/// beam. Returns a dict of hkl, q_lab, q_sample, kf, ki, tth (degrees) and q (Å⁻¹).
 #[pyfunction]
 #[pyo3(signature = (geometry, sample, axes, wavelength, point=None))]
 fn forward<'py>(
@@ -156,6 +165,7 @@ fn forward<'py>(
     d.set_item("q_lab", v3(&f.q_lab))?;
     d.set_item("q_sample", v3(&f.q_sample))?;
     d.set_item("kf", v3(&f.kf))?;
+    d.set_item("ki", v3(&f.ki))?;
     d.set_item("tth", hklrs::Deg::from(f.tth).0)?;
     d.set_item("q", f.q)?;
     Ok(d)
