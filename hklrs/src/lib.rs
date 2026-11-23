@@ -14,7 +14,7 @@ mod units;
 
 pub use detector::PixelDetector;
 pub use error::Error;
-pub use forward::{Forward, angle_between, forward};
+pub use forward::{Forward, Scattering, angle_between, forward, scattering};
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
 pub use lattice::Lattice;
 pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};

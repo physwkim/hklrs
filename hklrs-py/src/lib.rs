@@ -162,12 +162,13 @@ fn forward<'py>(
     let f = hklrs::forward(geo, &sample.0, &values, wl, &p).map_err(err)?;
     let d = PyDict::new(py);
     d.set_item("hkl", v3(&f.hkl))?;
-    d.set_item("q_lab", v3(&f.q_lab))?;
-    d.set_item("q_sample", v3(&f.q_sample))?;
-    d.set_item("kf", v3(&f.kf))?;
-    d.set_item("ki", v3(&f.ki))?;
-    d.set_item("tth", hklrs::Deg::from(f.tth).0)?;
-    d.set_item("q", f.q)?;
+    let s = &f.scattering;
+    d.set_item("q_lab", v3(&s.q_lab))?;
+    d.set_item("q_sample", v3(&s.q_sample))?;
+    d.set_item("kf", v3(&s.kf))?;
+    d.set_item("ki", v3(&s.ki))?;
+    d.set_item("tth", hklrs::Deg::from(s.tth).0)?;
+    d.set_item("q", s.q)?;
     Ok(d)
 }
 

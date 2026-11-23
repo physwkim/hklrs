@@ -1,8 +1,8 @@
 //! Sample: lattice plus orientation U.
 
-use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Point3, Rotation3, UnitQuaternion, Vector3};
 
-use crate::{Error, Lattice};
+use crate::{Error, Geometry, Lattice, Wavelength, scattering};
 
 /// Smallest sine of the angle between two reflections, in index space and in
 /// the measured sample frame, below which they do not define a plane.
@@ -24,6 +24,21 @@ impl Reflection {
             }
         }
         Ok(Self { hkl, q_sample })
+    }
+
+    /// Reflection found at `values` with the scattered beam through `point`
+    /// (detector-arm frame, metres).
+    pub fn measure(
+        hkl: Vector3<f64>,
+        geometry: &Geometry,
+        values: &[f64],
+        wavelength: Wavelength,
+        point: &Point3<f64>,
+    ) -> Result<Self, Error> {
+        Self::new(
+            hkl,
+            scattering(geometry, values, wavelength, point)?.q_sample,
+        )
     }
 
     pub fn hkl(&self) -> &Vector3<f64> {
@@ -207,6 +222,24 @@ mod tests {
         };
         let along = (s.ub() * primary.hkl()).normalize();
         assert!((along - primary.q_sample().normalize()).abs().max() < 1e-14);
+    }
+
+    #[test]
+    fn measure_takes_q_from_the_angles_and_rejects_the_direct_beam() {
+        let geo = Geometry::builder("t")
+            .sample_rotation("om", [0.0, 0.0, 1.0])
+            .detector_rotation("tth", [0.0, 0.0, 1.0])
+            .build()
+            .unwrap();
+        let wl = Wavelength::new(1.5).unwrap();
+        let p = Point3::new(1.0, 0.0, 0.0);
+        let r = Reflection::measure(Vector3::x(), &geo, &[0.2, 0.6], wl, &p).unwrap();
+        let s = scattering(&geo, &[0.2, 0.6], wl, &p).unwrap();
+        assert_eq!(r.q_sample(), &s.q_sample);
+        assert!(matches!(
+            Reflection::measure(Vector3::x(), &geo, &[0.2, 0.0], wl, &p),
+            Err(Error::ZeroVector { .. })
+        ));
     }
 
     #[test]

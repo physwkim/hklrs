@@ -10,7 +10,9 @@
 //! along the ray (CRISTAL K4C `dtx`, PYFAI `sdd`) changes nothing in either.
 
 use hklrs::nalgebra::{Matrix3, Vector3};
-use hklrs::{AxisKind, Lattice, Orientation, PixelDetector, Sample, Wavelength, forward, presets};
+use hklrs::{
+    AxisKind, Lattice, Orientation, PixelDetector, Sample, Wavelength, forward, presets, scattering,
+};
 use serde_json::Value;
 
 /// Translations that move the detector point off its ray from the sample.
@@ -187,7 +189,7 @@ fn forward_hkl_matches_hkl_engine() {
         let values = geo.values_from_degrees(&user).unwrap();
         let out = forward(&geo, &sample, &values, wl, &detector_point(name, &geo)).unwrap();
         let expect = vec3(&case["hkl"]);
-        let via_hkl_ub = hkl_ub.lu().solve(&out.q_sample).unwrap();
+        let via_hkl_ub = hkl_ub.lu().solve(&out.scattering.q_sample).unwrap();
         let err = (via_hkl_ub - expect).abs().max();
         assert!(
             err < 1e-10,
@@ -221,20 +223,6 @@ fn translations_move_the_detector_point() {
         }
         let geo = presets::preset(name).unwrap();
         let canon = |ax: &str| f(&case["axes_canonical_deg_mm"][ax]);
-        let l = &case["lattice"];
-        let sample = Sample::new(
-            "golden",
-            Lattice::from_degrees(
-                f(&l["a"]),
-                f(&l["b"]),
-                f(&l["c"]),
-                f(&l["alpha"]),
-                f(&l["beta"]),
-                f(&l["gamma"]),
-            )
-            .unwrap(),
-            Orientation::from_u_matrix(&mat(&case["U"])).unwrap(),
-        );
         let make = |zero: bool| -> Vec<f64> {
             let user: Vec<f64> = geo
                 .axes()
@@ -250,8 +238,8 @@ fn translations_move_the_detector_point() {
         let det = PixelDetector::point(geo.beam_direction(), 1.0).unwrap();
         let wl = Wavelength::new(f(&case["wavelength"])).unwrap();
         let px = det.pixel(0, 0).unwrap();
-        let full = forward(&geo, &sample, &make(false), wl, &px).unwrap();
-        let rot_only = forward(&geo, &sample, &make(true), wl, &px).unwrap();
+        let full = scattering(&geo, &make(false), wl, &px).unwrap();
+        let rot_only = scattering(&geo, &make(true), wl, &px).unwrap();
         // translation in the arm frame is (sdd, poni2, poni1) in metres
         let t = Vector3::new(
             canon("sdd") * 1e-3,
