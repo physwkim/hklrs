@@ -13,6 +13,7 @@ mod forward;
 pub mod frame_map;
 mod geometry;
 pub mod grid;
+mod image;
 pub mod inverse;
 mod lattice;
 pub mod normalise;
@@ -34,6 +35,7 @@ pub use forward::{
     scattering, scattering_at,
 };
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
+pub use image::Image;
 pub use inverse::{
     Equation, Eulerian, InverseError, InverseRequest, Mode, ModeParameters, ModeSpec, Picker,
     Slits, Target,

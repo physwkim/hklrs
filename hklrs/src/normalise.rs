@@ -29,7 +29,7 @@
 use std::ops::Range;
 
 use crate::absorption::{Masked, Weight};
-use crate::{Error, PixelDetector, Weights};
+use crate::{Error, Image, PixelDetector, Weights};
 
 /// A flat-field pixel at or below this, or not finite, has no gain to
 /// divide by: the pixel is masked [`Masked::BadFlat`] (xrayutilities sets
@@ -133,38 +133,9 @@ impl FrameScalars {
     }
 }
 
-/// A whole raw detector image, row-major over its (slow, fast) shape: a
-/// frame, or the dark rate or flat field of [`PixelFields`]. It states its
-/// shape, so wherever it meets a raw shape another shape is refused, a
-/// transposed one of the same pixel count included.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RawFrame {
-    shape: (usize, usize),
-    data: Vec<f64>,
-}
-
-impl RawFrame {
-    /// `data` row-major over `shape`, `shape.0 · shape.1` values.
-    pub fn new(shape: (usize, usize), data: Vec<f64>) -> Result<Self, Error> {
-        let expected = shape.0 * shape.1;
-        if data.len() != expected {
-            return Err(Error::PixelCount {
-                what: "raw frame",
-                len: data.len(),
-                expected,
-            });
-        }
-        Ok(Self { shape, data })
-    }
-
-    pub fn shape(&self) -> (usize, usize) {
-        self.shape
-    }
-
-    pub fn data(&self) -> &[f64] {
-        &self.data
-    }
-}
+/// A whole raw detector image: a frame, or the dark rate or flat field of
+/// [`PixelFields`].
+pub type RawFrame = Image<f64>;
 
 /// The detector's per-pixel fields, on the whole raw frame, before any
 /// roi or binning.
@@ -186,23 +157,10 @@ impl PixelFields {
         }
     }
 
-    /// Refuses an image of another shape than the raw shape.
-    fn check(&self, what: &'static str, image: &RawFrame) -> Result<(), Error> {
-        if image.shape == self.shape {
-            Ok(())
-        } else {
-            Err(Error::ShapeMismatch {
-                what,
-                shape: image.shape,
-                expected: self.shape,
-            })
-        }
-    }
-
     /// Dark counts per second over the raw shape.
     pub fn dark_rate(self, rate: RawFrame) -> Result<Self, Error> {
-        self.check("dark field", &rate)?;
-        let rate = rate.data;
+        rate.check("dark field", self.shape)?;
+        let rate = rate.into_data();
         if let Some(index) = rate.iter().position(|r| !r.is_finite()) {
             return Err(Error::NonFinite { index });
         }
@@ -215,8 +173,8 @@ impl PixelFields {
     /// Relative gain over the raw shape. The mean is taken over the usable
     /// pixels (finite and above [`FLAT_MIN`]); the others are masked.
     pub fn flat(self, gain: RawFrame) -> Result<Self, Error> {
-        self.check("flat field", &gain)?;
-        let gain = gain.data;
+        gain.check("flat field", self.shape)?;
+        let gain = gain.into_data();
         let usable = |g: f64| g.is_finite() && g > FLAT_MIN;
         let (sum, n) = gain
             .iter()
@@ -394,7 +352,7 @@ impl Normaliser {
         weights: &[&Weights],
     ) -> Result<NormalisedFrame, Error> {
         let (f, reducer) = (&self.fields, &self.reducer);
-        f.check("raw frame", raw)?;
+        raw.check("raw frame", f.shape)?;
         let raw = raw.data();
         if f.dark_rate.is_some() && scalars.count_time.is_none() {
             return Err(Error::DarkNeedsTime);
@@ -476,8 +434,8 @@ mod tests {
         (a - b).abs() <= 1e-12 * a.abs().max(b.abs())
     }
 
-    fn image(shape: (usize, usize), data: &[f64]) -> RawFrame {
-        RawFrame::new(shape, data.to_vec()).unwrap()
+    fn image<T: Clone>(shape: (usize, usize), data: &[T]) -> Image<T> {
+        Image::new(shape, data.to_vec()).unwrap()
     }
 
     /// XU-13: a binned pixel sits at the mean of the centres of the raw
@@ -585,7 +543,7 @@ mod tests {
         let det = detector((1, 5));
         let masked = det
             .clone()
-            .with_mask(vec![true, false, false, false, false]);
+            .with_mask(image((1, 5), &[true, false, false, false, false]));
         let (binned, r) = Region::new(0..1, 0..5, (1, 1))
             .apply(&masked.unwrap())
             .unwrap();
@@ -694,7 +652,10 @@ mod tests {
     #[test]
     fn one_bad_pixel_masks_its_block() {
         let det = detector((2, 4))
-            .with_mask(vec![false, false, false, false, false, false, true, false])
+            .with_mask(image(
+                (2, 4),
+                &[false, false, false, false, false, false, true, false],
+            ))
             .unwrap();
         let (_, r) = Region::new(0..2, 0..4, (2, 2)).apply(&det).unwrap();
         let fields = PixelFields::new((2, 4))
@@ -779,7 +740,7 @@ mod tests {
         assert_eq!(
             RawFrame::new((2, 3), vec![1.0; 5]),
             Err(Error::PixelCount {
-                what: "raw frame",
+                what: "image",
                 len: 5,
                 expected: 6
             })

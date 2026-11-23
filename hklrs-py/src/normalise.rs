@@ -9,20 +9,13 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArray
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::{MASKED, PyPixelDetector, err, masked_code};
+use super::{MASKED, PyPixelDetector, err, image, masked_code};
 
 type Pixels<'py> = (
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray2<u8>>,
 );
-
-/// `a` as a raw image of its own shape, which the core compares with the
-/// raw shape wherever the two meet.
-pub(crate) fn raw_frame(a: &PyReadonlyArray2<'_, f64>) -> PyResult<core::RawFrame> {
-    let shape = (a.shape()[0], a.shape()[1]);
-    core::RawFrame::new(shape, a.as_array().iter().copied().collect()).map_err(err)
-}
 
 /// What one frame contributes to every pixel's weight. A monitor needs its
 /// reference; a value that is not positive and finite is a ValueError, never
@@ -95,10 +88,10 @@ impl PyPixelFields {
     ) -> PyResult<Self> {
         let mut f = core::PixelFields::new(shape);
         if let Some(d) = dark_rate {
-            f = f.dark_rate(raw_frame(&d)?).map_err(err)?;
+            f = f.dark_rate(image(&d)?).map_err(err)?;
         }
         if let Some(g) = flat {
-            f = f.flat(raw_frame(&g)?).map_err(err)?;
+            f = f.flat(image(&g)?).map_err(err)?;
         }
         Ok(Self(f))
     }
@@ -198,7 +191,7 @@ impl PyNormaliser {
         scalars: &PyFrameScalars,
         weights: Vec<(PyReadonlyArray2<'_, f64>, PyReadonlyArray2<'_, u8>)>,
     ) -> PyResult<Pixels<'py>> {
-        let raw = raw_frame(&raw)?;
+        let raw = image(&raw)?;
         let weights = weights
             .into_iter()
             .map(geometric)

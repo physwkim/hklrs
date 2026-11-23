@@ -11,13 +11,20 @@ mod pseudo_set;
 use hklrs::absorption::{Absorber, Beam, DetectorPath, Face, Layer, Masked, Slab};
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{Element, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 fn err(e: hklrs::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
+}
+
+/// `a` as an image of its own shape, which the core compares with any
+/// shape it meets.
+fn image<T: Element + Copy>(a: &PyReadonlyArray2<'_, T>) -> PyResult<hklrs::Image<T>> {
+    let shape = (a.shape()[0], a.shape()[1]);
+    hklrs::Image::new(shape, a.as_array().iter().copied().collect()).map_err(err)
 }
 
 fn rows(m: &Matrix3<f64>) -> [[f64; 3]; 3] {
@@ -557,15 +564,11 @@ impl PyPixelDetector {
     /// The detector with `mask` (bool array of its shape, True excludes the
     /// pixel) in place of any earlier mask.
     fn with_mask(&self, mask: PyReadonlyArray2<'_, bool>) -> PyResult<Self> {
-        let (slow, fast) = self.0.shape();
-        if mask.shape() != [slow, fast] {
-            return Err(PyValueError::new_err(format!(
-                "mask shape {:?} does not match the detector shape ({slow}, {fast})",
-                mask.shape()
-            )));
-        }
-        let masked = mask.as_array().iter().copied().collect();
-        self.0.clone().with_mask(masked).map(Self).map_err(err)
+        self.0
+            .clone()
+            .with_mask(image(&mask)?)
+            .map(Self)
+            .map_err(err)
     }
 
     /// Centre of pixel (slow, fast) in the detector-arm frame.

@@ -4,6 +4,8 @@
 #[rustfmt::skip]
 mod table;
 
+use crate::Image;
+
 /// A pyFAI detector class.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Class {
@@ -358,12 +360,9 @@ fn mark(line: &mut [bool], first: usize, step: usize, (lo, hi): (isize, isize)) 
     }
 }
 
-/// Row-major, the pixels in a marked row or a marked column.
-fn cross(rows: &[bool], cols: &[bool]) -> Vec<bool> {
-    let n1 = cols.len();
-    (0..rows.len() * n1)
-        .map(|k| rows[k / n1] || cols[k % n1])
-        .collect()
+/// The pixels in a marked row or a marked column.
+fn cross(rows: &[bool], cols: &[bool]) -> Image<bool> {
+    Image::from_fn((rows.len(), cols.len()), |s, f| rows[s] || cols[f])
 }
 
 impl Chips {
@@ -391,9 +390,9 @@ impl Chips {
         ]
     }
 
-    /// `calc_mask`, row-major over `shape`: the pixels either side of each
-    /// chip boundary and the outer border.
-    pub(super) fn mask(self, (n0, n1): (usize, usize)) -> Vec<bool> {
+    /// `calc_mask` over `shape`: the pixels either side of each chip
+    /// boundary and the outer border.
+    pub(super) fn mask(self, (n0, n1): (usize, usize)) -> Image<bool> {
         let chips = |n: usize, m: usize| {
             let mut line = vec![false; n];
             for i in 1..n / m {
@@ -409,11 +408,11 @@ impl Chips {
 }
 
 impl Rule {
-    /// `Detector.mask` of `grid`, row-major: the disc over the shape, the
-    /// others over `max_shape` and, for a binned shape, a pixel masked if
-    /// any in its binning block is; None where pyFAI's `rebin` raises, the
-    /// binning not dividing `max_shape`.
-    pub(super) fn mask(self, grid: &Grid) -> Option<Vec<bool>> {
+    /// `Detector.mask` of `grid`: the disc over the shape, the others over
+    /// `max_shape` and, for a binned shape, a pixel masked if any in its
+    /// binning block is; None where pyFAI's `rebin` raises, the binning not
+    /// dividing `max_shape`.
+    pub(super) fn mask(self, grid: &Grid) -> Option<Image<bool>> {
         if self == Rule::Disc || grid.shape == grid.max_shape {
             return Some(self.drawn(grid.shape));
         }
@@ -424,15 +423,16 @@ impl Rule {
         }
         let full = self.drawn(grid.max_shape);
         let m1 = n1 / b1;
-        let mut out = vec![false; (n0 / b0) * m1];
-        for (k, _) in full.iter().enumerate().filter(|&(_, &m)| m) {
+        let mut image = Image::from_fn((n0 / b0, m1), |_, _| false);
+        let out = image.data_mut();
+        for (k, _) in full.data().iter().enumerate().filter(|&(_, &m)| m) {
             out[(k / n1 / b0) * m1 + k % n1 / b1] = true;
         }
-        Some(out)
+        Some(image)
     }
 
-    /// `calc_mask`, row-major over `shape`.
-    fn drawn(self, (n0, n1): (usize, usize)) -> Vec<bool> {
+    /// `calc_mask` over `shape`.
+    fn drawn(self, (n0, n1): (usize, usize)) -> Image<bool> {
         match self {
             Rule::Gaps { module, gap, strip } => {
                 let (mut rows, mut cols) = (vec![false; n0], vec![false; n1]);
@@ -446,15 +446,13 @@ impl Rule {
             }
             Rule::Disc => {
                 let (c0, c1) = ((n0 / 2) as f64, (n1 / 2) as f64);
-                (0..n0 * n1)
-                    .map(|k| {
-                        let x = (k / n1) as f64 + 0.5 - c0;
-                        let y = (k % n1) as f64 + 0.5 - c1;
-                        x * x + y * y > c0 * c0
-                    })
-                    .collect()
+                Image::from_fn((n0, n1), |s, f| {
+                    let x = s as f64 + 0.5 - c0;
+                    let y = f as f64 + 0.5 - c1;
+                    x * x + y * y > c0 * c0
+                })
             }
-            Rule::Empty => vec![false; n0 * n1],
+            Rule::Empty => Image::from_fn((n0, n1), |_, _| false),
         }
     }
 }
@@ -646,17 +644,16 @@ mod tests {
                 Layout::Edges(grid, _, chips) => (grid, Some(chips.mask(grid.shape))),
                 _ => continue,
             };
-            let (n0, n1) = grid.shape;
             let ruled_here = mask.is_some();
-            let mask = mask.unwrap_or(vec![false; n0 * n1]);
-            assert_eq!(mask.len(), n0 * n1);
+            let mask = mask.unwrap_or_else(|| Image::from_fn(grid.shape, |_, _| false));
+            assert_eq!(mask.shape(), grid.shape, "{}", t.name);
             let want: Vec<u64> = c["fingerprint"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(|v| v.as_u64().unwrap())
                 .collect();
-            assert_eq!(fingerprint(&mask).as_slice(), want, "{}", t.name);
+            assert_eq!(fingerprint(mask.data()).as_slice(), want, "{}", t.name);
             ruled += usize::from(ruled_here);
         }
         assert!(ruled > 0);
@@ -751,7 +748,7 @@ mod tests {
                 let mask = match t.layout {
                     Layout::Uniform(_, _, rule) => match rule {
                         Some(r) => r.mask(&g),
-                        None => Some(vec![false; g.shape.0 * g.shape.1]),
+                        None => Some(Image::from_fn(g.shape, |_, _| false)),
                     },
                     Layout::Edges(_, _, chips) => Some(chips.mask(g.shape)),
                     _ => unreachable!(),
@@ -762,11 +759,12 @@ mod tests {
                         mask_raises += 1;
                     }
                     (Some(m), Some(want)) => {
+                        assert_eq!(m.shape(), g.shape, "{at}");
                         let want: Vec<u64> = want.iter().map(|v| v.as_u64().unwrap()).collect();
-                        assert_eq!(fingerprint(&m).as_slice(), want, "{at}");
+                        assert_eq!(fingerprint(m.data()).as_slice(), want, "{at}");
                         masked += 1;
                     }
-                    (mask, _) => panic!("{at}: {:?} vs {}", mask.map(|m| m.len()), e),
+                    (mask, _) => panic!("{at}: {:?} vs {}", mask.map(|m| m.shape()), e),
                 }
             }
         }
