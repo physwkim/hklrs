@@ -222,6 +222,23 @@ impl PyGeometry {
         let (lo, hi) = axis.limits();
         Ok((user_value(axis, lo), user_value(axis, hi)))
     }
+
+    /// Represents rotation `name` in [cut, cut + 360) degrees: the inverse
+    /// returns each written rotation there, -180 unless set.
+    fn set_cut_point(&mut self, name: &str, cut: f64) -> PyResult<()> {
+        let internal = internal_value(self.axis(name)?, cut);
+        self.0.set_cut_point(name, internal).map_err(|e| match e {
+            // in the caller's degrees, not radians
+            hklrs::Error::CutPoint { name, .. } => err(hklrs::Error::CutPoint { name, cut }),
+            e => err(e),
+        })
+    }
+
+    /// The cut point of rotation `name`, degrees; None for any other axis.
+    fn cut_point(&self, name: &str) -> PyResult<Option<f64>> {
+        let axis = self.axis(name)?;
+        Ok(axis.cut_point().map(|c| user_value(axis, c)))
+    }
 }
 
 /// Axis values (degrees / metres, geometry axis order), wavelength (Å) and
@@ -424,7 +441,8 @@ fn request<'a>(
 
 /// Every solution for `hkl` within the axis limits, nearest to `current`
 /// first. `current` and the results are all axes in geometry order, degrees
-/// / metres; held axes are returned as given. Raises `Unreachable` when
+/// / metres; written rotations are wrapped to their cut points and held
+/// axes are returned as given. Raises `Unreachable` when
 /// |Q| > 4π/λ·(1 + 1e-12), `NoSolution` when the mode has none and its
 /// subclass `NoSolutionInLimits` when every one is outside the limits.
 #[pyfunction]
