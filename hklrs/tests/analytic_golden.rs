@@ -88,11 +88,13 @@ fn family(case: &Value) -> &'static str {
         .map(String::as_str)
         .collect();
     let count = |set: &[&str]| names.iter().filter(|n| set.contains(n)).count();
+    let naz = names.contains(&"naz");
     if names.contains(&"bisect") {
-        return "det+bisect";
+        return if naz { "naz+bisect" } else { "det+bisect" };
     }
     match (count(&DET), count(&REF), count(&SAMP)) {
         (1, 1, 1) => "det+ref+samp",
+        (1, 0, 2) if naz => "naz+2samp",
         (1, 0, 2) => "det+2samp",
         (0, 1, 2) => "ref+2samp",
         (0, 0, 3) => "3samp",
@@ -160,6 +162,20 @@ impl Virtual {
             "betain" => sine(-s.y),
             "betaout" => sine(s.dot(&kout)),
             "bin_eq_bout" => (-s.y - s.dot(&kout)).abs(),
+            "bisect" | "omega" => {
+                let a = Vector3::new(
+                    self.angles[1].sin(),
+                    self.angles[1].cos() * self.angles[0].cos(),
+                    self.angles[1].cos() * self.angles[0].sin(),
+                );
+                let eq = Vector3::new(qh.x, 0.0, qh.z).normalize();
+                if name == "bisect" {
+                    a.dot(&Vector3::y().cross(&eq)).abs()
+                } else {
+                    let theta = (q.norm() / 2.0).asin();
+                    angle(a.dot(&eq).atan2(a.y) - theta)
+                }
+            }
             _ => angle(self.angles[ORDER.iter().position(|o| *o == name).unwrap()]),
         }
     }
@@ -315,24 +331,84 @@ fn det_ref_samp() {
     run("det+ref+samp");
 }
 
+#[test]
+fn det_2samp() {
+    run("det+2samp");
+}
+
+#[test]
+fn det_bisect() {
+    run("det+bisect");
+}
+
+/// The golden cases citing defect `id`, each checked; `count` of them.
+fn dc_cases(id: &str, count: usize) -> Vec<(Value, Tally)> {
+    let golden = load();
+    let cases: Vec<(Value, Tally)> = golden["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["dc_ids"].as_array().unwrap().iter().any(|i| i == id))
+        .map(|case| {
+            let mut tally = Tally::default();
+            check(case, &mut tally).unwrap_or_else(|e| panic!("{id} {}: {e}", case["id"]));
+            (case.clone(), tally)
+        })
+        .collect();
+    assert_eq!(cases.len(), count, "{id}");
+    cases
+}
+
 /// DC-2: diffcalc solves `naz` on the surface normal and filters on the
 /// reference vector, so it returns nothing; `naz` is on the reference
 /// vector here and the numeric solve's full set comes back.
 #[test]
 fn dc2_naz_is_on_the_reference_vector() {
-    let golden = load();
-    let cases: Vec<&Value> = golden["cases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["dc_ids"].as_array().unwrap().iter().any(|i| i == "DC-2"))
-        .collect();
-    assert_eq!(cases.len(), 10);
-    for case in cases {
-        let mut tally = Tally::default();
-        check(case, &mut tally).unwrap_or_else(|e| panic!("{}: {e}", case["id"]));
+    for (case, tally) in dc_cases("DC-2", 10) {
         assert_eq!(case["counts"]["returned"], 0);
         assert!(tally.numeric_matched > 0, "{}", case["id"]);
+    }
+}
+
+/// DC-3: half of diffcalc's bisect positions put the χ axis off the plane;
+/// every position here meets bisect.
+#[test]
+fn dc3_bisect_holds_for_every_position() {
+    for (case, tally) in dc_cases("DC-3", 14) {
+        assert!(case["counts"]["invalid"].as_u64().unwrap() > 0);
+        assert!(tally.solutions > 0, "{}", case["id"]);
+    }
+}
+
+/// DC-4: with η and φ held and cos η < 0 diffcalc aborts and returns
+/// nothing; every isolated position of the numeric solve comes back here.
+#[test]
+fn dc4_eta_with_negative_cosine_is_reached() {
+    for (case, tally) in dc_cases("DC-4", 4) {
+        assert_eq!(case["counts"]["returned"], 0);
+        let numeric = case["counts"]["numeric_isolated"].as_u64().unwrap();
+        assert!(
+            numeric > 0 && tally.numeric_matched as u64 == numeric,
+            "{}",
+            case["id"]
+        );
+    }
+}
+
+/// DC-5: hkl = 0 is a continuous family, not a division by zero.
+#[test]
+fn dc5_zero_q_is_degenerate() {
+    for (_, tally) in dc_cases("DC-5", 1) {
+        assert_eq!(tally.degenerate, 1);
+    }
+}
+
+/// DC-6: at backscatter diffcalc rewrites the held μ and repeats positions;
+/// the positions form a family and are reported as one.
+#[test]
+fn dc6_backscatter_is_degenerate() {
+    for (_, tally) in dc_cases("DC-6", 1) {
+        assert_eq!(tally.degenerate, 1);
     }
 }
 

@@ -118,10 +118,22 @@ impl<const N: usize> Held<N> {
     }
 }
 
+/// With `bisect`, the χ axis MU·ETA·ŷ lies in the plane of the beam and Q's
+/// azimuth (sin qaz, 0, cos qaz); this fixes where in that plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Bisect {
+    Mu(f64),
+    Eta(f64),
+    /// Angle of the χ axis from the beam in that plane, minus θ.
+    Omega(f64),
+}
+
 /// One You (1999) constraint family with its values, radians.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Constraints {
     DetRefSample(Detector, Reference, Held<1>),
+    DetSamples(Detector, Held<2>),
+    DetBisect(Detector, Bisect),
 }
 
 impl Constraints {
@@ -132,6 +144,7 @@ impl Constraints {
             names: named.iter().map(|(n, _)| *n).collect::<Vec<_>>().join("+"),
         };
         let (mut det, mut refs, mut held) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut bisect, mut omega) = (false, Vec::new());
         for (i, &(name, value)) in named.iter().enumerate() {
             if named[..i].iter().any(|(n, _)| *n == name) {
                 return Err(unsupported());
@@ -169,11 +182,28 @@ impl Constraints {
                 "eta" => held.push((Circle::Eta, v()?)),
                 "chi" => held.push((Circle::Chi, v()?)),
                 "phi" => held.push((Circle::Phi, v()?)),
+                "bisect" => {
+                    flag()?;
+                    bisect = true;
+                }
+                "omega" => omega.push(v()?),
                 _ => return Err(unsupported()),
             }
         }
-        match (&det[..], &refs[..], &held[..]) {
-            (&[d], &[r], &[h]) => Ok(Constraints::DetRefSample(d, r, Held::new([h])?)),
+        match (&det[..], &refs[..], &held[..], bisect, &omega[..]) {
+            (&[d], &[r], &[h], false, &[]) => Ok(Constraints::DetRefSample(d, r, Held::new([h])?)),
+            (&[d], &[], &[g, h], false, &[]) if !matches!(d, Detector::Naz(_)) => {
+                Ok(Constraints::DetSamples(d, Held::new([g, h])?))
+            }
+            (&[d], &[], held, true, omega) if !matches!(d, Detector::Naz(_)) => {
+                let b = match (held, omega) {
+                    (&[], &[w]) => Bisect::Omega(w),
+                    (&[(Circle::Mu, v)], &[]) => Bisect::Mu(v),
+                    (&[(Circle::Eta, v)], &[]) => Bisect::Eta(v),
+                    _ => return Err(unsupported()),
+                };
+                Ok(Constraints::DetBisect(d, b))
+            }
             _ => Err(unsupported()),
         }
     }
@@ -289,8 +319,23 @@ fn satisfied(constraints: &Constraints, p: &solve::Problem, a: &Angles) -> bool 
         Reference::BinEqBout => (s.y + s.dot(&kout)).abs() <= TOL,
     };
     let held = |h: &[(Circle, f64)]| h.iter().all(|&(c, v)| near(a[c as usize] - v));
+    let bisect = |b: &Bisect| {
+        let chi =
+            you::circle(you::MU, a[you::MU]) * you::circle(you::ETA, a[you::ETA]) * Vector3::y();
+        let Some(eq) = Vector3::new(q.x, 0.0, q.z).try_normalize(EPS) else {
+            return false;
+        };
+        chi.dot(&Vector3::new(eq.z, 0.0, -eq.x)).abs() <= TOL
+            && match *b {
+                Bisect::Mu(v) => near(a[you::MU] - v),
+                Bisect::Eta(v) => near(a[you::ETA] - v),
+                Bisect::Omega(v) => near(chi.dot(&eq).atan2(chi.y) - p.theta() - v),
+            }
+    };
     match constraints {
         Constraints::DetRefSample(d, r, h) => detector(d) && reference(r) && held(&h.0),
+        Constraints::DetSamples(d, h) => detector(d) && held(&h.0),
+        Constraints::DetBisect(d, b) => detector(d) && bisect(b),
     }
 }
 

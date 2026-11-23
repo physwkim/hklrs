@@ -21,6 +21,7 @@ fn probes() -> impl Iterator<Item = f64> {
 
 /// Circle indices into [`Angles`]: sample circles in Z order, then NU, DELTA.
 pub(super) const MU: usize = 0;
+pub(super) const ETA: usize = 1;
 pub(super) const CHI: usize = 2;
 pub(super) const PHI: usize = 3;
 pub(super) const NU: usize = 4;

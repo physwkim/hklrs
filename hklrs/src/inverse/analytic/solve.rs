@@ -3,8 +3,11 @@
 use nalgebra::{Matrix3, Vector3};
 
 use super::sample::{self, Known};
-use super::you::{self, Angles, EPS, Free, Roots, arms, cos_eq, normal, rot};
-use super::{Constraints, Detector, Error, Reference};
+use super::you::{
+    self, Angles, EPS, ETA, Free, MU, Roots, arms, axis, circle, cos_eq, normal, rot,
+    solve_component,
+};
+use super::{Bisect, Constraints, Detector, Error, Reference, TOL};
 
 /// The reflection to reach: Q̂ and θ, with the reference vector n and the
 /// surface normal s, all unit vectors in the φ frame.
@@ -36,7 +39,8 @@ impl Problem {
             return Err(Error::NonFinite { what: "Q" });
         }
         let (q_norm, q_max) = (q.norm(), 2.0 * k);
-        if q_norm > q_max {
+        // Q past 2k by less than the round-trip tolerance is backscatter.
+        if q_norm - q_max > TOL * k {
             return Err(Error::Unreachable { q: q_norm, q_max });
         }
         if q_norm == 0.0 {
@@ -59,6 +63,10 @@ impl Problem {
         2.0 * self.st * self.p0
     }
 
+    pub(super) fn theta(&self) -> f64 {
+        self.st.atan2(self.ct)
+    }
+
     /// Whether ψ of n has a value: n is not along Q̂ and Q̂ not along the beam.
     pub(super) fn psi_defined(&self) -> bool {
         self.p0.cross(&self.n).norm() * self.ct >= EPS
@@ -67,6 +75,8 @@ impl Problem {
     pub(super) fn candidates(&self, constraints: &Constraints) -> Vec<(Angles, Free)> {
         match constraints {
             Constraints::DetRefSample(d, r, h) => self.det_ref_sample(d, r, &h.known()),
+            Constraints::DetSamples(d, h) => self.det_samples(d, &h.known()),
+            Constraints::DetBisect(d, b) => self.det_bisect(d, b),
         }
     }
 
@@ -169,6 +179,57 @@ impl Problem {
             .into_iter()
             .flat_map(|(z, q, f)| self.finish(d, sample::one_held(known, &z), &q, f))
             .collect()
+    }
+
+    fn det_samples(&self, d: &Detector, known: &Known) -> Vec<(Angles, Free)> {
+        self.detector(d)
+            .iter()
+            .flat_map(|(q, f)| self.finish(d, sample::two_held(known, &self.p0, q), q, *f))
+            .collect()
+    }
+
+    fn det_bisect(&self, d: &Detector, b: &Bisect) -> Vec<(Angles, Free)> {
+        let mut out = Vec::new();
+        for (q, fq) in self.detector(d) {
+            let Some(eq) = Vector3::new(q.x, 0.0, q.z).try_normalize(EPS) else {
+                continue;
+            };
+            for (mu, eta, f) in self.chi_axis(b, &eq) {
+                let known = [Some(mu), Some(eta), None, None];
+                let samples = sample::two_held(&known, &self.p0, &q);
+                out.extend(self.finish(d, samples, &q, fq.or(f)));
+            }
+        }
+        out
+    }
+
+    /// (μ, η) that put the χ axis MU·ETA·ŷ in the plane of the beam and the
+    /// unit azimuth `eq`, where `b` asks. Both signs of cos η are kept: the
+    /// branch diffcalc adds by π − asin η leaves the plane (DC-3).
+    fn chi_axis(&self, b: &Bisect, eq: &Vector3<f64>) -> Vec<(f64, f64, Free)> {
+        let normal = Vector3::new(eq.z, 0.0, -eq.x);
+        match *b {
+            Bisect::Omega(omega) => {
+                let t = self.theta() + omega;
+                arms(&(t.cos() * Vector3::y() + t.sin() * eq), "mu")
+            }
+            Bisect::Mu(mu) => {
+                let w = circle(MU, mu).transpose() * normal;
+                solve_component(&axis(ETA), &Vector3::y(), &w, 0.0)
+                    .tagged("eta")
+                    .into_iter()
+                    .map(|(eta, f)| (mu, eta, f))
+                    .collect()
+            }
+            Bisect::Eta(eta) => {
+                let chi = circle(ETA, eta) * Vector3::y();
+                solve_component(&axis(MU), &chi, &normal, 0.0)
+                    .tagged("mu")
+                    .into_iter()
+                    .map(|(mu, f)| (mu, eta, f))
+                    .collect()
+            }
+        }
     }
 
     /// Full positions from sample circles that turn Q̂ onto lab `q`, with the

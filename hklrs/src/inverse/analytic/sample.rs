@@ -58,6 +58,18 @@ fn two_free(
     out
 }
 
+/// Every pair of free circles that turns `p` onto `q` with two held.
+pub(super) fn two_held(known: &Known, p: &Vector3<f64>, q: &Vector3<f64>) -> Vec<([f64; 4], Free)> {
+    let (free, seg) = split(known);
+    let [a, b] = free[..] else {
+        unreachable!("two held circles leave two free")
+    };
+    two_free(&seg[0], a, &seg[1], b, &seg[2], p, q)
+        .into_iter()
+        .map(|(x, y, f)| (fill(known, &free, &[x, y]), f))
+        .collect()
+}
+
 /// Every decomposition of the lab rotation `z` with one circle held.
 pub(super) fn one_held(known: &Known, z: &Matrix3<f64>) -> Vec<([f64; 4], Free)> {
     let (free, seg) = split(known);
