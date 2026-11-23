@@ -132,8 +132,8 @@ pub fn residuals(
 }
 
 /// Whether `values` brings `hkl` into reflection, satisfies every equation
-/// of `mode` (see [`residuals`]), keeps the held axes exactly at `current`
-/// and has its written axes in their cut windows and limits.
+/// of `mode` (see [`residuals`]), keeps the held axes exactly at `current`,
+/// has its written axes in their cut windows and every axis in its limits.
 pub fn check(
     mode: &Mode,
     ub: &Matrix3<f64>,
@@ -150,16 +150,14 @@ pub fn check(
     for (i, (v, c)) in values.iter().zip(current).enumerate() {
         let axis = &mode.geometry().axes()[i];
         let written = mode.written().contains(&i) || mode.slits().is_some_and(|s| s.axis() == i);
-        let ok = if written {
-            let (min, max) = axis.limits();
+        let (min, max) = axis.limits();
+        let placed = if written {
             axis.cut_point()
                 .is_some_and(|cut| cut <= *v && *v < cut + TAU)
-                && min <= *v
-                && *v <= max
         } else {
             v.to_bits() == c.to_bits()
         };
-        if !ok {
+        if !(placed && min <= *v && *v <= max) {
             return Err(format!(
                 "{values:?}: axis {i} outside its window or limits, or moved from {c}"
             ));

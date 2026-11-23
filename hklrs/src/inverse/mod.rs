@@ -118,7 +118,7 @@ pub enum InverseError {
     Degenerate,
     /// Every solution, sorted by distance to `current`.
     #[error(
-        "every one of the {} solutions takes a written axis outside its limits",
+        "every one of the {} solutions takes an axis outside its limits",
         .0.len()
     )]
     NoSolutionInLimits(Vec<Vec<f64>>),
@@ -139,9 +139,9 @@ fn finite(v: &[f64], what: &'static str) -> Result<(), InverseError> {
 }
 
 impl<'a> InverseRequest<'a> {
-    /// Every solution found, written axes wrapped to their cut points and
-    /// within their limits, held axes exactly `current` (limits or not),
-    /// sorted by distance to `current`; `Degenerate` when one is not
+    /// Every solution found, written axes wrapped to their cut points, held
+    /// axes exactly `current`, every axis within its limits, sorted by
+    /// distance to `current`; `Degenerate` when one is not
     /// isolated, as where the mode leaves a rotation free, and for Q = 0;
     /// `NoSolutionInLimits` when every one is outside the limits.
     pub fn solve(&self) -> Result<Vec<Vec<f64>>, InverseError> {

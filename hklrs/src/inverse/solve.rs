@@ -1,12 +1,12 @@
 //! Deterministic search: Levenberg-Marquardt from the sector images
 //! {x, π−x, π+x, −x} (per written axis) of every solution admitted,
-//! starting from `current`'s images until the first one is, and stopping
-//! at the first singular one. A kappa mode offers the kappa twin of every
-//! solution reached as well; the validator rejects it when it moves a held
-//! axis.
+//! starting from the images of `current` and then of its Bragg starts until
+//! the first one is, and stopping at the first singular one. A kappa mode
+//! offers the kappa twin of every solution reached as well; the validator
+//! rejects it when it moves a held axis.
 
 use std::collections::VecDeque;
-use std::f64::consts::PI;
+use std::f64::consts::{FRAC_PI_2, PI};
 
 use nalgebra::{DMatrix, DVector};
 
@@ -65,10 +65,13 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> SolutionSet<'a> {
         set: SolutionSet::new(system),
         tried: Vec::new(),
     };
-    // `current`'s images are only a deterministic multi-start, needed until
+    // The starts' images are only a deterministic multi-start, needed until
     // a solution's own images take over.
     let start = system.written_values(system.current());
-    let mut roots: VecDeque<_> = images(&start)
+    let starts = bragg(system, &start);
+    let mut roots: VecDeque<_> = std::iter::once(start)
+        .chain(starts)
+        .flat_map(images)
         .map(|seed| s.seed(seed))
         .find(|found| !found.is_empty())
         .unwrap_or_default()
@@ -79,16 +82,55 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> SolutionSet<'a> {
             break;
         }
         seeded += 1;
-        for seed in images(&root) {
+        for seed in images(root) {
             roots.extend(s.seed(seed));
         }
     }
     s.set
 }
 
+/// The written values `start` with one axis at a time turned so that k̂f
+/// makes the target's 2θ with k̂i, at both roots, for every axis that turns
+/// k̂f·k̂i.
+/// Where `start` holds k̂f = ±k̂i, the direction of Q, and with it qaz, ψ
+/// and the scattering plane, is undefined at every sector image of it.
+fn bragg(system: &System, start: &[f64]) -> Vec<Vec<f64>> {
+    let geometry = system.geometry();
+    let beam = geometry.beam_direction().into_inner();
+    // |Q| = 2 sin θ in units of k.
+    let cos_2theta = 1.0 - system.q().norm_squared() / 2.0;
+    let mut out = Vec::new();
+    for i in 0..start.len() {
+        let at = |v: f64| {
+            let mut x = start.to_vec();
+            x[i] = wrap(v);
+            x
+        };
+        let f = |v: f64| {
+            geometry
+                .poses(&system.values(&at(v)))
+                .map_or(f64::NAN, |p| {
+                    (p.detector.rotation * beam).dot(&(p.source * beam))
+                })
+        };
+        // k̂f·k̂i = a + p·cos v + q·sin v over one rotation axis.
+        let (f0, f1, f2) = (f(0.0), f(FRAC_PI_2), f(PI));
+        let (a, p) = ((f0 + f2) / 2.0, (f0 - f2) / 2.0);
+        let q = f1 - a;
+        // NaN where 2θ is out of this axis's reach or k̂f·k̂i does not turn.
+        let d = ((cos_2theta - a) / p.hypot(q)).acos();
+        if d.is_nan() {
+            continue;
+        }
+        let phi = q.atan2(p);
+        out.extend([at(phi + d), at(phi - d)]);
+    }
+    out
+}
+
 /// The 4ⁿ sector images of `x`, `x` itself first.
-fn images(x: &[f64]) -> impl Iterator<Item = Vec<f64>> + '_ {
-    (0..4usize.pow(x.len() as u32)).map(|image| sector(x, image))
+fn images(x: Vec<f64>) -> impl Iterator<Item = Vec<f64>> {
+    (0..4usize.pow(x.len() as u32)).map(move |image| sector(&x, image))
 }
 
 /// Image number `image` of `x`: base-4 digit j picks the sector of axis j.
@@ -181,7 +223,7 @@ mod tests {
             set: SolutionSet::new(&system),
             tried: Vec::new(),
         };
-        let roots = images(&current)
+        let roots = images(current.to_vec())
             .map(|seed| s.seed(seed))
             .find(|found| !found.is_empty())
             .unwrap();

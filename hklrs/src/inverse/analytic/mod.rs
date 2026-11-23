@@ -283,7 +283,8 @@ mod tests {
 
     /// A diffcalc golden case (You's names, φ frame, degrees) as a mode of
     /// `geometry`, whose axes are You's circles in order, and its `current`:
-    /// the held circles at their values, each other constraint its equation.
+    /// the held circles at their values, the written ones at zero, where the
+    /// detector sits on the beam; each other constraint is its equation.
     fn pose<'g>(
         geometry: &'g Geometry,
         case: &Value,
@@ -293,13 +294,7 @@ mod tests {
         let ub = Matrix3::from_fn(|i, j| case["UB"][i][j].as_f64().unwrap());
         let n_phi = vec3(&case["n_phi"]);
         let (n, s) = (r * n_phi, r * vec3(&case["surf_nphi"]));
-        // The written axes start off every null of the equations: with the
-        // detector on the beam, qaz and ψ are undefined at all their images.
-        let (mut current, mut extra, mut written) = (
-            [0.3, -0.7, 1.1, 0.5, -0.4, 0.9],
-            Vec::new(),
-            vec![0, 1, 2, 3, 4, 5],
-        );
+        let (mut current, mut extra, mut written) = ([0.0; 6], Vec::new(), vec![0, 1, 2, 3, 4, 5]);
         for (name, value) in case["constraints"].as_object().unwrap() {
             let v = || value.as_f64().unwrap().to_radians();
             if let Some(i) = NAMES.iter().position(|n| n == name) {

@@ -991,12 +991,53 @@ fn every_candidate_rejected_is_carried_in_the_error() {
     );
 }
 
+/// phi, which constant_phi holds at current's 30°, against limits that
+/// keep it exactly or miss it by one ulp.
 #[test]
-fn held_axis_outside_its_limits_is_not_filtered() {
-    // phi is held at current's 40°.
+fn held_axis_is_bound_by_its_limits() {
     let mut geo = preset("E4CV").unwrap();
     let hkl = Vector3::new(0.0, 1.0, 1.0);
     let all = solve_with(&geo, e4c::constant_phi, hkl).unwrap();
-    geo.set_limits("phi", -0.1, 0.1).unwrap();
-    assert_eq!(solve_with(&geo, e4c::constant_phi, hkl), Ok(all));
+    let on = current(&geo)[geo.axis_index("phi").unwrap()];
+    geo.set_limits("phi", on, on).unwrap();
+    assert_eq!(solve_with(&geo, e4c::constant_phi, hkl), Ok(all.clone()));
+    for (min, max) in [
+        (next_out(on), f64::INFINITY),
+        (f64::NEG_INFINITY, next_in(on)),
+    ] {
+        geo.set_limits("phi", min, max).unwrap();
+        assert_eq!(
+            solve_with(&geo, e4c::constant_phi, hkl),
+            Err(InverseError::NoSolutionInLimits(all.clone())),
+            "[{min}, {max}]"
+        );
+    }
+}
+
+/// phi held at 270°, outside the cut window [−180°, 180°): it comes back
+/// as 270°, and its limits are checked there, not at −90°.
+#[test]
+fn held_axis_is_not_wrapped_to_its_cut_point() {
+    let mut geo = preset("E4CV").unwrap();
+    let phi = geo.axis_index("phi").unwrap();
+    geo.set_cut_point("phi", -PI).unwrap();
+    let hkl = Vector3::new(0.0, 1.0, 1.0);
+    let current = geo.values_from_degrees(&[10.0, 20.0, 270.0, 40.0]).unwrap();
+    let solve = |geo: &Geometry| {
+        let mode = e4c::constant_phi(geo).unwrap();
+        request(&mode, hkl, &current).solve()
+    };
+    geo.set_limits("phi", PI, TAU).unwrap();
+    let solutions = solve(&geo).unwrap();
+    assert!(!solutions.is_empty());
+    let mode = e4c::constant_phi(&geo).unwrap();
+    for s in &solutions {
+        assert_eq!(s[phi].to_bits(), current[phi].to_bits(), "{s:?}");
+        assert_solution(&mode, &hkl, &current, s);
+    }
+    geo.set_limits("phi", -PI, 0.0).unwrap();
+    assert_eq!(
+        solve(&geo),
+        Err(InverseError::NoSolutionInLimits(solutions))
+    );
 }
