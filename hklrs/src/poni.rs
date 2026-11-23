@@ -54,6 +54,14 @@ pub enum PoniError {
     },
     #[error("pyFAI detector {class}: its Detector_config {key} is not the class's own")]
     DetectorConfig { class: &'static str, key: String },
+    #[error(
+        "pyFAI detector {class} binned {binning:?}: its mask over {max_shape:?} does not bin, and pyFAI's Detector.mask raises"
+    )]
+    MaskBinning {
+        class: &'static str,
+        binning: (u64, u64),
+        max_shape: (usize, usize),
+    },
     #[error("pyFAI's {0} moves the pixels in a way a PONI importer does not model")]
     Unsupported(&'static str),
     #[error("a PONI holds one module of uniform pixels with extent along both axes")]
@@ -557,7 +565,8 @@ impl PoniFile {
     /// The detector pyFAI builds from the file, in the lab where `lab`
     /// places pyFAI's axes: the generic one as [`PoniFile::poni`] gives it,
     /// a named class with the pitch or chip edges, shape, default
-    /// orientation and mask of pyFAI's default instance. An ImXPad image is
+    /// orientation and mask of pyFAI's default instance, binned as the
+    /// file's `binning` key bins it. An ImXPad image is
     /// flipped as pyFAI flips it over the whole image, not as it places
     /// pixels by index, which flips them back.
     pub fn detector(&self, lab: &LabAxes) -> Result<PixelDetector, PoniError> {
@@ -569,28 +578,32 @@ impl PoniFile {
                 reason,
             }),
             Layout::Uniform(grid, rule) => {
-                let det = self.named(class, &grid)?.detector(lab)?;
-                Ok(match rule {
-                    Some(rule) => det.with_mask(rule.mask(grid.shape))?,
-                    None => det,
-                })
+                let (poni, grid) = self.named(class, grid)?;
+                let det = poni.detector(lab)?;
+                let Some(rule) = rule else { return Ok(det) };
+                let mask = rule.mask(&grid).ok_or(PoniError::MaskBinning {
+                    class: class.name,
+                    binning: grid.binning,
+                    max_shape: grid.max_shape,
+                })?;
+                Ok(det.with_mask(mask)?)
             }
             Layout::Edges(grid, chips) => {
-                let det = self
-                    .named(class, &grid)?
-                    .edges_detector(chips.edges(&grid), lab)?;
+                let (poni, grid) = self.named(class, grid)?;
+                let det = poni.edges_detector(chips.edges(&grid), lab)?;
                 Ok(det.with_mask(chips.mask(grid.shape))?)
             }
         }
     }
 
-    /// The geometry of `class`'s default instance of `grid` in this file.
-    fn named(&self, class: &Class, grid: &Grid) -> Result<Poni, PoniError> {
-        let orientation = self.orientation(class, grid)?;
+    /// The geometry of the instance of `class` this file gives, and its
+    /// grid.
+    fn named(&self, class: &Class, grid: Grid) -> Result<(Poni, Grid), PoniError> {
+        let (grid, orientation) = self.instance(class, grid)?;
         if self.parallax {
             return Err(PoniError::Unsupported("parallax correction"));
         }
-        Ok(Poni {
+        let poni = Poni {
             dist: self.dist,
             poni1: self.poni1,
             poni2: self.poni2,
@@ -601,15 +614,17 @@ impl PoniFile {
             pixel2: grid.pixel.1,
             shape: grid.shape,
             orientation,
-        })
+        };
+        Ok((poni, grid))
     }
 
-    /// The orientation of the class `Detector.factory` builds from the
-    /// file's `Detector_config`, which must otherwise give the default
-    /// instance: each entry the constructor takes is the default's own,
-    /// pyFAI's choice for a 0 pitch or a null, or a `sensor`, which only
-    /// parallax reads.
-    fn orientation(&self, class: &Class, grid: &Grid) -> Result<Orientation, PoniError> {
+    /// The grid and orientation of the class `Detector.factory` builds from
+    /// the file's `Detector_config` on the default instance `grid`: each
+    /// other entry the constructor takes must be the default's own, pyFAI's
+    /// choice for a 0 pitch or a null, or a `sensor`, which only parallax
+    /// reads, and a binning other than the default's is one the class bins
+    /// by `Detector.binning`'s rule.
+    fn instance(&self, class: &Class, grid: Grid) -> Result<(Grid, Orientation), PoniError> {
         let d = &self.detector;
         let takes = |key: &str| class.args.contains(&key);
         let differs = |key: &str| PoniError::DetectorConfig {
@@ -632,10 +647,12 @@ impl PoniFile {
         if takes("max_shape") && d.max_shape.is_some_and(|s| s != grid.max_shape) {
             return Err(differs("max_shape"));
         }
-        // the factory bins whatever class it built
-        if d.binning.is_some_and(|b| b != grid.binning) {
-            return Err(differs("binning"));
-        }
+        // the factory bins whatever class it built, after the constructor
+        let binned = match d.binning {
+            Some(b) if b != grid.binning && grid.binnable => grid.binned(b),
+            Some(b) if b != grid.binning => return Err(differs("binning")),
+            _ => grid,
+        };
         for (key, value) in &d.other {
             let own = match (key.as_str(), grid.module_size) {
                 ("sensor", _) => true,
@@ -646,10 +663,11 @@ impl PoniFile {
                 return Err(differs(key));
             }
         }
-        match d.orientation.filter(|_| takes("orientation")) {
-            Some(o) => Ok(o),
-            None => Orientation::try_from(grid.orientation),
-        }
+        let orientation = match d.orientation.filter(|_| takes("orientation")) {
+            Some(o) => o,
+            None => Orientation::try_from(grid.orientation)?,
+        };
+        Ok((binned, orientation))
     }
 }
 

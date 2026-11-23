@@ -27,6 +27,9 @@ pub(super) struct Grid {
     /// pyFAI's orientation number.
     pub(super) orientation: u32,
     pub(super) module_size: Option<(usize, usize)>,
+    /// `Detector.binning`'s setter gives the class's other binnings:
+    /// [`Grid::binned`].
+    pub(super) binnable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,6 +60,9 @@ pub(super) enum Rule {
     /// `Mar345`, `Rayonix133`, `RayonixSx165`: outside the disc of radius
     /// half the slow shape.
     Disc,
+    /// `Lambda9M`: nothing masked, though over `max_shape`, which a
+    /// binning must divide.
+    Empty,
 }
 
 /// pyFAI's `ImXPadS10`: chips of `module` pixels, the pixels either side
@@ -116,6 +122,23 @@ fn cross(rows: &[bool], cols: &[bool]) -> Vec<bool> {
         .collect()
 }
 
+impl Grid {
+    /// `Detector.binning = b` on the default instance: each pitch times
+    /// the ratio to the default binning, `max_shape` floor divided.
+    pub(super) fn binned(self, b: (u64, u64)) -> Grid {
+        let (p, own, max) = (self.pixel, self.binning, self.max_shape);
+        Grid {
+            pixel: (
+                p.0 * (b.0 as f64 / own.0 as f64),
+                p.1 * (b.1 as f64 / own.1 as f64),
+            ),
+            shape: (max.0 / b.0 as usize, max.1 / b.1 as usize),
+            binning: b,
+            ..self
+        }
+    }
+}
+
 impl Chips {
     /// `calc_pixels_edges` along pyFAI's axes 1 and 2 before the
     /// orientation reverses them: from 0, one more edge than the grid's
@@ -159,8 +182,30 @@ impl Chips {
 }
 
 impl Rule {
-    /// The masked pixels, row-major over `shape`.
-    pub(super) fn mask(self, (n0, n1): (usize, usize)) -> Vec<bool> {
+    /// `Detector.mask` of `grid`, row-major: the disc over the shape, the
+    /// others over `max_shape` and, for a binned shape, a pixel masked if
+    /// any in its binning block is; None where pyFAI's `rebin` raises, the
+    /// binning not dividing `max_shape`.
+    pub(super) fn mask(self, grid: &Grid) -> Option<Vec<bool>> {
+        if self == Rule::Disc || grid.shape == grid.max_shape {
+            return Some(self.drawn(grid.shape));
+        }
+        let ((n0, n1), (b0, b1)) = (grid.max_shape, grid.binning);
+        let (b0, b1) = (b0 as usize, b1 as usize);
+        if n0 % b0 != 0 || n1 % b1 != 0 {
+            return None;
+        }
+        let full = self.drawn(grid.max_shape);
+        let m1 = n1 / b1;
+        let mut out = vec![false; (n0 / b0) * m1];
+        for (k, _) in full.iter().enumerate().filter(|&(_, &m)| m) {
+            out[(k / n1 / b0) * m1 + k % n1 / b1] = true;
+        }
+        Some(out)
+    }
+
+    /// `calc_mask`, row-major over `shape`.
+    fn drawn(self, (n0, n1): (usize, usize)) -> Vec<bool> {
         match self {
             Rule::Gaps { module, gap, strip } => {
                 let (mut rows, mut cols) = (vec![false; n0], vec![false; n1]);
@@ -182,6 +227,7 @@ impl Rule {
                     })
                     .collect()
             }
+            Rule::Empty => vec![false; n0 * n1],
         }
     }
 }
@@ -216,21 +262,27 @@ mod tests {
                 strip: (!v["strip"].is_null()).then(|| pair(&v["strip"])),
             }),
             "disc" => Some(Rule::Disc),
+            "empty" => Some(Rule::Empty),
             other => panic!("rule {other}"),
         }
     }
 
-    /// The default instance as the golden gives it, the pixels from their
-    /// repr.
+    /// A pitch pair from its repr.
+    fn pitch(v: &Value) -> (f64, f64) {
+        let p = |k: usize| v[k].as_str().unwrap().parse().unwrap();
+        (p(0), p(1))
+    }
+
+    /// The default instance as the golden gives it.
     fn grid(c: &Value) -> Grid {
-        let pixel = |k: usize| c["pixel"][k].as_str().unwrap().parse().unwrap();
         Grid {
-            pixel: (pixel(0), pixel(1)),
+            pixel: pitch(&c["pixel"]),
             shape: pair(&c["shape"]),
             max_shape: pair(&c["max_shape"]),
             binning: pair(&c["binning"]),
             orientation: c["orientation"].as_u64().unwrap() as u32,
             module_size: (!c["module_size"].is_null()).then(|| pair(&c["module_size"])),
+            binnable: c["binnable"].as_bool().unwrap(),
         }
     }
 
@@ -318,7 +370,7 @@ mod tests {
             .zip(table::CLASSES)
         {
             let (grid, mask) = match t.layout {
-                Layout::Uniform(grid, rule) => (grid, rule.map(|r| r.mask(grid.shape))),
+                Layout::Uniform(grid, rule) => (grid, rule.map(|r| r.mask(&grid).unwrap())),
                 Layout::Edges(grid, chips) => (grid, Some(chips.mask(grid.shape))),
                 _ => continue,
             };
@@ -336,5 +388,61 @@ mod tests {
             ruled += usize::from(ruled_here);
         }
         assert!(ruled > 0);
+    }
+
+    /// pyFAI's instances of the factory's binning key: the pitch, shape
+    /// and mask of [`Grid::binned`] where the class is binnable.
+    #[test]
+    fn binnings_are_pyfai_s() {
+        let doc = golden();
+        let (mut binnable, mut raises) = (0, 0);
+        for (c, t) in doc["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(table::CLASSES)
+        {
+            let Layout::Uniform(grid, rule) = t.layout else {
+                continue;
+            };
+            if !grid.binnable {
+                continue;
+            }
+            binnable += 1;
+            let unbinned = grid.binned((1, 1));
+            assert_eq!(
+                (unbinned.pixel, unbinned.shape),
+                (
+                    pitch(&c["unbinned"]["pixel"]),
+                    pair(&c["unbinned"]["shape"])
+                ),
+                "{}",
+                t.name
+            );
+            for e in c["binned"].as_array().unwrap() {
+                let b = pair(&e["binning"]);
+                let binned = grid.binned(b);
+                assert_eq!(
+                    (binned.pixel, binned.shape),
+                    (pitch(&e["pixel"]), pair(&e["shape"])),
+                    "{} {b:?}",
+                    t.name
+                );
+                let mask = rule.map(|r| r.mask(&binned));
+                match (mask, e["mask"].as_array()) {
+                    (Some(None), None) => {
+                        assert!(e["mask_error"].is_string(), "{} {b:?}", t.name);
+                        raises += 1;
+                    }
+                    (Some(Some(m)), Some(want)) => {
+                        let want: Vec<u64> = want.iter().map(|v| v.as_u64().unwrap()).collect();
+                        assert_eq!(fingerprint(&m).as_slice(), want, "{} {b:?}", t.name);
+                    }
+                    (None, None) => assert!(e["mask_error"].is_null(), "{} {b:?}", t.name),
+                    (mask, want) => panic!("{} {b:?}: {mask:?} vs {want:?}", t.name),
+                }
+            }
+        }
+        assert!(binnable > 0 && raises > 0);
     }
 }
