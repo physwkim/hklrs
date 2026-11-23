@@ -1,12 +1,14 @@
 //! hkl plans on E4CV soft motors: cubic a = λ = 1.54, U = I, so (0, 0, 1)
 //! is at omega 30, chi 0, phi 0, tth 60.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use bsrs::backends::soft::SoftMotor;
 use bsrs::callbacks::CapturingSink;
-use bsrs::core::msg::{MovableObj, ReadableObj};
-use bsrs::core::{BsrsError, Document, Plan};
+use bsrs::core::msg::{MovableObj, NamedObj, ReadableObj};
+use bsrs::core::{BsrsError, DataKey, Document, Plan, ReadingValue};
 use bsrs::engine::{DocumentSink, RunEngine, RunResult};
 use bsrs::event_model::{Event, RunStart};
 use hklrs::nalgebra::{UnitQuaternion, Vector3};
@@ -176,6 +178,9 @@ async fn an_unreachable_point_fails_before_the_run_opens() {
     );
     assert!(message.contains("exceeds"), "{message}");
     assert_eq!(dx.positions().await.unwrap(), AT_001);
+    // and released the reals
+    let [_, _, l] = dx.hkl_axes();
+    l.set_dyn(1.0).await.await.unwrap();
 }
 
 /// PY2-16: hklpy2's scan_zone crashed on a tuple of detectors.
@@ -266,6 +271,116 @@ async fn hkl_scan_stays_on_one_branch_across_a_branch_boundary() {
     for (i, event) in events.iter().enumerate() {
         assert_close(&hkl_of(event), &point(i), 1e-9);
     }
+}
+
+/// A detector whose every read sets h, as a pseudo set issued mid-scan
+/// would, and records the set's outcome; `broken` then fails the read.
+struct Probe {
+    det: SoftMotor,
+    h: Arc<dyn MovableObj>,
+    broken: bool,
+    sets: Mutex<Vec<Result<(), String>>>,
+}
+
+impl Probe {
+    fn new(dx: &Arc<Diffractometer>, broken: bool) -> Arc<Self> {
+        let [h, _, _] = dx.hkl_axes();
+        Arc::new(Self {
+            det: SoftMotor::new("probe", Some(7.0)),
+            h: Arc::new(h),
+            broken,
+            sets: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn sets(&self) -> Vec<Result<(), String>> {
+        self.sets.lock().unwrap().clone()
+    }
+}
+
+impl NamedObj for Probe {
+    fn name(&self) -> &str {
+        self.det.name()
+    }
+}
+
+#[async_trait]
+impl ReadableObj for Probe {
+    async fn read_dyn(&self) -> Result<HashMap<String, ReadingValue>, BsrsError> {
+        let set = self.h.set_dyn(0.5).await.await;
+        self.sets
+            .lock()
+            .unwrap()
+            .push(set.map_err(|e| e.to_string()));
+        if self.broken {
+            return Err(BsrsError::Backend("probe broke".into()));
+        }
+        self.det.read_dyn().await
+    }
+
+    async fn describe_dyn(&self) -> Result<HashMap<String, DataKey>, BsrsError> {
+        self.det.describe_dyn().await
+    }
+}
+
+fn refused(sets: &[Result<(), String>]) {
+    for set in sets {
+        let message = set.as_ref().unwrap_err();
+        let expected = "e4cv_h: invalid value: hkl_scan holds the reals until its run ends";
+        assert!(message.contains(expected), "{message}");
+    }
+}
+
+/// Refused rather than queued: a queued set would move the reals after the
+/// scan, and one issued from the scan's own messages, as here, would wait
+/// on its own run.
+#[tokio::test]
+async fn a_pseudo_set_during_a_scan_is_refused_and_leaves_its_points() {
+    let (start, stop) = ([0.0, 0.0, 1.0], [1.0, 0.0, 1.0]);
+    let undisturbed = run(hkl_scan(e4cv(), start, stop, 3, [detector("probe")])).await;
+    undisturbed.succeeded();
+
+    let dx = e4cv();
+    let probe = Probe::new(&dx, false);
+    let scanned = run(hkl_scan(dx.clone(), start, stop, 3, [probe.clone() as _])).await;
+    scanned.succeeded();
+    let sets = probe.sets();
+    assert_eq!(sets.len(), 3);
+    refused(&sets);
+    let data = |run: &Run| -> Vec<_> { run.events().iter().map(|e| e.data.clone()).collect() };
+    assert_eq!(data(&scanned), data(&undisturbed));
+    let last = AXES.map(|a| scanned.events()[2].data[a].as_f64().unwrap());
+    assert_eq!(dx.positions().await.unwrap(), last);
+
+    // released when the run ends
+    let [h, _, _] = dx.hkl_axes();
+    h.set_dyn(0.5).await.await.unwrap();
+    assert_close(&dx.target().unwrap(), &[0.5, 0.0, 1.0], 1e-9);
+}
+
+#[tokio::test]
+async fn a_scan_failing_mid_run_releases_the_reals() {
+    let dx = e4cv();
+    let probe = Probe::new(&dx, true);
+    let failed = run(hkl_scan(
+        dx.clone(),
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        3,
+        [probe.clone() as _],
+    ))
+    .await;
+    let result = failed.result.as_ref().unwrap();
+    assert_eq!(result.exit_status, "fail", "{result:?}");
+    assert!(result.reason.contains("probe broke"), "{result:?}");
+    failed.start();
+    let sets = probe.sets();
+    assert_eq!(sets.len(), 1);
+    refused(&sets);
+
+    let [h, _, _] = dx.hkl_axes();
+    h.set_dyn(0.5).await.await.unwrap();
+    assert_close(&dx.target().unwrap(), &[0.5, 0.0, 1.0], 1e-9);
 }
 
 #[tokio::test]

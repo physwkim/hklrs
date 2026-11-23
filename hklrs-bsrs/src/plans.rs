@@ -235,6 +235,7 @@ fn scan(
     once(name, async move {
         let reals = dx.reals().iter().map(|r| r.clone() as Arc<dyn ReadableObj>);
         check_keys(reals.chain(detectors.iter().cloned()).collect()).await?;
+        let scanning = dx.claim(name).await?;
         let snapshot = dx.snapshot().await?;
         let (path, mode) = trajectory.path(&snapshot)?;
         let solved = snapshot.solve_path(&path)?;
@@ -258,8 +259,7 @@ fn scan(
             ),
             ("plan_args".to_owned(), args),
         ]);
-        // the reals move outside the pseudo axes from here
-        dx.clear_target().await;
+        scanning.clear_target();
         let axes = dx.reals().iter().enumerate().map(|(i, r)| {
             let column = solved.iter().map(|values| values[i]).collect();
             (
@@ -269,14 +269,17 @@ fn scan(
             )
         });
         let plan = list_scan_nd(detectors, axes.collect(), None);
-        Ok(msg_mutator(plan, move |msg| match msg {
+        let plan = msg_mutator(plan, move |msg| match msg {
             Msg::OpenRun(mut meta) => {
                 meta.plan_name = Some(name.to_owned());
                 meta.extra.extend(md.clone());
                 Msg::OpenRun(meta)
             }
             other => other,
-        }))
+        });
+        // released after the plan's last message, or when the plan is dropped
+        let release = stream::once(async move { drop(scanning) });
+        Ok(plan.chain(release.filter_map(|()| async { None })).boxed())
     })
 }
 

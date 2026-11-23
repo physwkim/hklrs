@@ -264,6 +264,135 @@ async fn a_psi_set_holds_hkl_and_later_hkl_sets_keep_psi() {
 }
 
 #[tokio::test]
+async fn psi_reads_back_on_the_branch_its_setpoint_names() {
+    async fn set(psi: f64) -> (Arc<Diffractometer>, DynLocation) {
+        let dx = e4cv(soft(AT_001));
+        let [h, ..] = dx.hkl_axes();
+        h.set_dyn(1.0).await.await.unwrap();
+        dx.set_mode(psi_constant(60.0)).unwrap();
+        let axis = dx.psi_axis();
+        axis.set_dyn(psi).await.await.unwrap();
+        let location = axis.locate_dyn().await.unwrap();
+        let read = axis.read_dyn().await.unwrap()["e4cv_psi"].value.clone();
+        assert_eq!(read, json!(location.readback));
+        (dx, location)
+    }
+    for (psi, principal) in [(200.0, -160.0), (-200.0, 160.0)] {
+        let (dx, DynLocation { setpoint, readback }) = set(psi).await;
+        assert!((setpoint - psi).abs() < 1e-9, "{setpoint}");
+        assert!((readback - psi).abs() < 1e-9, "{readback}");
+        // one ψ, two names: the same reals as its principal value
+        let (same, location) = set(principal).await;
+        assert!((location.readback - principal).abs() < 1e-9, "{location:?}");
+        let at = dx.positions().await.unwrap();
+        assert_close(&at, &same.positions().await.unwrap(), 1e-9);
+    }
+}
+
+/// The device's ψ and the ψ axis's read, which must agree.
+async fn psi_read(dx: &Arc<Diffractometer>) -> serde_json::Value {
+    let device = dx.read_dyn().await.unwrap()["e4cv_psi"].value.clone();
+    let axis = dx.psi_axis().read_dyn().await.unwrap()["e4cv_psi"]
+        .value
+        .clone();
+    assert_eq!(device, axis);
+    device
+}
+
+#[tokio::test]
+async fn the_reading_carries_psi_as_the_psi_axis_reads_it() {
+    let dx = e4cv(soft(AT_001));
+    let psi = dx.psi_axis();
+    // NaN outside a psi mode
+    assert_eq!(psi_read(&dx).await, json!(null));
+    // and where ψ is undefined: Q at (0, 0, 1) lies along the reference
+    dx.set_mode(psi_constant(30.0)).unwrap();
+    assert_eq!(psi_read(&dx).await, json!(null));
+    assert!(psi.locate_dyn().await.is_err());
+
+    let [h, ..] = dx.hkl_axes();
+    h.set_dyn(1.0).await.await.unwrap();
+    let read = psi_read(&dx).await.as_f64().unwrap();
+    assert!((read - 30.0).abs() < 1e-9, "{read}");
+    // on the setpoint's branch, as the axis locates it
+    psi.set_dyn(200.0).await.await.unwrap();
+    let read = psi_read(&dx).await.as_f64().unwrap();
+    assert_eq!(read, psi.locate_dyn().await.unwrap().readback);
+    assert!((read - 200.0).abs() < 1e-9, "{read}");
+}
+
+/// A detector whose reads switch the device between a psi mode and
+/// bissector, as mode changes made elsewhere during a run would.
+struct Switch {
+    dx: Arc<Diffractometer>,
+    det: SoftMotor,
+    reads: AtomicUsize,
+}
+
+impl NamedObj for Switch {
+    fn name(&self) -> &str {
+        self.det.name()
+    }
+}
+
+#[async_trait]
+impl ReadableObj for Switch {
+    async fn read_dyn(&self) -> Result<HashMap<String, ReadingValue>, BsrsError> {
+        let mode = match self.reads.fetch_add(1, Ordering::SeqCst) % 2 {
+            0 => psi_constant(30.0),
+            _ => ModeSpec::new("bissector"),
+        };
+        self.dx.set_mode(mode).unwrap();
+        self.det.read_dyn().await
+    }
+
+    async fn describe_dyn(&self) -> Result<HashMap<String, DataKey>, BsrsError> {
+        self.det.describe_dyn().await
+    }
+}
+
+#[tokio::test]
+async fn a_mode_change_mid_run_keeps_every_event_on_its_descriptor() {
+    let dx = e4cv(soft(AT_001));
+    let [h, ..] = dx.hkl_axes();
+    h.set_dyn(1.0).await.await.unwrap();
+    let switch = Arc::new(Switch {
+        dx: dx.clone(),
+        det: SoftMotor::new("det", Some(7.0)),
+        reads: AtomicUsize::new(0),
+    });
+    let sink = Arc::new(CapturingSink::new());
+    let re = RunEngine::new(vec![sink.clone() as Arc<dyn DocumentSink>]);
+    let detectors = vec![switch as Arc<dyn ReadableObj>, dx as Arc<dyn ReadableObj>];
+    re.run_async(bsrs::plans::count(detectors, 4))
+        .await
+        .unwrap();
+
+    let documents = sink.snapshot().await;
+    let mut keys = HashMap::new();
+    let mut psi = Vec::new();
+    for document in &documents {
+        match document {
+            Document::Descriptor(d) => {
+                let mut k: Vec<&String> = d.data_keys.keys().collect();
+                k.sort();
+                keys.insert(d.uid.clone(), k);
+            }
+            Document::Event(e) => {
+                let mut k: Vec<&String> = e.data.keys().collect();
+                k.sort();
+                assert_eq!(k, keys[&e.descriptor]);
+                psi.push(e.data["e4cv_psi"].clone());
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(psi.len(), 4);
+    assert!(psi.contains(&json!(null)), "{psi:?}");
+    assert!(psi.iter().any(|v| v.is_f64()), "{psi:?}");
+}
+
+#[tokio::test]
 async fn an_unreachable_psi_keeps_the_mode_the_setpoint_and_the_reals() {
     let dx = e4cv(soft(AT_001));
     let [h, ..] = dx.hkl_axes();

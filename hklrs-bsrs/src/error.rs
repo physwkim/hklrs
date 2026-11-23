@@ -50,6 +50,8 @@ pub enum DiffError {
         geometry: String,
         candidates: Vec<String>,
     },
+    #[error("{plan} holds the reals until its run ends")]
+    Scanning { plan: String },
     #[error("mode {mode:?} has no psi: set a psi mode")]
     NoPsi { mode: String },
     #[error("psi about reference {reference:?}: {source}")]

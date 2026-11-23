@@ -72,7 +72,9 @@ async fn read_gives_readbacks_and_the_hkl_they_reach() {
     let m = motors([30.0, 0.0, 90.0, 60.0]);
     let dx = e4cv(&m);
     let r = dx.read_dyn().await.unwrap();
-    assert_eq!(r.len(), 7);
+    assert_eq!(r.len(), 8);
+    // E4CV has a psi mode, but bissector has no ψ
+    assert_eq!(r["e4cv_psi"].value, Value::Null);
     let hkl = dx.hkl_keys().map(|k| number(&r, &k));
     assert_close(&hkl, &[1.0, 0.0, 0.0]);
     let axes: Vec<f64> = dx.axis_keys().iter().map(|k| number(&r, k)).collect();
@@ -94,7 +96,33 @@ async fn describe_has_every_read_key_with_its_units() {
     assert_eq!(read, described);
     assert_eq!(d["e4cv_tth"].units.as_deref(), Some("deg"));
     assert_eq!(d["e4cv_h"].units, None);
+    assert_eq!(d["e4cv_psi"].units.as_deref(), Some("deg"));
     assert_eq!(dx.hint_fields().unwrap(), dx.hkl_keys().to_vec());
+}
+
+/// ψ is read on a geometry with any psi mode, one (E4CV) or two (E6C), and
+/// not on one with none (ZAXIS).
+#[tokio::test]
+async fn psi_is_read_on_a_geometry_with_a_psi_mode() {
+    for (geometry, psi) in [("E6C", true), ("ZAXIS", false)] {
+        let geometry = preset(geometry).unwrap();
+        let reals = geometry.axes().iter().map(|a| {
+            let real = Arc::new(SoftMotor::new(a.name(), Some(0.0))) as Arc<dyn RealAxis>;
+            (a.name(), real)
+        });
+        let source = WavelengthSource::Fixed(wavelength());
+        let sample = cubic("sample", UnitQuaternion::identity());
+        let reals = reals.collect();
+        let dx = Diffractometer::new("dx", geometry.clone(), reals, source, sample).unwrap();
+        let read = dx.read_dyn().await.unwrap();
+        let described = dx.describe_dyn().await.unwrap();
+        assert_eq!(read.contains_key("dx_psi"), psi, "{}", geometry.name());
+        let mut read: Vec<String> = read.into_keys().collect();
+        let mut described: Vec<String> = described.into_keys().collect();
+        read.sort();
+        described.sort();
+        assert_eq!(read, described);
+    }
 }
 
 #[test]
