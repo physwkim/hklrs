@@ -346,38 +346,70 @@ struct PyMode {
     name: String,
     hkl2: Option<Vector3<f64>>,
     reference: Option<Vector3<f64>>,
-    psi: f64,
+    /// rad
+    psi: Option<f64>,
 }
 
 impl PyMode {
-    fn build<'g>(&self, g: &'g hklrs::Geometry) -> Result<hklrs::Mode<'g>, hklrs::InverseError> {
-        use hklrs::inverse::e4c;
-        match self.name.as_str() {
+    /// The one place a name meets its mode: unknown names and missing
+    /// parameters fail here, at construction and at every solve alike.
+    fn build<'g>(&self, py: Python<'_>, g: &'g hklrs::Geometry) -> PyResult<hklrs::Mode<'g>> {
+        use hklrs::inverse::{e4c, e6c};
+        let name = self.name.as_str();
+        let missing = |what| PyValueError::new_err(format!("mode {name:?} needs {what}"));
+        let hkl2 = || self.hkl2.ok_or_else(|| missing("hkl2"));
+        let psi = || {
+            self.reference
+                .zip(self.psi)
+                .ok_or_else(|| missing("reference and psi"))
+        };
+        let mode = match name {
             "bissector" => e4c::bissector(g),
             "constant_omega" => e4c::constant_omega(g),
             "constant_chi" => e4c::constant_chi(g),
             "constant_phi" => e4c::constant_phi(g),
-            "double_diffraction" => e4c::double_diffraction(g, self.hkl2.unwrap_or_default()),
-            _ => e4c::psi_constant(g, self.reference.unwrap_or_default(), self.psi),
-        }
+            "double_diffraction" => e4c::double_diffraction(g, hkl2()?),
+            "psi_constant" => {
+                let (reference, psi) = psi()?;
+                e4c::psi_constant(g, reference, psi)
+            }
+            "bissector_vertical" => e6c::bissector_vertical(g),
+            "constant_omega_vertical" => e6c::constant_omega_vertical(g),
+            "constant_chi_vertical" => e6c::constant_chi_vertical(g),
+            "constant_phi_vertical" => e6c::constant_phi_vertical(g),
+            "lifting_detector_phi" => e6c::lifting_detector_phi(g),
+            "lifting_detector_omega" => e6c::lifting_detector_omega(g),
+            "lifting_detector_mu" => e6c::lifting_detector_mu(g),
+            "double_diffraction_vertical" => e6c::double_diffraction_vertical(g, hkl2()?),
+            "bissector_horizontal" => e6c::bissector_horizontal(g),
+            "double_diffraction_horizontal" => e6c::double_diffraction_horizontal(g, hkl2()?),
+            "psi_constant_vertical" => {
+                let (reference, psi) = psi()?;
+                e6c::psi_constant_vertical(g, reference, psi)
+            }
+            "psi_constant_horizontal" => {
+                let (reference, psi) = psi()?;
+                e6c::psi_constant_horizontal(g, reference, psi)
+            }
+            "constant_mu_horizontal" => e6c::constant_mu_horizontal(g),
+            _ => return Err(PyValueError::new_err(format!("unknown mode {name:?}"))),
+        };
+        mode.map_err(|e| inverse_err(py, g, e))
     }
 }
 
-const MODES: [&str; 6] = [
-    "bissector",
-    "constant_omega",
-    "constant_chi",
-    "constant_phi",
-    "double_diffraction",
-    "psi_constant",
-];
-
 #[pymethods]
 impl PyMode {
-    /// E4C mode by name: bissector, constant_omega, constant_chi,
-    /// constant_phi, double_diffraction (needs `hkl2`) or psi_constant
-    /// (needs `reference` and `psi`, degrees). The constant_* modes hold
-    /// their axis at the `current` passed to `solve`.
+    /// hkl's "hkl" engine mode by name, for a geometry with that engine's
+    /// axes. E4C: bissector, constant_omega, constant_chi, constant_phi,
+    /// double_diffraction, psi_constant. E6C: bissector_vertical,
+    /// constant_omega_vertical, constant_chi_vertical, constant_phi_vertical,
+    /// lifting_detector_phi, lifting_detector_omega, lifting_detector_mu,
+    /// double_diffraction_vertical, bissector_horizontal,
+    /// double_diffraction_horizontal, psi_constant_vertical,
+    /// psi_constant_horizontal, constant_mu_horizontal. double_diffraction*
+    /// needs `hkl2`, psi_constant* `reference` and `psi` (degrees). Axes a
+    /// mode does not write hold at the `current` passed to `solve`.
     #[new]
     #[pyo3(signature = (geometry, name, hkl2=None, reference=None, psi=None))]
     fn new(
@@ -388,32 +420,14 @@ impl PyMode {
         reference: Option<[f64; 3]>,
         psi: Option<f64>,
     ) -> PyResult<Self> {
-        if !MODES.contains(&name) {
-            return Err(PyValueError::new_err(format!(
-                "unknown mode {name:?}; one of {MODES:?}"
-            )));
-        }
-        let need = |ok: bool, what: &str| {
-            if ok {
-                Ok(())
-            } else {
-                Err(PyValueError::new_err(format!("mode {name:?} needs {what}")))
-            }
-        };
-        match name {
-            "double_diffraction" => need(hkl2.is_some(), "hkl2")?,
-            "psi_constant" => need(reference.is_some() && psi.is_some(), "reference and psi")?,
-            _ => {}
-        }
         let mode = Self {
             geometry: geometry.clone().unbind(),
             name: name.to_owned(),
             hkl2: hkl2.map(Vector3::from),
             reference: reference.map(Vector3::from),
-            psi: psi.map_or(0.0, f64::to_radians),
+            psi: psi.map(f64::to_radians),
         };
-        let g = &geometry.try_borrow()?.0;
-        mode.build(g).map_err(|e| inverse_err(py, g, e))?;
+        mode.build(py, &geometry.try_borrow()?.0)?;
         Ok(mode)
     }
 
@@ -457,7 +471,7 @@ fn solve(
     let geometry = mode.geometry.try_borrow(py)?;
     let geo = &geometry.0;
     let ie = |e| inverse_err(py, geo, e);
-    let m = mode.build(geo).map_err(ie)?;
+    let m = mode.build(py, geo)?;
     let cur = geo.values_from_degrees(&current).map_err(err)?;
     let all = request(&m, sample, hkl, wavelength, &cur)?
         .solve()
@@ -492,7 +506,7 @@ fn pick(
     let geometry = mode.geometry.try_borrow(py)?;
     let geo = &geometry.0;
     let ie = |e| inverse_err(py, geo, e);
-    let m = mode.build(geo).map_err(ie)?;
+    let m = mode.build(py, geo)?;
     let cur = geo.values_from_degrees(&current).map_err(err)?;
     let s = request(&m, sample, hkl, wavelength, &cur)?
         .pick(picker)
