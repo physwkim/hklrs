@@ -9,7 +9,8 @@ license.workspace = true
 [dependencies]
 nalgebra = { workspace = true }
 rayon = { workspace = true }
-serde_json = { workspace = true }
+# PONI Detector_config numbers are Python's float(), the nearest double
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 rust-hdf5 = { workspace = true, optional = true }
 

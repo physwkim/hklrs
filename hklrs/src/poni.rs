@@ -17,7 +17,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{Error, Module, PixelAxis, PixelDetector, Rad, Wavelength};
-use detectors::{Class, Grid, Layout};
+use detectors::{Built, Class, Fault, Grid, Layout, Pitch};
 
 /// Smallest sine of the angle between `up` and the beam for them to define
 /// pyFAI's axis 1.
@@ -54,6 +54,22 @@ pub enum PoniError {
     },
     #[error("pyFAI detector {class}: its Detector_config {key} is not the class's own")]
     DetectorConfig { class: &'static str, key: String },
+    #[error("pyFAI raises building detector {class} from the file")]
+    Raises { class: &'static str },
+    #[error("pyFAI builds detector {class} from the file with no {key}")]
+    NoPitch {
+        class: &'static str,
+        key: &'static str,
+    },
+    #[error(
+        "pyFAI builds detector {class} of pitch {pixel:?}, binning {binning:?} and shape {shape:?} from the file, which disagree as the class's do not"
+    )]
+    Inconsistent {
+        class: &'static str,
+        pixel: (f64, f64),
+        binning: (i64, i64),
+        shape: (i64, i64),
+    },
     #[error(
         "pyFAI detector {class} binned {binning:?}: its mask over {max_shape:?} does not bin, and pyFAI's Detector.mask raises"
     )]
@@ -317,7 +333,7 @@ pub struct DetectorConfig {
     /// `None` where the file has none or 0: the detector class's default.
     pub orientation: Option<Orientation>,
     /// `None` where the file has none or 0, which `Detector.factory` does
-    /// not apply.
+    /// not apply; a 0 in a pair is kept, which pyFAI's setter divides by.
     pub binning: Option<(u64, u64)>,
     pub splinefile: Option<String>,
     /// The other non-null `Detector_config` entries, keys lower-cased.
@@ -405,9 +421,6 @@ impl DetectorConfig {
                 n => Some((n, n)),
             },
         };
-        if let Some(b @ ((0, _) | (_, 0))) = binning {
-            return Err(syntax("binning", format!("{b:?}")));
-        }
         let splinefile = match get("splinefile") {
             None => None,
             Some(v) => Some(
@@ -535,6 +548,10 @@ impl PoniFile {
         }
     }
 
+    /// The generic detector as `Detector.__init__` builds it, then the
+    /// factory's binning by `Detector.binning`'s setter: the pitch times
+    /// the binning and `max_shape` floor divided by it, refused where the
+    /// setter raises (no pitch, no `max_shape`, a 0 in the binning).
     fn generic(&self) -> Result<Poni, PoniError> {
         let d = &self.detector;
         if d.splinefile.is_some() {
@@ -543,14 +560,21 @@ impl PoniFile {
         if self.parallax {
             return Err(PoniError::Unsupported("parallax correction"));
         }
-        if d.binning.is_some_and(|b| b != (1, 1)) {
-            return Err(PoniError::Unsupported("binning"));
-        }
         // Detector.__init__ takes a 0 pitch as none; version 1 sets it as given
-        let pitch = |key, p: Option<f64>| {
-            p.filter(|&p| self.version == 1.0 || p != 0.0)
-                .ok_or(PoniError::Missing(key))
-        };
+        let given = |p: Option<f64>| p.filter(|&p| self.version == 1.0 || p != 0.0);
+        let (mut pixel1, mut pixel2, mut shape) = (given(d.pixel1), given(d.pixel2), d.max_shape);
+        if let Some((b1, b2)) = d.binning.filter(|&b| b != (1, 1)) {
+            let (Some(p1), Some(p2), Some((n1, n2))) = (pixel1, pixel2, shape) else {
+                return Err(PoniError::Raises { class: "Detector" });
+            };
+            if b1 == 0 || b2 == 0 {
+                return Err(PoniError::Raises { class: "Detector" });
+            }
+            pixel1 = Some(p1 * b1 as f64);
+            pixel2 = Some(p2 * b2 as f64);
+            shape = Some(((n1 as u64 / b1) as usize, (n2 as u64 / b2) as usize));
+        }
+        let pitch = |key, p: Option<f64>| p.ok_or(PoniError::Missing(key));
         Ok(Poni {
             dist: self.dist,
             poni1: self.poni1,
@@ -558,20 +582,21 @@ impl PoniFile {
             rot1: self.rot1,
             rot2: self.rot2,
             rot3: self.rot3,
-            pixel1: pitch("pixel1", d.pixel1)?,
-            pixel2: pitch("pixel2", d.pixel2)?,
-            shape: d.max_shape.ok_or(PoniError::Missing("max_shape"))?,
+            pixel1: pitch("pixel1", pixel1)?,
+            pixel2: pitch("pixel2", pixel2)?,
+            shape: shape.ok_or(PoniError::Missing("max_shape"))?,
             orientation: d.orientation.unwrap_or(Orientation::BottomRight),
         })
     }
 
     /// The detector pyFAI builds from the file, in the lab where `lab`
     /// places pyFAI's axes: the generic one as [`PoniFile::poni`] gives it,
-    /// a named class with the pitch or chip edges, shape, default
-    /// orientation and mask of pyFAI's default instance, binned as the
-    /// file's `binning` key bins it. An ImXPad image is
-    /// flipped as pyFAI flips it over the whole image, not as it places
-    /// pixels by index, which flips them back.
+    /// a named class with the pitch or chip edges, shape, orientation and
+    /// mask of the instance its constructor and the `binning` key build
+    /// from the file, refused where pyFAI raises or builds an instance whose
+    /// pitch, binning and shape disagree as the class's do not. An ImXPad
+    /// image is flipped as pyFAI flips it over the whole image, not as it
+    /// places pixels by index, which flips them back.
     pub fn detector(&self, lab: &LabAxes) -> Result<PixelDetector, PoniError> {
         let class = self.class()?;
         match class.layout {
@@ -580,8 +605,8 @@ impl PoniFile {
                 class: class.name,
                 reason,
             }),
-            Layout::Uniform(grid, rule) => {
-                let (poni, grid) = self.named(class, grid)?;
+            Layout::Uniform(grid, pitch, rule) => {
+                let (poni, grid) = self.named(class, grid, pitch, false)?;
                 let det = poni.detector(lab)?;
                 let Some(rule) = rule else { return Ok(det) };
                 let mask = rule.mask(&grid).ok_or(PoniError::MaskBinning {
@@ -591,8 +616,8 @@ impl PoniFile {
                 })?;
                 Ok(det.with_mask(mask)?)
             }
-            Layout::Edges(grid, chips) => {
-                let (poni, grid) = self.named(class, grid)?;
+            Layout::Edges(grid, pitch, chips) => {
+                let (poni, grid) = self.named(class, grid, pitch, true)?;
                 let det = poni.edges_detector(chips.edges(&grid), lab)?;
                 Ok(det.with_mask(chips.mask(grid.shape))?)
             }
@@ -601,8 +626,14 @@ impl PoniFile {
 
     /// The geometry of the instance of `class` this file gives, and its
     /// grid.
-    fn named(&self, class: &Class, grid: Grid) -> Result<(Poni, Grid), PoniError> {
-        let (grid, orientation) = self.instance(class, grid)?;
+    fn named(
+        &self,
+        class: &Class,
+        grid: Grid,
+        pitch: Pitch,
+        edges: bool,
+    ) -> Result<(Poni, Grid), PoniError> {
+        let (grid, orientation) = self.instance(class, grid, pitch, edges)?;
         if self.parallax {
             return Err(PoniError::Unsupported("parallax correction"));
         }
@@ -622,13 +653,17 @@ impl PoniFile {
     }
 
     /// The grid and orientation of the class `Detector.factory` builds from
-    /// the file's `Detector_config` on the default instance `grid`: each
-    /// other entry the constructor takes must be the default's own, a 0 or
-    /// null pitch where the class takes it as the default's, pyFAI's choice
-    /// for another null, or a `sensor`, which only parallax reads, and a
-    /// binning other than the default's is one the class bins by
-    /// `Detector.binning`'s rule.
-    fn instance(&self, class: &Class, grid: Grid) -> Result<(Grid, Orientation), PoniError> {
+    /// the file's `Detector_config` on the default instance `grid`: every
+    /// other entry the constructor takes must be the default's own, or a
+    /// `sensor`, which only parallax reads; the pitch and binning are what
+    /// [`PoniFile::built`] makes of them, where they agree.
+    fn instance(
+        &self,
+        class: &Class,
+        grid: Grid,
+        pitch: Pitch,
+        edges: bool,
+    ) -> Result<(Grid, Orientation), PoniError> {
         let d = &self.detector;
         let takes = |key: &str| class.args.contains(&key);
         let differs = |key: &str| PoniError::DetectorConfig {
@@ -639,28 +674,9 @@ impl PoniFile {
         if d.splinefile.is_some() && (self.version == 1.0 || takes("splinefile")) {
             return Err(PoniError::Unsupported("spline file"));
         }
-        for (key, given, own) in [
-            ("pixel1", d.pixel1, grid.pixel.0),
-            ("pixel2", d.pixel2, grid.pixel.1),
-        ] {
-            let own = match given {
-                None => true,
-                Some(0.0) => grid.zero_pitch_default,
-                Some(p) => p == own,
-            };
-            if takes(key) && !own {
-                return Err(differs(key));
-            }
-        }
         if takes("max_shape") && d.max_shape.is_some_and(|s| s != grid.max_shape) {
             return Err(differs("max_shape"));
         }
-        // the factory bins whatever class it built, after the constructor
-        let binned = match d.binning {
-            Some(b) if b != grid.binning && grid.binnable => grid.binned(b),
-            Some(b) if b != grid.binning => return Err(differs("binning")),
-            _ => grid,
-        };
         for (key, value) in &d.other {
             let own = match (key.as_str(), grid.module_size) {
                 ("sensor", _) => true,
@@ -671,11 +687,44 @@ impl PoniFile {
                 return Err(differs(key));
             }
         }
+        let built = self
+            .built(class, &grid, pitch)
+            .ok_or(PoniError::Raises { class: class.name })?;
+        let binned = built
+            .grid(&grid, pitch, edges)
+            .map_err(|fault| match fault {
+                Fault::NoPitch(k) => PoniError::NoPitch {
+                    class: class.name,
+                    key: ["pixel1", "pixel2"][k],
+                },
+                Fault::Inconsistent => PoniError::Inconsistent {
+                    class: class.name,
+                    pixel: (
+                        built.pixel[0].unwrap_or(f64::NAN),
+                        built.pixel[1].unwrap_or(f64::NAN),
+                    ),
+                    binning: (built.binning[0], built.binning[1]),
+                    shape: (built.shape[0], built.shape[1]),
+                },
+            })?;
         let orientation = match d.orientation.filter(|_| takes("orientation")) {
             Some(o) => o,
             None => Orientation::try_from(grid.orientation)?,
         };
         Ok((binned, orientation))
+    }
+
+    /// pyFAI's instance of `class`, of default instance `grid`: its
+    /// constructor given the pitches it takes from the file, then the
+    /// factory's binning; None where pyFAI raises.
+    fn built(&self, class: &Class, grid: &Grid, pitch: Pitch) -> Option<Built> {
+        let d = &self.detector;
+        let given = |key: &str, p: Option<f64>| p.filter(|_| class.args.contains(&key));
+        pitch.build(
+            grid,
+            [given("pixel1", d.pixel1), given("pixel2", d.pixel2)],
+            d.binning,
+        )
     }
 }
 
@@ -991,7 +1040,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f.detector.binning, Some((2, 2)));
-        assert_eq!(f.poni(), Err(PoniError::Unsupported("binning")));
+        let poni = f.poni().unwrap();
+        assert_eq!(
+            (poni.pixel1, poni.pixel2, poni.shape),
+            (2e-4, 4e-4, (5, 10))
+        );
+        // Detector.binning's setter multiplies a None pitch, floor divides a
+        // None max_shape and divides by a 0
+        for config in [
+            r#"{"pixel2": 2e-4, "max_shape": [10, 20], "binning": [2, 2]}"#,
+            r#"{"pixel1": 0, "pixel2": 2e-4, "max_shape": [10, 20], "binning": [2, 2]}"#,
+            r#"{"pixel1": 1e-4, "pixel2": 2e-4, "binning": [2, 2]}"#,
+            r#"{"pixel1": 1e-4, "pixel2": 2e-4, "max_shape": [10, 20], "binning": [2, 0]}"#,
+        ] {
+            let f = parse(&format!(
+                "poni_version: 2\nDetector: Detector\nDetector_config: {config}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                f.poni(),
+                Err(PoniError::Raises { class: "Detector" }),
+                "{config}"
+            );
+        }
+    }
+
+    #[test]
+    fn detector_config_numbers_are_python_s_floats() {
+        // json.loads gives the double nearest the text, one ulp off 9.375e-6
+        let f = parse(
+            "poni_version: 2\nDetector: Detector\nDetector_config: {\"pixel1\": \
+             9.375000000000001e-06, \"pixel2\": 2e-4, \"max_shape\": [10, 20]}\n",
+        )
+        .unwrap();
+        assert_eq!(f.detector.pixel1, Some(9.375000000000001e-06));
+        assert_ne!(f.detector.pixel1, Some(9.375e-06));
     }
 
     #[test]

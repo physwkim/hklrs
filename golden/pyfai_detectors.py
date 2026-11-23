@@ -1,5 +1,6 @@
-"""pyFAI 2026.9.0's detector classes as Detector.factory resolves a PONI
-file's detector name, for hklrs's PONI import.
+"""pyFAI 2026.9.0's detector classes as Geometry.load builds a PONI file's
+detector (Detector.factory of its name and Detector_config), for hklrs's
+PONI import.
 
 Every Detector subclass the factory reaches, by registry key or by attribute
 of pyFAI.detectors, with its constructor arguments and the default instance's
@@ -10,24 +11,30 @@ every orientation), "edges" (ImXPad: the chip rule gives the pixel edges of
 calc_cartesian_positions over the whole image, every orientation), or the
 reason it has no model. A modelled class's mask rule reproduces its calc_mask
 and Detector.mask element by element in every orientation; the golden keeps a
-fingerprint of that mask. A uniform class is "binnable" when the factory's
-binning key, at each of BINNINGS, gives the default instance binned by
-Detector.binning's rule: the pitch times the binning ratio, max_shape floor
-divided, positions those of the generic Detector of that pitch and shape, and
-Detector.mask the mask rule's, drawn over max_shape and summed over binning
-blocks for a gap rule or Lambda9M's empty array (pyFAI raises where the
-binning does not divide max_shape) or over the binned shape for the disc; "binned" keeps pyFAI's
-instances either way, "unbinned" its 1x1 one. "zero_pitch" is what the
-factory makes of a 0 or null pixel1, pixel2 or both, and Geometry.load of a
-version 1 file with PixelSize1 and PixelSize2 0: the default instance, an
-exception, an instance with no pitch, or, for version 1, the generic Detector;
-"zero_pitch_default" holds when it is
-the default instance for every factory form. "probes" are names put to
-detector_factory and the class it returns; "cases" are a PONI file pyFAI writes for a modelled class
-and, after Geometry.load, calc_pos_zyx of some of its pixels where the image
-is flipped once per orientation: by index for a uniform class, whose index
-path is its whole-image path, over the whole image for ImXPad, whose index
-path flips twice ("zyx_by_index", upstream defect FAI-2).
+fingerprint of that mask. "pitch" is how the class's constructor takes a
+given pitch: "fixed" (it takes none), "as given", "rounded" (force_pixel:
+binned by the rounded ratio to PIXEL_SIZE, the pitch kept), "rebinned"
+(Apex2, Pixium), "perkin", "table" (a Rayonix's BINNED_PIXEL_SIZE) or
+"plate" (Mar345 scales max_shape by 100e-6 over the pitch).
+
+"reads" are the instances Geometry.load builds from files of the class with
+other pitches and binnings (heads): each file's Detector lines and the
+instance's class, pitch, shape, max_shape and binning, or the exception it
+raises; Detector.mask's fingerprint or exception where the instance has a
+positive pitch, a binning and a shape within the default's max_shape, whose
+positions, for a uniform class, are asserted to be the generic Detector's of
+that pitch, shape and orientation. "round_trip" is, at each of BINNINGS, the
+factory's binning key on the default instance, PoniFile.write of a Geometry
+of it and Geometry.load of that, with what the load builds, its mask and
+calc_pos_zyx at some pixels; the generic Detector's are of GENERIC with a
+binning (generic_files). "probes" are names put to detector_factory and
+the class it returns; "cases" are a PONI file pyFAI writes for a modelled
+class, default or binned by the binning key where that binning gives the
+class's own pitch and the mask, and, after Geometry.load, calc_pos_zyx of
+some of its pixels where the image is flipped once per orientation: by index
+for a uniform class, whose index path is its whole-image path, over the
+whole image for ImXPad, whose index path flips twice ("zyx_by_index",
+upstream defect FAI-2).
 
 Writes pyfai_detectors.json next to this script and the class table
 hklrs/src/poni/detectors/table.rs. Produced with pyFAI 2026.9.0, numpy 2.5.5,
@@ -43,6 +50,7 @@ import numpy
 import pyFAI
 import pyFAI.detectors
 from pyFAI.detectors import ALL_DETECTORS, Detector, detector_factory
+from pyFAI.detectors._rayonix import _Rayonix
 from pyFAI.geometry import Geometry
 from pyFAI.io.ponifile import PoniFile
 
@@ -62,6 +70,13 @@ GAPS = {"_Dectris": None, "_Lambda": None, "Maxipix": None,
 DISC = {"Mar345", "Rayonix133", "RayonixSx165"}
 CHIPS = {"ImXPadS10"}
 BINNINGS = [(1, 1), (2, 2), (3, 3), (2, 1), (1, 4)]
+# the classes whose __init__ hands pixel1 and pixel2 to Detector.__init__ as
+# given
+PASS = {"Detector", "ModuleDetector", "Eiger", "Pilatus", "Pilatus4", "Maxipix", "_Lambda",
+        "Jungfrau4M", "ImXPadS10", "ImXPadS70", "Mar555"}
+RATIOS = [1.5, 0.5, 2.4, 2.5, 0.9999]
+GEOMETRY = ("Distance: 0.3\nPoni1: 0.01\nPoni2: 0.02\nRot1: 0.1\nRot2: -0.2\nRot3: 0.3\n"
+            "Wavelength: 1e-10\n")
 
 
 def gaps_mask(shape, module, gap, strip):
@@ -93,29 +108,6 @@ def chips_mask(shape, module):
         pos[0] = pos[-1] = True
         edges.append(pos)
     return edges[0][:, None] | edges[1][None, :]
-
-
-def rebin_any(mask, b):
-    """utils.mathutil.binning(mask, b) != 0, None where it raises"""
-    (n0, n1), (b0, b1) = mask.shape, b
-    if n0 % b0 or n1 % b1:
-        return None
-    return mask.reshape(n0 // b0, b0, n1 // b1, b1).any(axis=(1, 3))
-
-
-def binned_mask(rule, max_shape, shape, b):
-    """the rule's Detector.mask of the instance binned b, None where pyFAI's
-    rebin raises"""
-    if rule is None:
-        return numpy.zeros(shape, dtype=bool)
-    if rule["rule"] == "disc":
-        return disc_mask(shape)
-    if rule["rule"] == "empty":
-        m = numpy.zeros(max_shape, dtype=bool)
-    else:
-        assert rule["rule"] == "gaps", rule
-        m = gaps_mask(max_shape, rule["module"], rule["gap"], rule["strip"])
-    return m if tuple(max_shape) == tuple(shape) else rebin_any(m, b)
 
 
 def fingerprint(mask):
@@ -224,91 +216,273 @@ def chip_layout(cls):
     return True
 
 
-def binned(cls, doc, rule, rng):
-    """pyFAI's instances of cls for the factory's binning key at each of
-    BINNINGS, and whether each is the default instance binned by
-    Detector.binning's rule with the rule's binned mask"""
-    pd = [float(p) for p in doc["pixel"]]
-    bd, mx = doc["binning"], doc["max_shape"]
-    out, binnable = [], True
-    for b in BINNINGS:
-        def make(o, b=b):
-            det = detector_factory(doc["class"], {"binning": list(b), "orientation": o})
-            assert type(det) is cls
-            return det
-        det = make(3)
+def pitch_rule(cls, det):
+    """how cls's constructor takes a given pitch, by the class that defines
+    __init__; the reads test it against pyFAI"""
+    params = inspect.signature(cls).parameters
+    if "pixel1" not in params:
+        assert "pixel2" not in params and not cls.force_pixel, cls
+        return {"rule": "fixed"}
+    size = [float(s) for s in cls.PIXEL_SIZE] if "PIXEL_SIZE" in dir(cls) else None
+    rounded = bool(cls.force_pixel) and size is not None
+    # a pitch the file omits is the constructor's default, which gives the
+    # default instance's: as given, or None, which force_pixel takes as size
+    defaults = (params["pixel1"].default, params["pixel2"].default)
+    assert defaults == (det.pixel1, det.pixel2) or (
+        defaults == (None, None) and rounded and size == [det.pixel1, det.pixel2]), cls
+    own = owner(cls, "__init__")
+    if issubclass(cls, _Rayonix):
+        assert not rounded, cls
+        return {"rule": "table",
+                "table": [[int(b), float(p)] for b, p in cls.BINNED_PIXEL_SIZE.items()]}
+    if own in PASS:
+        return {"rule": "rounded", "size": size} if rounded else {"rule": "as given"}
+    assert rounded == (own != "Mar345"), cls
+    if own in ("Apex2", "Pixium"):
+        unit = size if own == "Apex2" else [cls.DEFAULT_PIXEL1, cls.DEFAULT_PIXEL2]
+        return {"rule": "rebinned", "size": size, "unit": unit}
+    if own == "Perkin":
+        return {"rule": "perkin", "size": size, "unit": [cls.DEFAULT_PIXEL1, cls.DEFAULT_PIXEL2]}
+    if own == "Mar345":
+        # Mar345.__init__ scales MAX_SHAPE by 100e-6 / pixel
+        return {"rule": "plate", "max_shape": [int(n) for n in cls.MAX_SHAPE], "unit": 100e-6}
+    raise AssertionError(f"{cls.__name__}: no pitch rule for {own}.__init__")
+
+
+def facts(det):
+    shape = None if det.shape is None else [int(n) for n in det.shape]
+    return {"class": type(det).__name__,
+            "pixel": [None if p is None else repr(p) for p in (det.pixel1, det.pixel2)],
+            "shape": shape,
+            "max_shape": None if det.max_shape is None else [int(n) for n in det.max_shape],
+            "binning": [int(b) for b in det.binning]}
+
+
+def in_range(det, doc):
+    """a class's instance with a positive pitch, a binning and a shape within
+    the default instance's max_shape"""
+    return (type(det).__name__ == doc["class"]
+            and all(p is not None and 0 < p < numpy.inf for p in (det.pixel1, det.pixel2))
+            and all(b >= 1 for b in det.binning)
+            and all(1 <= n <= m for n, m in zip(det.shape, doc["max_shape"])))
+
+
+def mask_outcome(det, masks):
+    """Detector.mask's fingerprint, or the exception it raises"""
+    key = (type(det).__name__, tuple(det.shape), tuple(det.max_shape), tuple(det.binning))
+    if key not in masks:
         try:
-            m, err = det.mask, None
-            fp = None if m is None else fingerprint(numpy.asarray(m) != 0)
-        except RuntimeError as e:
-            m, fp, err = None, None, str(e)
-        out.append({"binning": list(b), "pixel": [repr(det.pixel1), repr(det.pixel2)],
-                    "shape": [int(n) for n in det.shape], "mask": fp, "mask_error": err})
-        shape = (mx[0] // b[0], mx[1] // b[1])
-        ok = ((det.pixel1, det.pixel2) == (pd[0] * (b[0] / bd[0]), pd[1] * (b[1] / bd[1]))
-              and tuple(det.shape) == shape and tuple(det.binning) == b)
-        mine = binned_mask(rule, mx, shape, b) if ok else None
-        if err is not None:
-            ok = ok and mine is None
-        elif ok:
-            ok = mine is not None and ((not mine.any()) if m is None
-                                       else bool(((numpy.asarray(m) != 0) == mine).all()))
-        # an empty image has no positions
-        binnable = binnable and ok and (b == tuple(bd) or 0 in shape or same_as_generic(make, rng))
-    unbinned = out[BINNINGS.index((1, 1))]
-    return binnable, {"pixel": unbinned["pixel"], "shape": unbinned["shape"]}, out
-
-
-ZERO_FORMS = {"pixel1": {"pixel1": 0}, "pixel2": {"pixel2": 0},
-              "both": {"pixel1": 0, "pixel2": 0}, "pixel1 null": {"pixel1": None},
-              "pixel2 null": {"pixel2": None}}
-
-
-def instance_key(det):
-    return (type(det).__name__, det.pixel1, det.pixel2, det.shape, tuple(det.binning),
-            int(det.orientation))
-
-
-def zero_pitch(name, cls, tmp):
-    """the factory's instance for each of ZERO_FORMS and Geometry.load's for
-    a version 1 file of 0 pixel sizes, against the default instance"""
-    default = instance_key(cls())
-
-    def outcome(make):
-        try:
-            det = make()
+            m = det.mask
         except Exception as err:
-            return f"raises {type(err).__name__}"
-        if instance_key(det) == default:
-            return "default"
-        assert det.pixel1 is None or det.pixel2 is None, (name, instance_key(det))
-        return "no pitch"
+            masks[key] = {"mask_error": type(err).__name__}
+        else:
+            m = numpy.zeros(det.shape, dtype=bool) if m is None else numpy.asarray(m) != 0
+            assert m.shape == tuple(det.shape), key
+            masks[key] = {"mask": fingerprint(m)}
+    return masks[key]
 
-    out = {k: outcome(lambda c=c: detector_factory(name, c)) for k, c in ZERO_FORMS.items()}
-    path = os.path.join(tmp, "zero.poni")
-    with open(path, "w") as f:
-        f.write(f"Detector: {name}\nPixelSize1: 0\nPixelSize2: 0\nDistance: 0.3\n"
-                "Poni1: 0.01\nPoni2: 0.02\nRot1: 0\nRot2: 0\nRot3: 0\nWavelength: 1e-10\n")
 
-    def load():
-        geo = Geometry()
-        geo.load(path)
-        return geo.detector
-    # PoniFile.read_from_dict: a NexusDetector kept, the class's constructor
-    # where it forces the pitch, else the generic Detector with the pitches set
-    if issubclass(cls, pyFAI.detectors.NexusDetector):
-        out["version 1"] = outcome(load)
-    elif cls.force_pixel:
-        out["version 1"] = outcome(load)
-        assert out["version 1"] == out["both"], (name, out)
-    else:
-        det = load()
-        assert type(det) is Detector and (det.pixel1, det.pixel2, det.shape) == (0.0, 0.0, None)
-        out["version 1"] = "generic"
-    # a null is a 0 to every constructor
-    for k in ("pixel1", "pixel2"):
-        assert (out[k] == "default") == (out[f"{k} null"] == "default"), (name, out)
+def assert_generic(det, rng, seen):
+    """calc_cartesian_positions(d1, d2) of det is the generic Detector's of
+    its pitch, shape and orientation"""
+    key = (type(det).__name__, det.pixel1, det.pixel2, tuple(det.shape), int(det.orientation))
+    if key in seen:
+        return
+    seen.add(key)
+    n0, n1 = det.shape
+    d1 = numpy.concatenate([[0, n0 - 1, 0, n0 - 1], rng.integers(0, n0, 200)]).astype(float)
+    d2 = numpy.concatenate([[0, 0, n1 - 1, n1 - 1], rng.integers(0, n1, 200)]).astype(float)
+    ref = Detector(pixel1=det.pixel1, pixel2=det.pixel2, max_shape=det.shape,
+                   orientation=int(det.orientation))
+    a, b = det.calc_cartesian_positions(d1, d2), ref.calc_cartesian_positions(d1, d2)
+    assert a[2] is None and numpy.array_equal(a[0], b[0]) and numpy.array_equal(a[1], b[1]), key
+
+
+def heads(doc):
+    """the detector lines of the files read: a Detector_config of pitches
+    (the native pitch at each of BINNINGS, a Rayonix table's, RATIOS of the
+    default's, one axis, 0, null, negative), of binnings, of both, and
+    version 1's pixel sizes"""
+    name, rule = doc["class"], doc["pitch"]
+    (p0, p1), (b0, b1) = [float(p) for p in doc["pixel"]], doc["binning"]
+
+    def native(b):
+        return {"pixel1": p0 * b[0] / b0, "pixel2": p1 * b[1] / b1}
+
+    two = native((2, 2))
+    configs = [native(b) for b in BINNINGS]
+    if rule["rule"] == "table":
+        configs += [{"pixel1": p, "pixel2": p} for _, p in rule["table"]]
+    configs += [{"pixel1": p0 * r, "pixel2": p1 * r} for r in RATIOS]
+    configs += [{"pixel1": two["pixel1"]}, {"pixel2": two["pixel2"]},
+                {"pixel1": 0, "pixel2": 0}, {"pixel1": None, "pixel2": None},
+                {"pixel1": -p0, "pixel2": -p1}, {"pixel1": 0}]
+    configs += [{"binning": list(b)} for b in BINNINGS]
+    configs += [{"binning": [0, 0]}, {"binning": 2}, {"binning": 0}]
+    configs += [{**two, "binning": [1, 1]}, {**two, "binning": [2, 2]},
+                {"pixel1": 0, "pixel2": 0, "binning": [2, 2]},
+                {"pixel1": p0 * 1.5, "pixel2": p1 * 1.5, "binning": [2, 2]}]
+    out = [f"poni_version: 2.1\nDetector: {name}\nDetector_config: {json.dumps(c)}\n"
+           for c in configs]
+    for p in (native((1, 1)), two, {"pixel1": 0.0, "pixel2": 0.0},
+              {"pixel1": p0 * 1.5, "pixel2": p1 * 1.5}):
+        out.append(f"Detector: {name}\nPixelSize1: {p['pixel1']!r}\nPixelSize2: {p['pixel2']!r}\n")
     return out
+
+
+def load(text, tmp):
+    """Geometry.load of a PONI file of text, or the exception's name"""
+    path = os.path.join(tmp, "read.poni")
+    with open(path, "w") as f:
+        f.write(text)
+    geo = Geometry()
+    try:
+        geo.load(path)
+    except Exception as err:
+        return None, type(err).__name__
+    return geo, None
+
+
+def reads(doc, tmp, masks, rng, seen):
+    out = []
+    for head in heads(doc):
+        geo, err = load(head + GEOMETRY, tmp)
+        if geo is None:
+            out.append({"head": head, "raises": err})
+            continue
+        det = geo.detector
+        entry = {"head": head, **facts(det)}
+        if in_range(det, doc):
+            entry.update(mask_outcome(det, masks))
+            if doc["layout"] == "uniform":
+                assert_generic(det, rng, seen)
+        out.append(entry)
+    return out
+
+
+def written(geo, tmp):
+    """PoniFile.write of geo, without the date line, which changes on every run"""
+    path = os.path.join(tmp, "written.poni")
+    with open(path, "w") as f:
+        PoniFile(geo).write(f)
+    with open(path) as f:
+        text = f.read()
+    return "".join(line for line in text.splitlines(True) if not line.startswith("# Calibration done"))
+
+
+def sample(doc, shape):
+    n0, n1 = shape
+    pixels = [(0, 0), (n0 - 1, 0), (0, n1 - 1), (n0 - 1, n1 - 1), (n0 // 3, n1 // 2)]
+    if doc["layout"] == "edges":
+        # either side of a chip boundary
+        m0, m1 = doc["module_size"]
+        pixels += [(n0 // 3, m1 - 1), (min(m0, n0 - 1), min(m1, n1 - 1))]
+    return pixels
+
+
+def zyx_at(geo, doc, pixels):
+    """calc_pos_zyx at pixels: by index for a uniform class, from the whole
+    image for ImXPad (FAI-2)"""
+    d1 = numpy.array([p[0] for p in pixels], dtype=float)
+    d2 = numpy.array([p[1] for p in pixels], dtype=float)
+    by_index = geo.calc_pos_zyx(d1=d1, d2=d2)
+    if doc["layout"] == "edges":
+        whole = geo.calc_pos_zyx()
+        zyx = [w[d1.astype(int), d2.astype(int)] for w in whole]
+    else:
+        zyx = by_index
+    return ([[float(c[k]) for c in zyx] for k in range(len(pixels))],
+            [[float(c[k]) for c in by_index] for k in range(len(pixels))])
+
+
+def round_trip(doc, tmp, masks):
+    """at each of BINNINGS: the factory's binning key on the default
+    instance, PoniFile.write of a Geometry of it, and Geometry.load of that"""
+    out = []
+    for b in BINNINGS:
+        det = detector_factory(doc["class"], {"binning": list(b)})
+        n0, n1 = det.shape
+        geo = Geometry(dist=0.31, poni1=0.37 * n0 * det.pixel1, poni2=0.61 * n1 * det.pixel2,
+                       rot1=0.1, rot2=-0.2, rot3=0.3, detector=det, wavelength=1e-10)
+        text = written(geo, tmp)
+        entry = {"binning": list(b), "written": facts(det), "poni": text}
+        back, err = load(text, tmp)
+        if back is None:
+            entry["raises"] = err
+        else:
+            entry["read"] = facts(back.detector)
+            if in_range(back.detector, doc):
+                entry.update(mask_outcome(back.detector, masks))
+            # ImXPad's chip edges span max_shape whatever the binning
+            if in_range(back.detector, doc) and (
+                    doc["layout"] == "uniform" or entry["read"]["binning"] == doc["binning"]):
+                pixels = sample(doc, back.detector.shape)
+                entry["pixels"] = [list(p) for p in pixels]
+                entry["zyx"] = zyx_at(back, doc, pixels)[0]
+        out.append(entry)
+    return out
+
+
+# the generic Detector's: binned 2 and 3 floors max_shape, and the binned
+# pitch is a float product other than the decimal one
+GENERIC = {"pixel1": 1.72e-4, "pixel2": 7.5e-5, "max_shape": [11, 20]}
+
+
+def generic_heads():
+    """Detector_config of the generic Detector with a binning: each of
+    BINNINGS, a 0, a scalar, one past max_shape, one that does not divide it,
+    in each orientation, and with no pitch, a 0, null or negative pitch, or
+    no max_shape"""
+    configs = [{**GENERIC, "binning": list(b)} for b in BINNINGS]
+    configs += [{**GENERIC, "binning": b} for b in ([0, 0], [2, 0], 2, 0, [12, 1], [3, 7])]
+    configs += [{**GENERIC, "binning": [2, 1], "orientation": o} for o in (1, 2, 3, 4)]
+    one = {k: v for k, v in GENERIC.items() if k != "pixel1"}
+    configs += [{**one, "binning": [2, 2]}, {**GENERIC, "pixel1": 0, "binning": [2, 2]},
+                {**GENERIC, "pixel2": None, "binning": [2, 2]},
+                {**GENERIC, "pixel1": -1.72e-4, "binning": [2, 2]},
+                {"pixel1": 1.72e-4, "pixel2": 7.5e-5, "binning": [2, 2]}]
+    return [f"poni_version: 2.1\nDetector: Detector\nDetector_config: {json.dumps(c)}\n"
+            for c in configs]
+
+
+def generic_files(doc, tmp):
+    """the generic Detector: Geometry.load of generic_heads, and, at each of
+    BINNINGS, PoniFile.write of a Geometry of the factory's GENERIC binned by
+    the binning key and Geometry.load of that; calc_pos_zyx of some pixels of
+    each instance of a positive pitch and shape"""
+
+    def positions(entry, geo):
+        det = geo.detector
+        if (all(p is not None and 0 < p < numpy.inf for p in (det.pixel1, det.pixel2))
+                and det.shape is not None and min(det.shape) >= 1):
+            pixels = sample(doc, det.shape)
+            entry["pixels"] = [list(p) for p in pixels]
+            entry["zyx"] = zyx_at(geo, doc, pixels)[0]
+            assert det.mask is None, entry
+
+    reads = []
+    for head in generic_heads():
+        geo, err = load(head + GEOMETRY, tmp)
+        if geo is None:
+            reads.append({"head": head, "raises": err})
+            continue
+        entry = {"head": head, **facts(geo.detector)}
+        positions(entry, geo)
+        reads.append(entry)
+    trips = []
+    for b in BINNINGS:
+        det = detector_factory("Detector", {**GENERIC, "binning": list(b)})
+        n0, n1 = det.shape
+        geo = Geometry(dist=0.31, poni1=0.37 * n0 * det.pixel1, poni2=0.61 * n1 * det.pixel2,
+                       rot1=0.1, rot2=-0.2, rot3=0.3, detector=det, wavelength=1e-10)
+        text = written(geo, tmp)
+        entry = {"binning": list(b), "written": facts(det), "poni": text}
+        back, err = load(text, tmp)
+        assert back is not None, err
+        entry["read"] = facts(back.detector)
+        positions(entry, back)
+        trips.append(entry)
+    return reads, trips
 
 
 def describe(name, cls, rng):
@@ -330,10 +504,6 @@ def describe(name, cls, rng):
         "orientation": int(det.orientation),
         "module_size": module,
     })
-    with tempfile.TemporaryDirectory() as tmp:
-        zero = zero_pitch(name, cls, tmp)
-    doc["zero_pitch"] = zero
-    doc["zero_pitch_default"] = all(zero[k] == "default" for k in ZERO_FORMS)
     if cls is Detector:
         return {**doc, "layout": "generic", "mask": None}
     if shape is None or det.pixel1 is None:
@@ -357,14 +527,12 @@ def describe(name, cls, rng):
     if rule is not None and rule.get("module") is not None:
         assert rule["module"] == doc["module_size"]
     assert tuple(det.shape) == tuple(m // b for m, b in zip(det.max_shape, det.binning))
-    doc = {**doc, "layout": layout, "mask": rule, "fingerprint": fingerprint(mask)}
     if layout == "edges":
-        # calc_pixels_edges spans max_shape whatever the binning
+        # calc_pixels_edges spans max_shape and PIXEL_SIZE whatever the binning
         two = detector_factory(name, {"binning": [2, 2]})
         assert two.shape != two.max_shape and two.calc_cartesian_positions()[0].shape[0] == two.max_shape[0]
-        return {**doc, "binnable": False}
-    binnable, unbinned, instances = binned(cls, doc, rule, rng)
-    return {**doc, "binnable": binnable, "unbinned": unbinned, "binned": instances}
+    return {**doc, "layout": layout, "mask": rule, "fingerprint": fingerprint(mask),
+            "pitch": pitch_rule(cls, det)}
 
 
 def probes(attributes, registry):
@@ -391,6 +559,24 @@ def probes(attributes, registry):
     return out
 
 
+def native(doc, entry):
+    """entry's pitch is its class's at entry's binning: a Rayonix's table's,
+    else the default instance's scaled by the binning"""
+    if entry.get("pixel") is None or None in entry["pixel"]:
+        return False
+    rule, out = doc["pitch"], []
+    for k in (0, 1):
+        b = entry["binning"][k]
+        if rule["rule"] == "table":
+            want = dict(rule["table"]).get(b)
+        elif rule["rule"] == "plate":
+            want = float(entry["pixel"][k])
+        else:
+            want = float(doc["pixel"][k]) * b / doc["binning"][k]
+        out.append(want is not None and abs(float(entry["pixel"][k]) - want) <= 1e-9 * want)
+    return all(out)
+
+
 def case(doc, tmp, o, b=None):
     """a PONI file pyFAI writes for doc's class in orientation o, binned b
     by the binning key, and calc_pos_zyx after load"""
@@ -401,13 +587,7 @@ def case(doc, tmp, o, b=None):
     n0, n1 = det.shape
     geo = Geometry(dist=0.31, poni1=0.37 * n0 * det.pixel1, poni2=0.61 * n1 * det.pixel2,
                    rot1=0.1, rot2=-0.2, rot3=0.3, detector=det, wavelength=1e-10)
-    path = os.path.join(tmp, f"{doc['class']}.poni")
-    with open(path, "w") as f:
-        PoniFile(geo).write(f)
-    with open(path) as f:
-        text = f.read()
-    # the date line changes on every run
-    text = "".join(line for line in text.splitlines(True) if not line.startswith("# Calibration done"))
+    text = written(geo, tmp)
     if b is not None:
         # PoniFile.write gives the binned pitch, not the binning
         config = json.dumps({"binning": list(b), "orientation": o})
@@ -415,30 +595,20 @@ def case(doc, tmp, o, b=None):
         k = next(i for i, line in enumerate(lines) if line.startswith("Detector_config:"))
         lines[k] = f"Detector_config: {config}\n"
         text = "".join(lines)
-        with open(path, "w") as f:
-            f.write(text)
-    back = Geometry()
-    back.load(path)
+    back, err = load(text, tmp)
+    assert err is None, err
     assert type(back.detector) is cls and int(back.detector.orientation) == o
     assert (back.detector.pixel1, back.detector.pixel2, back.detector.shape) == (
         det.pixel1, det.pixel2, det.shape)
-    pixels = [(0, 0), (n0 - 1, 0), (0, n1 - 1), (n0 - 1, n1 - 1), (n0 // 3, n1 // 2)]
-    if doc["layout"] == "edges":
-        # either side of a chip boundary
-        m0, m1 = doc["module_size"]
-        pixels += [(n0 // 3, m1 - 1), (min(m0, n0 - 1), min(m1, n1 - 1))]
-    d1 = numpy.array([p[0] for p in pixels], dtype=float)
-    d2 = numpy.array([p[1] for p in pixels], dtype=float)
+    pixels = sample(doc, det.shape)
+    mask = back.detector.mask
+    mask = numpy.zeros(det.shape, dtype=bool) if mask is None else numpy.asarray(mask) != 0
     out = {"class": doc["class"], "orientation": o, "binning": None if b is None else list(b),
-           "poni": text, "pixels": [list(p) for p in pixels]}
-    by_index = back.calc_pos_zyx(d1=d1, d2=d2)
+           "poni": text, "shape": [int(n) for n in det.shape], "fingerprint": fingerprint(mask),
+           "pixels": [list(p) for p in pixels]}
+    out["zyx"], by_index = zyx_at(back, doc, pixels)
     if doc["layout"] == "edges":
-        whole = back.calc_pos_zyx()
-        zyx = [w[d1.astype(int), d2.astype(int)] for w in whole]
-        out["zyx_by_index"] = [[float(c[k]) for c in by_index] for k in range(len(pixels))]
-    else:
-        zyx = by_index
-    out["zyx"] = [[float(c[k]) for c in zyx] for k in range(len(pixels))]
+        out["zyx_by_index"] = by_index
     return out
 
 
@@ -463,9 +633,29 @@ def rust_grid(c):
             f"max_shape: ({c['max_shape'][0]}, {c['max_shape'][1]}), "
             f"binning: ({c['binning'][0]}, {c['binning'][1]}), "
             f"orientation: {c['orientation']}, "
-            f"module_size: {rust_pair(c['module_size'])}, "
-            f"binnable: {'true' if c['binnable'] else 'false'}, "
-            f"zero_pitch_default: {'true' if c['zero_pitch_default'] else 'false'} }}")
+            f"module_size: {rust_pair(c['module_size'])} }}")
+
+
+def rust_floats(v):
+    return f"({v[0]!r}, {v[1]!r})"
+
+
+def rust_pitch(p):
+    rule = p["rule"]
+    if rule == "fixed":
+        return "Pitch::Fixed"
+    if rule == "as given":
+        return "Pitch::AsGiven"
+    if rule == "rounded":
+        return f"Pitch::Rounded {{ size: {rust_floats(p['size'])} }}"
+    if rule in ("rebinned", "perkin"):
+        kind = "Rebinned" if rule == "rebinned" else "Perkin"
+        return f"Pitch::{kind} {{ size: {rust_floats(p['size'])}, unit: {rust_floats(p['unit'])} }}"
+    if rule == "table":
+        return "Pitch::Table(&[" + ", ".join(f"({b}, {v!r})" for b, v in p["table"]) + "])"
+    assert rule == "plate", p
+    m = p["max_shape"]
+    return f"Pitch::Plate {{ max_shape: ({m[0]}, {m[1]}), unit: {p['unit']!r} }}"
 
 
 def rust_class(c):
@@ -475,12 +665,12 @@ def rust_class(c):
         lay = "Layout::Generic"
     elif layout == "uniform":
         rule = "None" if c["mask"] is None else f"Some({rust_rule(c['mask'])})"
-        lay = f"Layout::Uniform({rust_grid(c)}, {rule})"
+        lay = f"Layout::Uniform({rust_grid(c)}, {rust_pitch(c['pitch'])}, {rule})"
     elif layout == "edges":
         m = c["mask"]
         assert m["rule"] == "chips" and m["module"] == c["module_size"]
-        lay = (f"Layout::Edges({rust_grid(c)}, Chips {{ module: ({m['module'][0]}, "
-               f"{m['module'][1]}), border: {c['border']!r} }})")
+        lay = (f"Layout::Edges({rust_grid(c)}, {rust_pitch(c['pitch'])}, Chips {{ module: "
+               f"({m['module'][0]}, {m['module'][1]}), border: {c['border']!r} }})")
     else:
         lay = f'Layout::Unsupported("{layout}")'
     force = "true" if c.get("force_pixel") else "false"
@@ -491,7 +681,7 @@ def rust_class(c):
 def write_table(doc):
     lines = ["// @generated by golden/pyfai_detectors.py from pyFAI "
              f"{doc['pyfai']}; do not edit.\n",
-             "use super::{Chips, Class, Grid, Layout, Rule};\n\n",
+             "use super::{Chips, Class, Grid, Layout, Pitch, Rule};\n\n",
              "/// Every class Detector.factory reaches, sorted by name.\n",
              "pub(super) static CLASSES: &[Class] = &[\n"]
     lines += [rust_class(c) for c in doc["classes"]]
@@ -544,15 +734,27 @@ def main():
             doc["probes"] = probes(attributes, registry)
         finally:
             os.chdir(cwd)
-        uniform = [c for c in described if c["layout"] == "uniform"]
+        modelled = [c for c in described if c["layout"] in ("uniform", "edges")]
+        generic = next(c for c in described if c["layout"] == "generic")
+        generic["reads"], generic["round_trip"] = generic_files(generic, tmp)
+        masks, seen = {}, set()
+        for c in modelled:
+            c["reads"] = reads(c, tmp, masks, rng, seen)
+            c["round_trip"] = round_trip(c, tmp, masks)
+        uniform = [c for c in modelled if c["layout"] == "uniform"]
         doc["cases"] = [case(c, tmp, 1 + i % 4) for i, c in enumerate(uniform)]
-        doc["cases"] += [case(c, tmp, o) for c in described if c["layout"] == "edges"
+        doc["cases"] += [case(c, tmp, o) for c in modelled if c["layout"] == "edges"
                          for o in (1, 2, 3, 4)]
-        # one binned instance of each binnable class whose mask pyFAI bins
-        binnable = [c for c in uniform if c["binnable"]]
-        for i, c in enumerate(binnable):
-            usable = [tuple(e["binning"]) for e in c["binned"] if e["mask_error"] is None
-                      and e["binning"] != c["binning"] and 0 not in e["shape"]]
+        # one instance of each uniform class binned by the binning key alone
+        # to the class's pitch at that binning, whose mask pyFAI bins
+        for i, c in enumerate(uniform):
+            usable = []
+            for e in c["reads"]:
+                config = json.loads(e["head"].split("Detector_config: ")[1]) if (
+                    "Detector_config: " in e["head"]) else {}
+                if (set(config) == {"binning"} and isinstance(config["binning"], list)
+                        and "mask" in e and native(c, e) and e["binning"] != c["binning"]):
+                    usable.append(tuple(config["binning"]))
             if usable:
                 doc["cases"].append(case(c, tmp, 1 + (i + 1) % 4, usable[i % len(usable)]))
     with open(OUT, "w") as f:
@@ -563,11 +765,21 @@ def main():
     for c in described:
         counts[c["layout"]] = counts.get(c["layout"], 0) + 1
     print(counts)
-    print("not binnable:", [c["class"] for c in described if c.get("binnable") is False])
-    print("zero pitch not default:", [(c["class"], c["zero_pitch"]["both"]) for c in described
-                                      if c.get("zero_pitch_default") is False])
-    print("mask raises:", [(c["class"], e["binning"]) for c in described
-                           for e in c.get("binned", []) if e["mask_error"]])
+    every = [(c["class"], e) for c in modelled for e in c["reads"]]
+    print("reads:", len(every), "raise:", sorted({(n, e["raises"]) for n, e in every if "raises" in e}))
+    print("no pitch:", sorted({n for n, e in every if "pixel" in e and None in e["pixel"]}))
+    print("mask raises:", sorted({(n, tuple(e["binning"]), e["mask_error"]) for n, e in every
+                                  if "mask_error" in e}))
+    print("round trip loses the binning:", sorted({(c["class"], tuple(e["binning"])) for c in modelled
+                                                   for e in c["round_trip"] if "read" in e
+                                                   and e["read"]["binning"] != e["binning"]}))
+    print("round trip raises:", sorted({(c["class"], tuple(e["binning"]), e["raises"])
+                                        for c in modelled for e in c["round_trip"] if "raises" in e}))
+    print("generic reads raise:", [(e["head"].split("config: ")[1].strip(), e["raises"])
+                                   for e in generic["reads"] if "raises" in e])
+    print("generic round trip:", [(e["binning"], e["written"]["pixel"], e["written"]["shape"],
+                                   e["read"]["pixel"], e["read"]["shape"])
+                                  for e in generic["round_trip"]])
 
 
 if __name__ == "__main__":
