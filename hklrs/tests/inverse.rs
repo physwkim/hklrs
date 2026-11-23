@@ -9,9 +9,10 @@ use std::f64::consts::{PI, TAU};
 
 use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, zaxis};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
-use hklrs::presets::preset;
+use hklrs::presets::{KAPPA_ALPHA_DEG, kappa_axis, preset};
 use hklrs::{
-    Equation, Geometry, InverseError, InverseRequest, Lattice, Mode, Picker, Target, Wavelength,
+    Deg, Equation, Eulerian, Geometry, InverseError, InverseRequest, Lattice, Mode, Picker, Target,
+    Wavelength,
 };
 use inverse_check::wrap;
 
@@ -275,6 +276,76 @@ fn mode_construction_errors() {
             name: "chi".into()
         }))
     );
+}
+
+#[test]
+fn kappa_mode_construction_errors() {
+    let geo = preset("K4CV").unwrap();
+    let all = [0, 1, 2, 3];
+    let held = |e| vec![Equation::Kappa(e)];
+    let chi = |v| held(Eulerian::Chi(v));
+    let not_arm = |names: [&str; 3]| {
+        Err(InverseError::NotKappaArm {
+            names: names.map(String::from),
+        })
+    };
+    assert_eq!(
+        Mode::new_kappa(&geo, "m", [2, 1, 0], &all, chi(0.0)),
+        not_arm(["kphi", "kappa", "komega"])
+    );
+    assert_eq!(
+        Mode::new_kappa(&geo, "m", [1, 2, 3], &all, chi(0.0)),
+        not_arm(["kappa", "kphi", "tth"])
+    );
+    assert_eq!(
+        Mode::new(&geo, "m", &all, chi(0.0)),
+        Err(InverseError::NoKappaArm)
+    );
+    let reach = 2.0 * KAPPA_ALPHA_DEG.to_radians();
+    assert!(matches!(
+        Mode::new_kappa(&geo, "m", [0, 1, 2], &all, chi(-1.8)),
+        Err(InverseError::ChiOutOfReach { chi: -1.8, reach: r }) if (r - reach).abs() < 1e-15
+    ));
+    assert_eq!(
+        Mode::new_kappa(&geo, "m", [0, 1, 2], &all, held(Eulerian::Omega(f64::NAN))),
+        Err(InverseError::NonFinite {
+            what: "eulerian angle"
+        })
+    );
+    assert_eq!(
+        Mode::new_kappa(
+            &geo,
+            "m",
+            [0, 1, 2],
+            &all,
+            held(Eulerian::Bisector { detector: 0 })
+        ),
+        Err(InverseError::NotInStack {
+            name: "komega".into(),
+            holder: "detector"
+        })
+    );
+    let arm = |komega: [f64; 3], kappa: [f64; 3]| {
+        Geometry::builder("k")
+            .sample_rotation("komega", komega)
+            .sample_rotation("kappa", kappa)
+            .sample_rotation("kphi", [0.0, -1.0, 0.0])
+            .detector_rotation("tth", [0.0, -1.0, 0.0])
+            .build()
+            .unwrap()
+    };
+    let tilted = kappa_axis(Deg(KAPPA_ALPHA_DEG).into());
+    let crossed = arm([0.0, 0.0, 1.0], tilted);
+    assert_eq!(
+        Mode::new_kappa(&crossed, "m", [0, 1, 2], &all, chi(0.0)),
+        not_arm(["komega", "kappa", "kphi"])
+    );
+    // A kappa turning the other way (XU-3) is tilted by π − α.
+    let reversed = arm([0.0, -1.0, 0.0], tilted.map(|c| -c));
+    assert!(matches!(
+        Mode::new_kappa(&reversed, "m", [0, 1, 2], &all, chi(0.0)),
+        Err(InverseError::KappaAlpha { .. })
+    ));
 }
 
 #[test]

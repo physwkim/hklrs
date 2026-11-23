@@ -18,7 +18,7 @@ pub use detector::PixelDetector;
 pub use error::Error;
 pub use forward::{Forward, Scattering, angle_between, forward, scattering};
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
-pub use inverse::{Equation, InverseError, InverseRequest, Mode, Picker, Target};
+pub use inverse::{Equation, Eulerian, InverseError, InverseRequest, Mode, Picker, Target};
 pub use lattice::Lattice;
 pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
 pub use units::{Deg, Energy, HC_KEV_ANGSTROM, Rad, Wavelength};

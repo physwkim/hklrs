@@ -7,8 +7,11 @@
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
+use nalgebra::Vector3;
+
+use super::mode::rotation;
 use super::{InverseError, finite, wrap};
-use crate::Rad;
+use crate::{Geometry, Rad};
 
 /// hkl's "solutions" parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +30,7 @@ pub struct KappaArm {
 
 /// The representative in [−π, π], `a` itself when it is one, so a given
 /// −π keeps its sign (gsl_sf_angle_restrict_symm).
-fn restrict(a: f64) -> f64 {
+pub(super) fn restrict(a: f64) -> f64 {
     if a.abs() <= PI { a } else { wrap(a) }
 }
 
@@ -118,6 +121,53 @@ impl KappaArm {
             -kappa,
             wrap(kphi + 2.0 * p + PI),
         ]
+    }
+
+    /// d/dkappa of p = atan(tan(kappa/2)·cos α) and of chi, on the branch
+    /// [`Self::to_eulerian`] takes kappa to.
+    pub(super) fn slopes(&self, kappa: f64) -> [f64; 2] {
+        let (s, c) = (restrict(kappa) / 2.0).sin_cos();
+        let (sa, ca) = self.alpha.sin_cos();
+        // 1 − sin²α·sin²(kappa/2): p's denominator, and squared under chi's.
+        let d = c * c + ca * ca * s * s;
+        [ca / (2.0 * d), sa * c / d.sqrt()]
+    }
+}
+
+/// A geometry's kappa arm: komega, kappa and kphi axis indices and the
+/// arm's tilt, read off the geometry (see [`super::Mode::new_kappa`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KappaAxes {
+    arm: KappaArm,
+    axes: [usize; 3],
+}
+
+impl KappaAxes {
+    pub(super) fn new(geometry: &Geometry, axes: [usize; 3]) -> Result<Self, InverseError> {
+        let mut direction = [Vector3::zeros(); 3];
+        for (d, &i) in direction.iter_mut().zip(&axes) {
+            *d = rotation(geometry, i)?.1;
+        }
+        let adjacent = geometry.sample_stack().windows(3).any(|w| w == axes);
+        if !adjacent || direction[0] != direction[2] {
+            return Err(InverseError::NotKappaArm {
+                names: axes.map(|i| geometry.axes()[i].name().to_owned()),
+            });
+        }
+        let cos = direction[0].dot(&direction[1]).clamp(-1.0, 1.0);
+        Ok(Self {
+            arm: KappaArm::new(Rad(cos.acos()))?,
+            axes,
+        })
+    }
+
+    pub fn arm(&self) -> KappaArm {
+        self.arm
+    }
+
+    /// komega, kappa, kphi.
+    pub fn axes(&self) -> [usize; 3] {
+        self.axes
     }
 }
 

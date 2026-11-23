@@ -25,7 +25,7 @@ use nalgebra::{Matrix3, Vector3};
 
 use crate::{Error, Geometry, Wavelength};
 
-pub use mode::{Equation, Mode};
+pub use mode::{Equation, Eulerian, Mode};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
@@ -81,6 +81,13 @@ pub enum InverseError {
     KappaAlpha { alpha: f64 },
     #[error("|chi| = {} rad exceeds the kappa reach 2·alpha = {reach} rad", chi.abs())]
     ChiOutOfReach { chi: f64, reach: f64 },
+    #[error(
+        "{names:?} are not a kappa arm: komega, kappa, kphi adjacent in the sample stack, \
+         komega and kphi about one direction"
+    )]
+    NotKappaArm { names: [String; 3] },
+    #[error("a kappa equation needs a mode made with Mode::new_kappa")]
+    NoKappaArm,
     #[error(transparent)]
     Geometry(#[from] Error),
     #[error(

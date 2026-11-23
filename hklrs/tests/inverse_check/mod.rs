@@ -2,8 +2,9 @@
 
 use std::f64::consts::{PI, TAU};
 
+use hklrs::inverse::kappa::Branch;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
-use hklrs::{Equation, Geometry, Mode, Wavelength, scattering};
+use hklrs::{Equation, Eulerian, Geometry, Mode, Wavelength, scattering};
 
 /// Largest hkl miss and mode-equation miss (rad, or relative to k²) allowed.
 pub const ROUND_TRIP: f64 = 1e-10;
@@ -65,6 +66,19 @@ pub fn residuals(
         }
         Equation::ZeroModPi { axis } => values[*axis].sin(),
         Equation::Equal { a, b } => wrap(values[*a] - values[*b]),
+        // Either eulerian image: they differ by π in omega and phi and in
+        // the sign of chi. Not the solver's wrapped rows.
+        Equation::Kappa(held) => {
+            let kappa = mode.kappa().unwrap();
+            let arm = kappa.axes().map(|i| values[i]);
+            let [omega, chi, phi] = kappa.arm().to_eulerian(arm, Branch::Same);
+            match held {
+                Eulerian::Omega(v) => (omega - v).sin(),
+                Eulerian::Chi(v) => chi - chi.signum() * wrap(*v).abs(),
+                Eulerian::Phi(v) => (phi - v).sin(),
+                Eulerian::Bisector { detector } => wrap(values[*detector] - 2.0 * omega),
+            }
+        }
     }));
     Ok(r)
 }
