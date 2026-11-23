@@ -4,7 +4,7 @@ use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
 
 use super::jet::{Scalar, Vec3};
 use super::{Equation, Mode, wrap};
-use crate::{AxisKind, Error, Geometry};
+use crate::{Axis, AxisKind, Error, Geometry};
 
 /// Length (in units of k, or relative to the reference) below which a
 /// direction ψ is built from is taken as null.
@@ -122,6 +122,10 @@ impl<'a> System<'a> {
 
     pub fn is_written(&self, axis: usize) -> bool {
         self.written.contains(&axis)
+    }
+
+    pub fn axis(&self, axis: usize) -> &'a Axis {
+        &self.geometry.axes()[axis]
     }
 
     /// Every axis: `x` on the written ones, `current` elsewhere.

@@ -35,7 +35,7 @@ pub enum Target {
 pub enum Picker {
     /// Nearest to `current`: the head of the sorted set.
     Closest,
-    /// The first solution the search reached from `current`.
+    /// The first solution within limits the search reached from `current`.
     First,
 }
 
@@ -80,6 +80,12 @@ pub enum InverseError {
          (a continuum, or a multiple root)"
     )]
     Degenerate,
+    /// Every solution, sorted by distance to `current`.
+    #[error(
+        "every one of the {} solutions takes a written axis outside its limits",
+        .0.len()
+    )]
+    NoSolutionInLimits(Vec<Vec<f64>>),
 }
 
 /// Residue of `a` modulo 2π in (−π, π].
@@ -97,9 +103,11 @@ fn finite(v: &[f64], what: &'static str) -> Result<(), InverseError> {
 }
 
 impl InverseRequest<'_> {
-    /// Every solution found, written axes wrapped to (−π, π], held axes
-    /// exactly `current`, sorted by distance to `current`; `Degenerate`
-    /// when one is not isolated, as where the mode leaves a rotation free.
+    /// Every solution found, written axes wrapped to their cut points and
+    /// within their limits, held axes exactly `current` (limits or not),
+    /// sorted by distance to `current`; `Degenerate` when one is not
+    /// isolated, as where the mode leaves a rotation free;
+    /// `NoSolutionInLimits` when every one is outside the limits.
     pub fn solve(&self) -> Result<Vec<Vec<f64>>, InverseError> {
         Ok(self.search()?.solutions)
     }

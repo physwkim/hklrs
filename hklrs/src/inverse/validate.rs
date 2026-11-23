@@ -1,9 +1,10 @@
 //! The only way into a solution set. Generators (the solver from each seed,
 //! and any later Ewald or kappa-twin construction) only offer candidates; a
 //! candidate is a solution when every axis the mode does not write is
-//! exactly `current` and all of the mode's equations hold at its wrapped
-//! values. A regular solution is admitted; a singular one makes the set
-//! degenerate.
+//! exactly `current` and all of the mode's equations hold at its values,
+//! written axes wrapped to their cut points. A regular solution is admitted;
+//! a singular one makes the set degenerate. Axis limits filter the admitted
+//! set once the search is over, so a solution outside them still seeds it.
 
 use std::cmp::Ordering;
 
@@ -52,8 +53,8 @@ impl<'a> SolutionSet<'a> {
     }
 
     /// Admits `candidate` (every axis, geometry order) with its written
-    /// axes wrapped to (−π, π]; returns the admitted values when it is a
-    /// regular solution not already in the set.
+    /// axes wrapped to their cut points; returns the admitted values when it
+    /// is a regular solution not already in the set.
     pub fn offer(&mut self, candidate: &[f64]) -> Option<&[f64]> {
         let current = self.system.current();
         if candidate.len() != current.len() {
@@ -62,7 +63,7 @@ impl<'a> SolutionSet<'a> {
         let mut values = Vec::with_capacity(current.len());
         for (i, (&c, &held)) in candidate.iter().zip(current).enumerate() {
             if self.system.is_written(i) {
-                values.push(wrap(c));
+                values.push(self.system.axis(i).wrap(c));
             } else if c.to_bits() == held.to_bits() {
                 values.push(c);
             } else {
@@ -84,35 +85,47 @@ impl<'a> SolutionSet<'a> {
         self.admitted.last().map(Vec::as_slice)
     }
 
+    /// The admitted solutions whose written axes are all within their
+    /// limits, sorted; when there is none, the others, sorted, as
+    /// `NoSolutionInLimits`.
     pub fn into_sorted(self) -> Result<Found, InverseError> {
         if self.degenerate {
             return Err(InverseError::Degenerate);
         }
-        let current = self.system.current();
-        let distance = |s: &[f64]| -> f64 {
+        let system = self.system;
+        let (inside, outside): (Vec<_>, Vec<_>) = self.admitted.into_iter().partition(|s| {
             s.iter()
-                .zip(current)
-                .map(|(a, b)| wrap(a - b).powi(2))
-                .sum()
-        };
-        let mut order: Vec<usize> = (0..self.admitted.len()).collect();
-        order.sort_by(|&a, &b| {
-            let (sa, sb) = (&self.admitted[a], &self.admitted[b]);
-            distance(sa).total_cmp(&distance(sb)).then_with(|| {
-                sa.iter()
-                    .zip(sb)
-                    .map(|(x, y)| x.total_cmp(y))
-                    .find(|o| o.is_ne())
-                    .unwrap_or(Ordering::Equal)
-            })
+                .enumerate()
+                .all(|(i, &v)| !system.is_written(i) || system.axis(i).within_limits(v))
         });
-        let first = order
-            .iter()
-            .position(|&i| i == 0)
-            .ok_or(InverseError::NoSolution)?;
-        Ok(Found {
-            solutions: order.iter().map(|&i| self.admitted[i].clone()).collect(),
-            first,
-        })
+        match sorted(system.current(), inside) {
+            (solutions, Some(first)) => Ok(Found { solutions, first }),
+            _ if outside.is_empty() => Err(InverseError::NoSolution),
+            _ => Err(InverseError::NoSolutionInLimits(
+                sorted(system.current(), outside).0,
+            )),
+        }
     }
+}
+
+/// `set` sorted by distance to `current`, and where its first went.
+fn sorted(current: &[f64], set: Vec<Vec<f64>>) -> (Vec<Vec<f64>>, Option<usize>) {
+    let distance = |s: &[f64]| -> f64 {
+        s.iter()
+            .zip(current)
+            .map(|(a, b)| wrap(a - b).powi(2))
+            .sum()
+    };
+    let mut indexed: Vec<(usize, Vec<f64>)> = set.into_iter().enumerate().collect();
+    indexed.sort_by(|(_, a), (_, b)| {
+        distance(a).total_cmp(&distance(b)).then_with(|| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| x.total_cmp(y))
+                .find(|o| o.is_ne())
+                .unwrap_or(Ordering::Equal)
+        })
+    });
+    let first = indexed.iter().position(|&(i, _)| i == 0);
+    (indexed.into_iter().map(|(_, s)| s).collect(), first)
 }

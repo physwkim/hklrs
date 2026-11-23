@@ -1,8 +1,11 @@
 //! Inverse invariants on E4CV and E4CH: every solution forwards back to the
 //! target and satisfies its mode, held axes never move, the search is
-//! deterministic, out-of-sphere targets and bad inputs are errors.
+//! deterministic, axis limits only filter the solutions after the cut-point
+//! wrap, out-of-sphere targets and bad inputs are errors.
 
 mod inverse_check;
+
+use std::f64::consts::{PI, TAU};
 
 use hklrs::inverse::{self, e4c};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
@@ -311,4 +314,123 @@ fn bad_inputs_are_errors() {
             mode.name()
         );
     }
+}
+
+type Solutions = Result<Vec<Vec<f64>>, InverseError>;
+
+fn solve_with(
+    geo: &Geometry,
+    mode: fn(&Geometry) -> Result<Mode<'_>, InverseError>,
+    hkl: Vector3<f64>,
+) -> Solutions {
+    let current = current(geo);
+    let mode = mode(geo).unwrap();
+    request(&mode, hkl, &current).solve()
+}
+
+fn bissector_121(geo: &Geometry) -> Solutions {
+    solve_with(geo, e4c::bissector, Vector3::new(1.0, 2.0, 1.0))
+}
+
+/// What limits [min, max] on `axis` must leave of the unlimited `all`.
+fn filtered(all: &[Vec<f64>], axis: usize, min: f64, max: f64) -> Solutions {
+    let kept: Vec<_> = all
+        .iter()
+        .filter(|s| min <= s[axis] && s[axis] <= max)
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        Err(InverseError::NoSolutionInLimits(all.to_vec()))
+    } else {
+        Ok(kept)
+    }
+}
+
+/// The f64 next to the non-zero `x`, away from zero.
+fn next_out(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() + 1)
+}
+
+/// The f64 next to the non-zero `x`, toward zero.
+fn next_in(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() - 1)
+}
+
+#[test]
+fn solution_exactly_on_a_limit_is_kept() {
+    let mut geo = preset("E4CV").unwrap();
+    let all = bissector_121(&geo).unwrap();
+    let tth = geo.axis_index("tth").unwrap();
+    let on = all[0][tth];
+    geo.set_limits("tth", on, on).unwrap();
+    let kept = bissector_121(&geo);
+    assert!(kept.as_ref().unwrap().contains(&all[0]));
+    assert_eq!(kept, filtered(&all, tth, on, on));
+}
+
+#[test]
+fn solution_just_outside_a_limit_is_rejected() {
+    let mut geo = preset("E4CV").unwrap();
+    let all = bissector_121(&geo).unwrap();
+    let tth = geo.axis_index("tth").unwrap();
+    let on = all[0][tth];
+    let (above, below) = if on > 0.0 {
+        (next_out(on), next_in(on))
+    } else {
+        (next_in(on), next_out(on))
+    };
+    for (min, max) in [(above, f64::INFINITY), (f64::NEG_INFINITY, below)] {
+        geo.set_limits("tth", min, max).unwrap();
+        let result = bissector_121(&geo);
+        assert_eq!(result, filtered(&all, tth, min, max), "[{min}, {max}]");
+    }
+}
+
+#[test]
+fn cut_point_moves_a_solution_into_range() {
+    let mut geo = preset("E4CV").unwrap();
+    let all = bissector_121(&geo).unwrap();
+    let phi = geo.axis_index("phi").unwrap();
+    let negative: Vec<_> = all.iter().filter(|s| s[phi] < 0.0).collect();
+    assert!(!negative.is_empty() && negative.len() < all.len());
+    // Disjoint from the default window [−π, π) but for its open end.
+    geo.set_limits("phi", PI, TAU).unwrap();
+    assert_eq!(
+        bissector_121(&geo),
+        Err(InverseError::NoSolutionInLimits(all.clone()))
+    );
+    geo.set_cut_point("phi", 0.0).unwrap();
+    let moved = bissector_121(&geo).unwrap();
+    assert_eq!(moved.len(), negative.len());
+    for (m, s) in moved.iter().zip(&negative) {
+        assert!((PI..TAU).contains(&m[phi]), "{m:?}");
+        assert!((m[phi] - (s[phi] + TAU)).abs() <= 1e-15, "{m:?} {s:?}");
+        for i in (0..m.len()).filter(|&i| i != phi) {
+            assert_eq!(m[i].to_bits(), s[i].to_bits(), "{m:?} {s:?}");
+        }
+    }
+}
+
+#[test]
+fn every_candidate_rejected_is_carried_in_the_error() {
+    let mut geo = preset("E4CV").unwrap();
+    let all = bissector_121(&geo).unwrap();
+    let tth = geo.axis_index("tth").unwrap();
+    let largest = all.iter().map(|s| s[tth].abs()).fold(0.0, f64::max);
+    geo.set_limits("tth", next_out(largest), f64::INFINITY)
+        .unwrap();
+    assert_eq!(
+        bissector_121(&geo),
+        Err(InverseError::NoSolutionInLimits(all))
+    );
+}
+
+#[test]
+fn held_axis_outside_its_limits_is_not_filtered() {
+    // phi is held at current's 40°.
+    let mut geo = preset("E4CV").unwrap();
+    let hkl = Vector3::new(0.0, 1.0, 1.0);
+    let all = solve_with(&geo, e4c::constant_phi, hkl).unwrap();
+    geo.set_limits("phi", -0.1, 0.1).unwrap();
+    assert_eq!(solve_with(&geo, e4c::constant_phi, hkl), Ok(all));
 }
