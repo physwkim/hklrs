@@ -269,8 +269,9 @@ async fn psi_scan_holds_hkl_in_its_own_mode() {
     for (event, psi) in events.iter().zip([20.0_f64, 30.0, 40.0]) {
         assert_close(&hkl_of(event), &[1.0, 0.0, 1.0], 1e-9);
         let degrees = AXES.map(|a| event.data[a].as_f64().unwrap());
-        let values = dx.geometry().values_from_degrees(&degrees).unwrap();
-        let read = hklrs::inverse::psi(dx.geometry(), &ub, &Vector3::from(reference), &values);
+        let geometry = dx.geometry();
+        let values = geometry.values_from_degrees(&degrees).unwrap();
+        let read = hklrs::inverse::psi(&geometry, &ub, &Vector3::from(reference), &values);
         assert!((read.unwrap() - psi.to_radians()).abs() < 1e-9);
     }
     let start = &run.start().extra;

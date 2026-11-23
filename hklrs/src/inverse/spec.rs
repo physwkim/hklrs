@@ -14,6 +14,27 @@ enum Build {
     Psi(fn(&Geometry, Vector3<f64>, f64) -> Result<Mode<'_>, InverseError>),
 }
 
+impl Build {
+    fn parameters(self) -> ModeParameters {
+        match self {
+            Self::Plain(_) => ModeParameters::Plain,
+            Self::Hkl2(_) => ModeParameters::Hkl2,
+            Self::Psi(_) => ModeParameters::Psi,
+        }
+    }
+}
+
+/// The parameters of [`ModeSpec`] a mode takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeParameters {
+    /// None.
+    Plain,
+    /// [`ModeSpec::hkl2`].
+    Hkl2,
+    /// [`ModeSpec::psi`].
+    Psi,
+}
+
 /// hkl's "hkl" engine modes for E4C and E6C geometries.
 const MODES: [(&str, Build); 19] = [
     ("bissector", Build::Plain(e4c::bissector)),
@@ -99,17 +120,20 @@ impl ModeSpec {
         MODES.iter().map(|&(name, _)| name)
     }
 
+    /// The parameters mode `name` takes; None for a name
+    /// [`ModeSpec::build`] does not know.
+    pub fn parameters(name: &str) -> Option<ModeParameters> {
+        lookup(name).map(Build::parameters)
+    }
+
     pub fn build<'g>(&self, geometry: &'g Geometry) -> Result<Mode<'g>, InverseError> {
         let name = self.name.as_str();
-        let (_, build) = MODES
-            .iter()
-            .find(|&&(n, _)| n == name)
-            .ok_or_else(|| InverseError::UnknownMode { name: name.into() })?;
+        let build = lookup(name).ok_or_else(|| InverseError::UnknownMode { name: name.into() })?;
         let missing = |needs| InverseError::ModeParameter {
             mode: name.into(),
             needs,
         };
-        match *build {
+        match build {
             Build::Plain(f) => f(geometry),
             Build::Hkl2(f) => f(geometry, self.hkl2.ok_or_else(|| missing("hkl2"))?),
             Build::Psi(f) => {
@@ -118,6 +142,10 @@ impl ModeSpec {
             }
         }
     }
+}
+
+fn lookup(name: &str) -> Option<Build> {
+    MODES.iter().find(|&&(n, _)| n == name).map(|&(_, b)| b)
 }
 
 #[cfg(test)]
@@ -211,6 +239,27 @@ mod tests {
                 if let Ok(mode) = built {
                     assert_eq!(mode.name(), name);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn parameters_are_what_build_asks_for() {
+        assert_eq!(ModeSpec::parameters("bisector"), None);
+        let (e4c, e6c) = PY_NAMES.split_at(6);
+        for (geometry, own) in [("E4CV", e4c), ("E6C", e6c)] {
+            let g = preset(geometry).unwrap();
+            for &name in own {
+                let needs = match ModeSpec::new(name).build(&g) {
+                    Ok(_) => ModeParameters::Plain,
+                    Err(InverseError::ModeParameter { needs: "hkl2", .. }) => ModeParameters::Hkl2,
+                    Err(InverseError::ModeParameter {
+                        needs: "reference and psi",
+                        ..
+                    }) => ModeParameters::Psi,
+                    Err(e) => panic!("{geometry} {name}: {e}"),
+                };
+                assert_eq!(ModeSpec::parameters(name), Some(needs), "{name}");
             }
         }
     }

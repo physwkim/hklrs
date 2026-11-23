@@ -54,6 +54,35 @@ impl Samples {
         }
     }
 
+    /// `entries` by sample name, `current` among them.
+    pub fn from_entries(entries: Vec<Entry>, current: &str) -> Result<Self, DiffError> {
+        let mut by_name = BTreeMap::new();
+        for entry in entries {
+            let name = entry.sample.name.clone();
+            if by_name.insert(name.clone(), entry).is_some() {
+                return Err(DiffError::DuplicateSample { name });
+            }
+        }
+        if !by_name.contains_key(current) {
+            return Err(DiffError::UnknownSample {
+                name: current.to_owned(),
+                known: by_name.into_keys().collect(),
+            });
+        }
+        Ok(Self {
+            entries: by_name,
+            current: current.to_owned(),
+        })
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.values()
+    }
+
+    pub fn current_name(&self) -> &str {
+        &self.current
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
     }

@@ -367,3 +367,30 @@ async fn wavelength_signal_is_read_and_not_set() {
     let e = dx.wavelength().await.unwrap_err();
     assert!(e.to_string().contains("e4cv_h"), "{e}");
 }
+
+#[test]
+fn limits_and_cut_points_reach_the_inverse() {
+    let dx = e4cv(&motors([0.0; 4]));
+    let seed = [-30.0, 0.0, -90.0, -60.0];
+    let solve = || dx.inverse([1.0, 0.0, 0.0], &seed, wavelength()).unwrap();
+    assert_close(&solve(), &seed);
+    dx.set_cut_point("phi", 0.0).unwrap();
+    assert_close(&solve(), &[-30.0, 0.0, 270.0, -60.0]);
+    dx.set_limits("tth", 0.0, 180.0).unwrap();
+    assert_close(&solve(), &[-150.0, 0.0, 270.0, 60.0]);
+
+    for (min, max) in [(10.0, -10.0), (f64::NAN, 10.0)] {
+        let e = dx.set_limits("tth", min, max).unwrap_err();
+        let DiffError::Limits { name, .. } = &e else {
+            panic!("{e}")
+        };
+        assert_eq!(name, "tth");
+        assert!(e.to_string().contains("10]"), "{e}");
+    }
+    let geometry = dx.geometry();
+    assert_eq!(geometry.axes()[3].limits(), (0.0, 180.0_f64.to_radians()));
+    for e in [dx.set_limits("nu", 0.0, 1.0), dx.set_cut_point("nu", 0.0)] {
+        let e = e.unwrap_err();
+        assert!(e.to_string().contains("\"nu\""), "{e}");
+    }
+}
