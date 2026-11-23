@@ -1,9 +1,12 @@
-//! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C and
-//! ESRF BM28 PSIC.
+//! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
+//! ESRF BM28 PSIC and ZAXIS.
 //!
-//! Per case: the mode writes hkl's axes; every hkl solution is in the hklrs
-//! set within MATCH rad, directly or after one Newton step on the
-//! independent residuals where hkl's own precision is coarser (counted);
+//! Per case: the mode writes hkl's axes; every hkl solution within VIOLATION
+//! of hkl's own mode equations is in the hklrs set within MATCH rad, directly
+//! or after one Newton step on the independent residuals where hkl's own
+//! precision is coarser (counted); one beyond it (HKL-18: the Ewald step of
+//! hkl_mode_set_hkl_real does not re-test them) still reaches hkl, is not in
+//! the hklrs set and is counted;
 //! every hklrs solution passes the independent check (extras beyond hkl's
 //! are counted); |Q| > 4π/λ is `Unreachable`; `Degenerate` holds only where
 //! the independent Jacobian is singular at every hkl solution; a case hkl
@@ -13,7 +16,7 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::{e4c, e6c, esrf_bm28_psic};
+use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, zaxis};
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength};
@@ -26,6 +29,10 @@ const MATCH: f64 = 1e-6;
 /// Largest σ_min of the independent Jacobian at an hkl solution that
 /// confirms `Degenerate`.
 const SINGULAR: f64 = 1e-6;
+/// Smallest miss of hkl's own mode equations (the golden's
+/// constraint_resid: deg, or Å⁻²) that rules an hkl solution out; hkl's
+/// precision there is ~1e-5.
+const VIOLATION: f64 = 1e-3;
 
 fn angular_distance(a: &[f64], b: &[f64]) -> f64 {
     largest(a.iter().zip(b).map(|(x, y)| wrap(x - y).abs()))
@@ -62,6 +69,8 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         "constant_nu_coplanar" => esrf_bm28_psic::constant_nu_coplanar(geo),
         "constant_delta_coplanar" => esrf_bm28_psic::constant_delta_coplanar(geo),
         "constant_eta_noncoplanar" => esrf_bm28_psic::constant_eta_noncoplanar(geo),
+        "zaxis" => zaxis::zaxis(geo),
+        "reflectivity" => zaxis::reflectivity(geo),
         m => panic!("mode {m}"),
     }
     .unwrap()
@@ -128,6 +137,7 @@ struct Counts {
     cases: usize,
     unreachable: usize,
     hkl_solutions: usize,
+    violators: usize,
     newton: usize,
     degenerate: usize,
     singular: usize,
@@ -182,12 +192,25 @@ fn run(geometry: &str, mode_name: &str) {
             }
             continue;
         }
-        let theirs: Vec<Vec<f64>> = case["solutions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| axes(&geo, &s["axes"]).into_iter().map(wrap).collect())
-            .collect();
+        let (theirs, violators): (Vec<_>, Vec<_>) =
+            case["solutions"].as_array().unwrap().iter().partition(|s| {
+                let r = s["constraint_resid"].as_object().unwrap();
+                r.values().all(|v| common::f(v).abs() <= VIOLATION)
+            });
+        let wrapped =
+            |s: &Value| -> Vec<f64> { axes(&geo, &s["axes"]).into_iter().map(wrap).collect() };
+        let theirs: Vec<Vec<f64>> = theirs.into_iter().map(wrapped).collect();
+        let violators: Vec<Vec<f64>> = violators.into_iter().map(wrapped).collect();
+        n.violators += violators.len();
+        for v in &violators {
+            let r = inverse_check::residuals(&mode, &ub, wavelength, &hkl, v).unwrap();
+            let miss = largest(r[..3].iter().map(|d| d.abs()));
+            if miss > MATCH {
+                fail(format!(
+                    "hkl solution {v:?} violates the mode and misses hkl by {miss:e}"
+                ));
+            }
+        }
         let ours = match result {
             Ok(s) => s,
             Err(InverseError::NoSolution) => Vec::new(),
@@ -241,6 +264,13 @@ fn run(geometry: &str, mode_name: &str) {
                 )),
             }
         }
+        for v in &violators {
+            if ours.iter().any(|s| angular_distance(s, v) <= MATCH) {
+                fail(format!(
+                    "hkl solution {v:?} violates the mode, yet hklrs returns it"
+                ));
+            }
+        }
         n.extras += ours
             .iter()
             .filter(|s| !theirs.iter().any(|t| angular_distance(s, t) <= MATCH))
@@ -253,15 +283,16 @@ fn run(geometry: &str, mode_name: &str) {
     }
     println!(
         "{geometry} {mode_name}: {} cases, {} unreachable, {} degenerate (hkl's {} solutions \
-         there singular); hkl {} solutions elsewhere, all found ({} after a Newton step); hklrs \
-         {} solutions, {} beyond hkl's; hkl failed {} cases with |Q| <= 2k, {} of them hkl misses \
-         (hklrs {} verified solutions there)",
+         there singular); hkl {} solutions elsewhere, all found ({} after a Newton step), and {} \
+         violating the mode; hklrs {} solutions, {} beyond hkl's; hkl failed {} cases with \
+         |Q| <= 2k, {} of them hkl misses (hklrs {} verified solutions there)",
         n.cases,
         n.unreachable,
         n.degenerate,
         n.singular,
         n.hkl_solutions,
         n.newton,
+        n.violators,
         n.hklrs_solutions,
         n.extras,
         n.hkl_failed,
@@ -310,4 +341,6 @@ golden! {
     bm28_constant_nu_coplanar: "ESRF BM28 PSIC" "constant_nu_coplanar",
     bm28_constant_delta_coplanar: "ESRF BM28 PSIC" "constant_delta_coplanar",
     bm28_constant_eta_noncoplanar: "ESRF BM28 PSIC" "constant_eta_noncoplanar",
+    zaxis_zaxis: "ZAXIS" "zaxis",
+    zaxis_reflectivity: "ZAXIS" "reflectivity",
 }
