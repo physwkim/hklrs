@@ -1,6 +1,6 @@
 //! Independent checks of an inverse solution, shared by the inverse tests.
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use hklrs::inverse::kappa::Branch;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
@@ -79,6 +79,16 @@ pub fn residuals(
                 Eulerian::Bisector { detector } => wrap(values[*detector] - 2.0 * omega),
             }
         }
+        // acos angles, not the solver's atan2 forms.
+        Equation::Incidence { normal, incidence } => {
+            let (n, ki) = surface(geo, normal, values);
+            n.angle(&ki) - FRAC_PI_2 - incidence
+        }
+        Equation::Azimuth { normal, azimuth } => {
+            let (n, ki) = surface(geo, normal, values);
+            let ki = ki.normalize();
+            (n - ki * n.dot(&ki)).angle(&Vector3::y()) - azimuth
+        }
     }));
     Ok(r)
 }
@@ -121,6 +131,13 @@ pub fn check(
         within(miss, || format!("{values:?} misses {e:?} by {miss:e}"))?;
     }
     Ok(())
+}
+
+/// The lab surface normal and k̂i at `values`.
+fn surface(geo: &Geometry, normal: &Vector3<f64>, values: &[f64]) -> (Vector3<f64>, Vector3<f64>) {
+    let poses = geo.poses(values).unwrap();
+    let beam = geo.beam_direction().into_inner();
+    (poses.sample.rotation * normal, poses.source * beam)
 }
 
 /// NaN is a miss.

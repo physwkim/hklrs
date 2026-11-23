@@ -20,6 +20,16 @@ pub enum Equation {
     Equal { a: usize, b: usize },
     /// The eulerians of the mode's kappa arm ([`Mode::new_kappa`]).
     Kappa(Eulerian),
+    /// hkl's incidence of the surface normal `normal` (sample-holder frame,
+    /// the lab at every sample axis zero): angle(n, k̂i) − π/2, in
+    /// [−π/2, π/2], equals `incidence`.
+    Incidence {
+        normal: Vector3<f64>,
+        incidence: f64,
+    },
+    /// hkl's azimuth of `normal`, as [`Equation::Incidence`]: the angle from
+    /// lab y to n projected normal to k̂i, in [0, π], equals `azimuth`.
+    Azimuth { normal: Vector3<f64>, azimuth: f64 },
 }
 
 /// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
@@ -128,6 +138,17 @@ impl Equation {
                         in_stack(geometry, detector, geometry.detector_stack(), "detector")
                     }
                 }
+            }
+            Self::Incidence {
+                normal,
+                incidence: angle,
+            }
+            | Self::Azimuth {
+                normal,
+                azimuth: angle,
+            } => {
+                reference(normal, "surface normal")?;
+                finite(&[*angle], "surface angle")
             }
         }
     }
