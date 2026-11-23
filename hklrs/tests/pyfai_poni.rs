@@ -6,7 +6,7 @@ pub mod common;
 use common::{f, load};
 use hklrs::Rad;
 use hklrs::nalgebra::{Unit, Vector3};
-use hklrs::poni::{Frame, Orientation, Poni};
+use hklrs::poni::{LabAxes, Orientation, Poni};
 use serde_json::Value;
 
 /// Metres; pixel positions are about 0.3 m from the sample.
@@ -36,8 +36,8 @@ fn axes(beam: Vector3<f64>, up: Vector3<f64>) -> [Vector3<f64>; 3] {
 /// Largest distance between the hklrs pixel and pyFAI's over a case; NaN
 /// when any is NaN.
 fn worst_case(g: &Value, case: &Value, p: &Poni, beam: Vector3<f64>, up: Vector3<f64>) -> f64 {
-    let frame = Frame::new(Unit::new_unchecked(beam), Unit::new_unchecked(up)).unwrap();
-    let det = p.detector(&frame).unwrap();
+    let lab = LabAxes::new(Unit::new_unchecked(beam), Unit::new_unchecked(up)).unwrap();
+    let det = p.detector(&lab).unwrap();
     assert_eq!(det.shape(), p.shape);
     let [a1, a2, a3] = axes(beam, up);
     let mut worst = 0.0f64;
@@ -59,7 +59,7 @@ fn worst_case(g: &Value, case: &Value, p: &Poni, beam: Vector3<f64>, up: Vector3
     worst
 }
 
-fn frames() -> [(&'static str, Vector3<f64>, Vector3<f64>); 2] {
+fn labs() -> [(&'static str, Vector3<f64>, Vector3<f64>); 2] {
     let beam = Vector3::new(0.3, -0.5, 0.81).normalize();
     let up = beam.cross(&Vector3::new(0.2, 0.7, -0.4)).normalize();
     [
@@ -77,12 +77,12 @@ fn import_matches_pyfai_calc_pos_zyx() {
     let mut worst = 0.0f64;
     for case in cases {
         let p = poni(&g, case);
-        for (name, beam, up) in frames() {
+        for (name, beam, up) in labs() {
             let w = worst_case(&g, case, &p, beam, up);
             worst = worst.max(w);
             assert!(
                 w <= TOL,
-                "{name} frame, orientation {:?}, {}: {w} m",
+                "{name} lab axes, orientation {:?}, {}: {w} m",
                 p.orientation,
                 case["rots"]
             );
@@ -113,7 +113,7 @@ fn bin_3_rot3_sign_is_pyfai_s() {
             rot3: Rad(-p.rot3.0),
             ..p
         };
-        for (name, beam, up) in frames() {
+        for (name, beam, up) in labs() {
             assert!(worst_case(&g, case, &p, beam, up) <= TOL);
             let w = worst_case(&g, case, &flipped, beam, up);
             assert!(w > 1e-3, "{name}: rot3 sign not seen ({w} m)");

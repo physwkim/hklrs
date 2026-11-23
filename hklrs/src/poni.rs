@@ -86,12 +86,12 @@ impl TryFrom<u32> for Orientation {
 /// up (pyFAI `doc/source/geometry.rst`, "Default geometry") and axis 2 =
 /// axis 1 × axis 3, because pyFAI's (1, 2, 3) is left-handed.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Frame {
+pub struct LabAxes {
     /// Columns: the lab directions of pyFAI axes 1, 2, 3.
     axes: Matrix3<f64>,
 }
 
-impl Frame {
+impl LabAxes {
     /// Axis 1 is the part of `up` normal to `beam`, so `up` need not be
     /// exactly perpendicular to a tilted beam.
     pub fn new(beam: Unit<Vector3<f64>>, up: Unit<Vector3<f64>>) -> Result<Self, PoniError> {
@@ -162,9 +162,9 @@ fn positive(what: &'static str, value: f64) -> Result<(), Error> {
 }
 
 impl Poni {
-    /// The detector in the lab frame that `frame` places pyFAI's axes in,
-    /// positions relative to the sample.
-    pub fn detector(&self, frame: &Frame) -> Result<PixelDetector, PoniError> {
+    /// The detector in the lab, where `lab` places pyFAI's axes, positions
+    /// relative to the sample.
+    pub fn detector(&self, lab: &LabAxes) -> Result<PixelDetector, PoniError> {
         for (what, v) in [
             ("dist", self.dist),
             ("poni1", self.poni1),
@@ -177,7 +177,7 @@ impl Poni {
         }
         positive("pixel1", self.pixel1)?;
         positive("pixel2", self.pixel2)?;
-        let r = frame.axes * rotation(self.rot1.0, self.rot2.0, self.rot3.0);
+        let r = lab.axes * rotation(self.rot1.0, self.rot2.0, self.rot3.0);
         let [(step1, first1), (step2, first2)] = self.orientation.index_map(self.shape);
         let origin = r * Vector3::new(
             self.pixel1 * (first1 + 0.5) - self.poni1,
@@ -199,7 +199,7 @@ impl Poni {
     pub fn from_detector(
         detector: &PixelDetector,
         orientation: Orientation,
-        frame: &Frame,
+        lab: &LabAxes,
     ) -> Result<Poni, PoniError> {
         let shape = detector.shape();
         if shape.0 < 2 || shape.1 < 2 {
@@ -223,14 +223,14 @@ impl Poni {
         if cos.is_nan() || cos.abs() > MAX_SKEW_COS {
             return Err(PoniError::Skewed { cos });
         }
-        // the frame is left-handed, so axis 3 is u2 × u1
-        let r = frame.axes.transpose() * Matrix3::from_columns(&[u1, u2, u2.cross(&u1)]);
+        // pyFAI's axes are left-handed, so axis 3 is u2 × u1
+        let r = lab.axes.transpose() * Matrix3::from_columns(&[u1, u2, u2.cross(&u1)]);
         let rot2 = r[(2, 0)].atan2(r[(2, 1)].hypot(r[(2, 2)]));
         let rot1 = (-r[(2, 1)]).atan2(r[(2, 2)]);
         let r3 = r * self::rot1(rot1).transpose() * self::rot2(rot2).transpose();
         let rot3 = r3[(1, 0)].atan2(r3[(0, 0)]);
         // through the rotation the PONI holds, so the round trip closes on it
-        let local = (frame.axes * rotation(rot1, rot2, rot3)).transpose() * p00;
+        let local = (lab.axes * rotation(rot1, rot2, rot3)).transpose() * p00;
         Ok(Poni {
             dist: local.z,
             poni1: pixel1 * (first1 + 0.5) - local.x,
@@ -263,15 +263,15 @@ mod tests {
     }
 
     #[test]
-    fn frame_takes_the_part_of_up_normal_to_the_beam_and_is_left_handed() {
+    fn lab_axes_take_the_part_of_up_normal_to_the_beam_and_are_left_handed() {
         let x = Vector3::x_axis();
         let tilted = Unit::new_normalize(Vector3::new(0.3, 0.0, 1.0));
-        let f = Frame::new(x, tilted).unwrap();
+        let f = LabAxes::new(x, tilted).unwrap();
         assert_eq!(f.axes.column(0), Vector3::z());
         assert_eq!(f.axes.column(1), Vector3::y());
         assert_eq!(f.axes.column(2), Vector3::x());
         assert!(matches!(
-            Frame::new(x, x),
+            LabAxes::new(x, x),
             Err(PoniError::UpAlongBeam { .. })
         ));
     }
@@ -283,10 +283,10 @@ mod tests {
         Orientation::BottomLeft,
     ];
 
-    fn oblique() -> Frame {
+    fn oblique() -> LabAxes {
         let beam = Unit::new_normalize(Vector3::new(0.3, -0.5, 0.81));
         let up = Unit::new_normalize(beam.cross(&Vector3::new(0.2, 0.7, -0.4)));
-        Frame::new(beam, up).unwrap()
+        LabAxes::new(beam, up).unwrap()
     }
 
     fn poni(rot: (f64, f64, f64), orientation: Orientation) -> Poni {
@@ -345,9 +345,9 @@ mod tests {
 
     #[test]
     fn export_gives_back_the_fields_in_the_principal_ranges() {
-        for frame in [
+        for lab in [
             oblique(),
-            Frame::new(Vector3::x_axis(), Vector3::z_axis()).unwrap(),
+            LabAxes::new(Vector3::x_axis(), Vector3::z_axis()).unwrap(),
         ] {
             for o in ORIENTATIONS {
                 for rot in [
@@ -360,8 +360,7 @@ mod tests {
                     (-3.1, 1.5, 3.1),
                 ] {
                     let p = poni(rot, o);
-                    let back =
-                        Poni::from_detector(&p.detector(&frame).unwrap(), o, &frame).unwrap();
+                    let back = Poni::from_detector(&p.detector(&lab).unwrap(), o, &lab).unwrap();
                     let d = field_gap(&p, &back);
                     assert!(d <= 1e-12, "{o:?} {rot:?}: {d}");
                 }
@@ -373,7 +372,7 @@ mod tests {
     /// and rot3 share an axis, come back as another PONI of the same detector.
     #[test]
     fn import_export_import_is_the_identity() {
-        let frame = oblique();
+        let lab = oblique();
         for o in ORIENTATIONS {
             for read_as in ORIENTATIONS {
                 for rot in [
@@ -384,10 +383,10 @@ mod tests {
                     (0.4, -FRAC_PI_2, -0.9),
                     (PI, 0.0, -PI),
                 ] {
-                    let det = poni(rot, o).detector(&frame).unwrap();
-                    let back = Poni::from_detector(&det, read_as, &frame).unwrap();
+                    let det = poni(rot, o).detector(&lab).unwrap();
+                    let back = Poni::from_detector(&det, read_as, &lab).unwrap();
                     assert_eq!(back.orientation, read_as);
-                    let d = gap(&det, &back.detector(&frame).unwrap());
+                    let d = gap(&det, &back.detector(&lab).unwrap());
                     assert!(d <= 1e-14, "{o:?} read as {read_as:?}, {rot:?}: {d} m");
                 }
             }
@@ -396,7 +395,7 @@ mod tests {
 
     #[test]
     fn export_needs_two_pixels_per_axis_and_perpendicular_axes() {
-        let frame = oblique();
+        let lab = oblique();
         let o = Orientation::BottomRight;
         let x = Vector3::new(1e-4, 0.0, 0.0);
         let y = Vector3::new(0.0, 1e-4, 0.0);
@@ -404,7 +403,7 @@ mod tests {
         for shape in [(1, 5), (5, 1)] {
             let det = PixelDetector::new(shape, at, x, y).unwrap();
             assert_eq!(
-                Poni::from_detector(&det, o, &frame),
+                Poni::from_detector(&det, o, &lab),
                 Err(PoniError::TooFewPixels {
                     slow: shape.0,
                     fast: shape.1
@@ -413,7 +412,7 @@ mod tests {
         }
         let skewed = PixelDetector::new((5, 5), at, x, y + x * 1e-6).unwrap();
         assert!(matches!(
-            Poni::from_detector(&skewed, o, &frame),
+            Poni::from_detector(&skewed, o, &lab),
             Err(PoniError::Skewed { .. })
         ));
     }
