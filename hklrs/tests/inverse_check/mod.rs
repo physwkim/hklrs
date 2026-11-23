@@ -36,9 +36,41 @@ pub fn psi_frame(
     p.dot(&e2).atan2(p.dot(&e1))
 }
 
-/// Whether `values` brings `hkl` into reflection through `forward`'s
-/// scattering, satisfies every equation of `mode`, keeps the held axes
-/// exactly at `current` and has its written axes in (−π, π].
+/// The hkl miss (Miller units) then one miss per extra equation of `mode`
+/// (rad, or relative to k²), signed and smooth in `values`: zero exactly at
+/// a solution, computed through `forward`'s scattering and not the solver's
+/// residuals.
+pub fn residuals(
+    mode: &Mode,
+    ub: &Matrix3<f64>,
+    wavelength: Wavelength,
+    hkl: &Vector3<f64>,
+    values: &[f64],
+) -> Result<Vec<f64>, String> {
+    let geo = mode.geometry();
+    let point = Point3::from(geo.beam_direction().into_inner());
+    let s = scattering(geo, values, wavelength, &point).map_err(|e| e.to_string())?;
+    let back = ub.lu().solve(&s.q_sample).ok_or("singular UB")?;
+    let mut r: Vec<f64> = (back - hkl).iter().copied().collect();
+    let k = wavelength.wavenumber();
+    r.extend(mode.extra().iter().map(|e| match e {
+        Equation::Bisector { sample, detector } => wrap(values[*detector] - 2.0 * values[*sample]),
+        Equation::DoubleDiffraction { hkl2 } => {
+            let poses = geo.poses(values).unwrap();
+            let ki = poses.source * geo.beam_direction().into_inner() * k;
+            ((poses.sample.rotation * (ub * hkl2) + ki).norm_squared() - k * k) / (k * k)
+        }
+        Equation::PsiConstant { reference, psi } => {
+            wrap(psi_frame(geo, ub, reference, values) - psi)
+        }
+        Equation::ZeroModPi { axis } => values[*axis].sin(),
+    }));
+    Ok(r)
+}
+
+/// Whether `values` brings `hkl` into reflection, satisfies every equation
+/// of `mode` (see [`residuals`]), keeps the held axes exactly at `current`
+/// and has its written axes in (−π, π].
 pub fn check(
     mode: &Mode,
     ub: &Matrix3<f64>,
@@ -47,11 +79,8 @@ pub fn check(
     current: &[f64],
     values: &[f64],
 ) -> Result<(), String> {
-    let geo = mode.geometry();
-    let point = Point3::from(geo.beam_direction().into_inner());
-    let s = scattering(geo, values, wavelength, &point).map_err(|e| e.to_string())?;
-    let back = ub.lu().solve(&s.q_sample).ok_or("singular UB")?;
-    let miss = largest((back - hkl).iter().map(|d| d.abs()));
+    let r = residuals(mode, ub, wavelength, hkl, values)?;
+    let miss = largest(r[..3].iter().map(|d| d.abs()));
     within(miss, || {
         format!("{values:?} misses hkl {hkl:?} by {miss:e}")
     })?;
@@ -65,22 +94,8 @@ pub fn check(
             return Err(format!("{values:?}: axis {i} unwrapped or moved from {c}"));
         }
     }
-    let k = wavelength.wavenumber();
-    for e in mode.extra() {
-        let miss = match e {
-            Equation::Bisector { sample, detector } => {
-                wrap(values[*detector] - 2.0 * values[*sample]).abs()
-            }
-            Equation::DoubleDiffraction { hkl2 } => {
-                let poses = geo.poses(values).unwrap();
-                let ki = poses.source * geo.beam_direction().into_inner() * k;
-                ((poses.sample.rotation * (ub * hkl2) + ki).norm_squared() - k * k).abs() / (k * k)
-            }
-            Equation::PsiConstant { reference, psi } => {
-                wrap(psi_frame(geo, ub, reference, values) - psi).abs()
-            }
-            Equation::ZeroModPi { axis } => values[*axis].sin().abs(),
-        };
+    for (e, miss) in mode.extra().iter().zip(&r[3..]) {
+        let miss = miss.abs();
         within(miss, || format!("{values:?} misses {e:?} by {miss:e}"))?;
     }
     Ok(())
