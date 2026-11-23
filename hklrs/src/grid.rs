@@ -202,28 +202,18 @@ fn check_len(what: &'static str, len: usize, expected: usize) -> Result<(), Erro
     }
 }
 
-/// The unmasked pixels of one frame with their positions, each with
-/// finite counts. A masked pixel adds nothing.
+/// The unmasked pixels of one frame with their positions. A masked pixel
+/// adds nothing.
 fn unmasked(
     points: &Projected,
     pixels: &[Result<Normalised, Masked>],
 ) -> Result<Vec<(usize, Normalised)>, Error> {
     check_len("normalised frame", pixels.len(), points.pixels())?;
-    pixels
+    Ok(pixels
         .iter()
         .enumerate()
         .filter_map(|(i, p)| p.as_ref().ok().map(|n| (i, *n)))
-        .map(|(i, n)| {
-            if n.counts.is_finite() {
-                Ok((i, n))
-            } else {
-                Err(Error::NotFinite {
-                    what: "pixel counts",
-                    value: n.counts,
-                })
-            }
-        })
-        .collect()
+        .collect())
 }
 
 /// The unmasked pixels of one frame and their global bins, flattened
@@ -504,8 +494,8 @@ impl Cube {
         for (k, n) in bins.chunks_exact(self.axes.len()).zip(values) {
             match self.offset(k) {
                 Some(off) => {
-                    self.photons[off] += n.counts;
-                    self.weight[off] += n.weight.get();
+                    self.photons[off] += n.counts();
+                    self.weight[off] += n.weight().get();
                     self.contributions[off] += 1;
                 }
                 None => outside += 1,
@@ -596,10 +586,7 @@ mod tests {
     }
 
     fn pixel(counts: f64, weight: f64) -> Result<Normalised, Masked> {
-        Ok(Normalised {
-            counts,
-            weight: Weight::new(weight, Masked::Opaque)?,
-        })
+        Normalised::new(counts, Weight::new(weight, Masked::Opaque))
     }
 
     /// Pixels of `counts`, each of weight 1.
@@ -856,17 +843,23 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_counts_and_length_mismatch_are_errors() {
+    fn a_nan_count_is_masked_as_bad_count_and_adds_nothing() {
+        let p = points(ONE, &[&[0.0], &[5.0]]);
+        let nan = unweighted(&[1.0, f64::NAN]);
+        assert_eq!(nan[1], Err(Masked::BadCount));
+        let want = cube(ONE, &[&[0.0]], &[1.0]);
+        assert_eq!(filled(ONE, &[&[0.0], &[5.0]], &nan), want);
+        let mut b = Bounds::new(vec![unit()]);
+        b.include(&p, &nan).unwrap();
+        let mut c = b.cube().unwrap();
+        assert_eq!(c.add(&p, &nan).unwrap(), 0);
+        assert_eq!(c, want);
+    }
+
+    #[test]
+    fn length_and_dimension_mismatches_are_errors() {
         let p = points(ONE, &[&[0.0], &[1.0]]);
         let mut c = Cube::default();
-        let nan = unweighted(&[1.0, f64::NAN]);
-        assert!(matches!(
-            c.add_growing(&[unit()], &p, &nan),
-            Err(Error::NotFinite { .. })
-        ));
-        let mut b = Bounds::new(vec![unit()]);
-        assert!(matches!(b.include(&p, &nan), Err(Error::NotFinite { .. })));
-        assert!(matches!(c.add(&p, &nan), Err(Error::NotFinite { .. })));
         assert!(matches!(
             c.add_growing(&[unit()], &p, &unweighted(&[1.0])),
             Err(Error::PixelCount {
@@ -883,12 +876,16 @@ mod tests {
             Err(Error::PixelCount { .. })
         ));
         assert_eq!(c, Cube::default());
-        // a bad pixel after good ones leaves a filled cube as it was
+        // a pixel with no bin after good ones leaves a filled cube as it was
         let mut c = cube(ONE, &[&[0.0]], &[1.0]);
         let before = c.clone();
-        let far = points(ONE, &[&[0.0], &[5.0]]);
-        assert!(c.add(&far, &unweighted(&[1.0, f64::INFINITY])).is_err());
-        assert!(c.add_growing(&[unit()], &far, &nan).is_err());
+        let far = points(ONE, &[&[0.0], &[f64::NAN]]);
+        let two = unweighted(&[1.0, 1.0]);
+        assert!(matches!(c.add(&far, &two), Err(Error::NoBin { .. })));
+        assert!(matches!(
+            c.add_growing(&[unit()], &far, &two),
+            Err(Error::NoBin { .. })
+        ));
         assert_eq!(c, before);
     }
 

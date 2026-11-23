@@ -267,13 +267,35 @@ impl Reducer {
 }
 
 /// One pixel's counts and weight; `counts / weight` is the corrected value.
+/// Both are finite by construction, so a sum of them is finite until it
+/// overflows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Normalised {
-    pub counts: f64,
-    pub weight: Weight,
+    counts: f64,
+    weight: Weight,
 }
 
 impl Normalised {
+    /// The one gate every pixel passes: counts that are NaN or infinite
+    /// are masked as `BadCount`, ahead of any reason `weight` was masked for.
+    pub fn new(counts: f64, weight: Result<Weight, Masked>) -> Result<Self, Masked> {
+        if !counts.is_finite() {
+            return Err(Masked::BadCount);
+        }
+        Ok(Self {
+            counts,
+            weight: weight?,
+        })
+    }
+
+    pub fn counts(&self) -> f64 {
+        self.counts
+    }
+
+    pub fn weight(&self) -> Weight {
+        self.weight
+    }
+
     pub fn value(&self) -> f64 {
         self.counts / self.weight.get()
     }
@@ -365,18 +387,12 @@ impl Normaliser {
                             None => 1.0,
                         };
                     }
+                    // a NaN or infinite raw count makes the sum non-finite
                     let mut counts = 0.0;
                     for p in reducer.block(i, j) {
-                        if !raw[p].is_finite() {
-                            return Err(Masked::BadCount);
-                        }
                         counts += raw[p] - f.dark_rate.as_ref().map_or(0.0, |d| d[p] * time);
                     }
-                    if !counts.is_finite() {
-                        return Err(Masked::BadCount);
-                    }
-                    let weight = Weight::new(geometric * gain / n, Masked::Opaque)?;
-                    Ok(Normalised { counts, weight })
+                    Normalised::new(counts, Weight::new(geometric * gain / n, Masked::Opaque))
                 })());
             }
         }
@@ -588,6 +604,21 @@ mod tests {
         assert_eq!(out[2], Err(Masked::BadFlat));
         assert_eq!(out[3], Err(Masked::BadCount));
         assert!(out[4].is_ok());
+    }
+
+    #[test]
+    fn normalised_refuses_counts_that_are_not_finite() {
+        let one = Weight::new(1.0, Masked::Opaque);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(Normalised::new(bad, one), Err(Masked::BadCount), "{bad}");
+            // the counts rank ahead of the weight
+            let opaque = Err(Masked::Opaque);
+            assert_eq!(Normalised::new(bad, opaque), Err(Masked::BadCount), "{bad}");
+        }
+        assert_eq!(Normalised::new(1.0, Err(Masked::Unlit)), Err(Masked::Unlit));
+        // a dark-subtracted count may be negative
+        let n = Normalised::new(-2.0, one).unwrap();
+        assert_eq!((n.counts(), Ok(n.weight()), n.value()), (-2.0, one, -2.0));
     }
 
     /// A weight that underflows is `Opaque`, after a non-finite count.

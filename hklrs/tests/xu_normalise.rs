@@ -198,7 +198,7 @@ fn xu10_ccd_without_a_monitor_normalises() {
     for k in 0..c.frames.len() {
         for (i, p) in c.pixels(k).iter().enumerate() {
             let p = p.as_ref().unwrap();
-            assert_eq!((p.counts, p.weight.get()), (c.frames[k][i], 1.0));
+            assert_eq!((p.counts(), p.weight().get()), (c.frames[k][i], 1.0));
         }
     }
 }
@@ -256,7 +256,7 @@ fn xu22_dark_subtraction_is_signed() {
         for (i, p) in c.pixels(k).iter().enumerate() {
             let p = p.as_ref().unwrap();
             let sub = c.frames[k][i] - dark[i] * t[k];
-            assert!(close(p.counts, sub));
+            assert!(close(p.counts(), sub));
             if sub < 0.0 {
                 negative += 1;
                 assert_eq!(want[k * w + i], 0.0, "xu clamps");
