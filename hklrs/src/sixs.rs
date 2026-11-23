@@ -6,10 +6,11 @@ use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 
 use crate::{Error, PixelDetector};
 
-/// Moves `det` so that its pixel `centre` (slow, fast) lies at `y = z = 0` at
-/// distance `sdd` along x, then rotates it by `detrot` radians about x. Only
-/// y and z of the central pixel are zeroed, as binoculars does: its x is kept
-/// and `sdd` is added to it. The mask is kept.
+/// Moves `det` so that its pixel `centre` (slow, fast) lies at `(sdd, 0, 0)`,
+/// then rotates it by `detrot` radians about x. The mask is kept.
+/// binoculars zeroes only y and z of the central pixel and adds `sdd` to its
+/// x, which differs for a detector whose central pixel has x != 0 such as
+/// the Cirpad (BIN-9).
 ///
 /// binoculars' `normalize_flag` is not ported; it maps pixels onto the unit
 /// sphere, which no [`PixelDetector`] can hold.
@@ -25,7 +26,7 @@ pub fn sixs(
         }
     }
     let c = det.pixel(centre.0, centre.1)?;
-    let shift = Vector3::new(sdd, -c.y, -c.z);
+    let shift = Vector3::new(sdd, 0.0, 0.0) - c.coords;
     let rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), detrot);
     Ok(det.transformed(&Isometry3::from_parts(Translation3::from(rot * shift), rot)))
 }
