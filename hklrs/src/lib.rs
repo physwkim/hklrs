@@ -17,7 +17,7 @@ pub use error::Error;
 pub use forward::{Forward, angle_between, forward};
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
 pub use lattice::Lattice;
-pub use sample::{Orientation, Sample};
+pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
 pub use units::{Deg, Energy, HC_KEV_ANGSTROM, Rad, Wavelength};
 
 pub use nalgebra;

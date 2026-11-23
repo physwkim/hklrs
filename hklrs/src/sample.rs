@@ -4,10 +4,60 @@ use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 
 use crate::{Error, Lattice};
 
+/// Smallest sine of the angle between two reflections, in index space and in
+/// the measured sample frame, below which they do not define a plane.
+pub const PARALLEL_SIN: f64 = 1e-6;
+
+/// Miller indices and the scattering vector measured for them in the sample
+/// frame (Å⁻¹; only its direction is used).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reflection {
+    hkl: Vector3<f64>,
+    q_sample: Vector3<f64>,
+}
+
+impl Reflection {
+    pub fn new(hkl: Vector3<f64>, q_sample: Vector3<f64>) -> Result<Self, Error> {
+        for (what, v) in [("hkl", &hkl), ("q_sample", &q_sample)] {
+            if !(v.iter().all(|x| x.is_finite()) && v.norm() > 0.0) {
+                return Err(Error::ZeroVector { what: what.into() });
+            }
+        }
+        Ok(Self { hkl, q_sample })
+    }
+
+    pub fn hkl(&self) -> &Vector3<f64> {
+        &self.hkl
+    }
+
+    pub fn q_sample(&self) -> &Vector3<f64> {
+        &self.q_sample
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Orientation {
     /// U given directly.
     Manual { u: UnitQuaternion<f64> },
+    /// U from two reflections (Busing & Levy 1967): the primary is exact,
+    /// the secondary fixes the rotation about it. U is derived from the
+    /// current B on every call, so a lattice change cannot leave it stale.
+    BusingLevy {
+        primary: Reflection,
+        secondary: Reflection,
+    },
+}
+
+fn sin_between(a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
+    a.cross(b).norm() / (a.norm() * b.norm())
+}
+
+/// Right-handed orthonormal triad (â, (a×b)×â normalised, a×b normalised) as
+/// columns.
+fn triad(a: &Vector3<f64>, b: &Vector3<f64>) -> Matrix3<f64> {
+    let t1 = a.normalize();
+    let t3 = a.cross(b).normalize();
+    Matrix3::from_columns(&[t1, t3.cross(&t1), t3])
 }
 
 impl Orientation {
@@ -22,6 +72,23 @@ impl Orientation {
         Ok(Self::Manual {
             u: UnitQuaternion::from_rotation_matrix(&r),
         })
+    }
+
+    /// Busing-Levy orientation. Rejects pairs that are parallel in index
+    /// space or in the measured sample frame; B is invertible for every
+    /// valid lattice, so a pair accepted here is non-parallel for any lattice.
+    pub fn busing_levy(primary: Reflection, secondary: Reflection) -> Result<Self, Error> {
+        for (space, a, b) in [
+            ("index space", &primary.hkl, &secondary.hkl),
+            ("the sample frame", &primary.q_sample, &secondary.q_sample),
+        ] {
+            let sin = sin_between(a, b);
+            // NaN when a cross product overflows
+            if sin.is_nan() || sin < PARALLEL_SIN {
+                return Err(Error::ParallelReflections { space, sin });
+            }
+        }
+        Ok(Self::BusingLevy { primary, secondary })
     }
 }
 
@@ -42,8 +109,17 @@ impl Sample {
     }
 
     pub fn u(&self) -> UnitQuaternion<f64> {
-        match self.orientation {
-            Orientation::Manual { u } => u,
+        match &self.orientation {
+            Orientation::Manual { u } => *u,
+            Orientation::BusingLevy { primary, secondary } => {
+                let b = self.lattice.b_matrix();
+                let crystal = triad(&(b * primary.hkl), &(b * secondary.hkl));
+                let measured = triad(&primary.q_sample, &secondary.q_sample);
+                // both triads are right-handed orthonormal, so the product is
+                // a proper rotation up to rounding
+                let r = Rotation3::from_matrix_unchecked(measured * crystal.transpose());
+                UnitQuaternion::from_rotation_matrix(&r)
+            }
         }
     }
 
@@ -61,5 +137,100 @@ impl Sample {
             .b_matrix()
             .solve_upper_triangular(&q_crystal)
             .expect("B has a positive diagonal for every valid Lattice")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn triclinic() -> Lattice {
+        Lattice::from_degrees(4.1, 5.3, 6.7, 82.0, 97.0, 101.0).unwrap()
+    }
+
+    fn u_true() -> UnitQuaternion<f64> {
+        UnitQuaternion::from_euler_angles(0.4, -1.1, 2.3)
+    }
+
+    /// Reflection measured on a sample with orientation `u`, q scaled by
+    /// `scale` (only the direction may matter).
+    fn measured(l: &Lattice, u: &UnitQuaternion<f64>, h: [f64; 3], scale: f64) -> Reflection {
+        let h = Vector3::from(h);
+        Reflection::new(h, scale * (u * (l.b_matrix() * h))).unwrap()
+    }
+
+    #[test]
+    fn busing_levy_recovers_u() {
+        let (l, u) = (triclinic(), u_true());
+        let o = Orientation::busing_levy(
+            measured(&l, &u, [1.0, 2.0, 3.0], 0.7),
+            measured(&l, &u, [-2.0, 1.0, 0.0], 1.3),
+        )
+        .unwrap();
+        let s = Sample::new("t", l, o);
+        assert!(s.u().angle_to(&u) < 1e-12, "{}", s.u().angle_to(&u));
+        let h = Vector3::new(0.3, -1.0, 2.5);
+        assert!((s.hkl(&(u * (l.b_matrix() * h))) - h).abs().max() < 1e-12);
+    }
+
+    #[test]
+    fn primary_is_exact_secondary_sets_the_plane() {
+        // the secondary direction is off by a rotation about the primary
+        // normal; the primary must still map exactly onto its q
+        let (l, u) = (triclinic(), u_true());
+        let p = measured(&l, &u, [1.0, 0.0, 0.0], 1.0);
+        let mut q2 = u * (l.b_matrix() * Vector3::new(0.0, 1.0, 0.0));
+        q2 += 0.05 * q2.norm() * p.q_sample().normalize();
+        let s = Sample::new(
+            "t",
+            l,
+            Orientation::busing_levy(p.clone(), Reflection::new(Vector3::y(), q2).unwrap())
+                .unwrap(),
+        );
+        let along = (s.ub() * p.hkl()).normalize();
+        assert!((along - p.q_sample().normalize()).abs().max() < 1e-14);
+    }
+
+    #[test]
+    fn lattice_change_rederives_u() {
+        // same reflections, new lattice: UB·h1 still lies along q1
+        let (l, u) = (triclinic(), u_true());
+        let o = Orientation::busing_levy(
+            measured(&l, &u, [1.0, 1.0, 0.0], 1.0),
+            measured(&l, &u, [0.0, 0.0, 1.0], 1.0),
+        )
+        .unwrap();
+        let mut s = Sample::new("t", l, o);
+        s.lattice = Lattice::from_degrees(4.0, 5.5, 6.5, 85.0, 95.0, 100.0).unwrap();
+        let Orientation::BusingLevy { primary, .. } = &s.orientation else {
+            unreachable!()
+        };
+        let along = (s.ub() * primary.hkl()).normalize();
+        assert!((along - primary.q_sample().normalize()).abs().max() < 1e-14);
+    }
+
+    #[test]
+    fn parallel_pairs_rejected() {
+        let (l, u) = (triclinic(), u_true());
+        let a = measured(&l, &u, [1.0, 0.0, 0.0], 1.0);
+        let index = Orientation::busing_levy(a.clone(), measured(&l, &u, [2.0, 0.0, 0.0], 1.0));
+        assert!(matches!(
+            index,
+            Err(Error::ParallelReflections {
+                space: "index space",
+                ..
+            })
+        ));
+        // distinct hkl but the same measured direction
+        let same_q = Reflection::new(Vector3::y(), *a.q_sample()).unwrap();
+        assert!(matches!(
+            Orientation::busing_levy(a, same_q),
+            Err(Error::ParallelReflections {
+                space: "the sample frame",
+                ..
+            })
+        ));
+        assert!(Reflection::new(Vector3::zeros(), Vector3::x()).is_err());
+        assert!(Reflection::new(Vector3::x(), Vector3::new(f64::NAN, 0.0, 0.0)).is_err());
     }
 }
