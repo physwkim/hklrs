@@ -420,6 +420,29 @@ impl PyCalFrame {
     }
 }
 
+/// A goniometer written as xrayutilities' `QConversion` is: circles outermost
+/// first, each `(name, "z+")`, and the beam direction `r_i`. The sample
+/// circles and the detector circles turn about the named lab axis; a
+/// negative direction turns the other way. Frame angles are given in the
+/// order sample circles then detector circles.
+#[pyfunction]
+#[pyo3(signature = (detector, sample=Vec::new(), beam=[1.0, 0.0, 0.0], name="xu"))]
+fn xu_geometry(
+    detector: Vec<(String, String)>,
+    sample: Vec<(String, String)>,
+    beam: [f64; 3],
+    name: &str,
+) -> PyResult<PyGeometry> {
+    let mut b = hklrs::Geometry::builder(name);
+    for (n, d) in &sample {
+        b = b.sample_rotation(n, direction(d)?.vector().into_inner().into());
+    }
+    for (n, d) in &detector {
+        b = b.detector_rotation(n, direction(d)?.vector().into_inner().into());
+    }
+    b.beam_direction(beam).build().map(PyGeometry).map_err(err)
+}
+
 fn direction(text: &str) -> PyResult<xu::Direction> {
     text.parse().map_err(err)
 }
@@ -599,18 +622,20 @@ enum Value {
 }
 
 /// A converged calibration. `value` is the fitted `hklrs.xu.Area` or
-/// `Linear`; `values` and `sigma` are keyed by parameter name for the free
-/// parameters only (a held parameter has no sigma), in the order of
-/// `free_ids` and of `cov`. `extra` carries what the detector object does
-/// not hold in an hkl fit (wavelength, angle_offset, sample_tilt,
-/// sample_azimuth), `None` otherwise. `rms` is in units of sigma: about 1
-/// for a good model, large for a local minimum (several starts are the
-/// remedy). `rejected` lists `(frame index, reason)`; `stop` is the rule
-/// that ended the run: gradient, cost or param.
+/// `Linear`. `params` holds every parameter by name, fitted or held (angles
+/// in degrees; `cch1`, `pwidth1` ... for an area detector, `cch`, `pwidth`
+/// for a row; an hkl fit adds `wavelength`, `angle_offset`, `sample_tilt`,
+/// `sample_azimuth`); `directions` are the detector directions used.
+/// `free_ids`, `values` and `sigma` cover the free parameters only (a held
+/// parameter has no sigma), in the order of `cov`. `rms` is in units of
+/// sigma: about 1 for a good model, large for a local minimum (several
+/// starts are the remedy). `rejected` lists `(frame index, reason)`; `stop`
+/// is the rule that ended the run: gradient, cost or param.
 #[pyclass(name = "Fit", module = "hklrs.calib", frozen)]
 struct PyFit {
     value: Value,
-    extra: Option<[f64; 4]>,
+    params: Vec<(&'static str, f64)>,
+    directions: Vec<String>,
     free: Vec<core::Fitted>,
     cov: Vec<Vec<f64>>,
     rms: f64,
@@ -623,9 +648,40 @@ struct PyFit {
 impl PyFit {
     fn pack<T>(fit: &core::Fit<T>, value: Value, extra: Option<[f64; 4]>) -> Self {
         let cov = fit.cov();
+        let mut params: Vec<(&'static str, f64)> = match &value {
+            Value::Area(a) => vec![
+                ("cch1", a.cch1),
+                ("cch2", a.cch2),
+                ("pwidth1", a.pwidth1),
+                ("pwidth2", a.pwidth2),
+                ("distance", a.distance),
+                ("tiltazimuth", a.tiltazimuth.0),
+                ("tilt", a.tilt.0),
+                ("detrot", a.detrot.0),
+            ],
+            Value::Linear(l) => vec![
+                ("cch", l.cch),
+                ("pwidth", l.pwidth),
+                ("distance", l.distance),
+                ("tilt", l.tilt.0),
+            ],
+        };
+        if let Some([wl, off, tilt, az]) = extra {
+            params.extend([
+                ("wavelength", wl),
+                ("angle_offset", off),
+                ("sample_tilt", tilt),
+                ("sample_azimuth", az),
+            ]);
+        }
+        let directions = match &value {
+            Value::Area(a) => dirs(&[a.dir1, a.dir2]),
+            Value::Linear(l) => dirs(&[l.dir]),
+        };
         Self {
             value,
-            extra,
+            params,
+            directions,
             free: fit.free().to_vec(),
             cov: (0..cov.nrows())
                 .map(|i| (0..cov.ncols()).map(|j| cov[(i, j)]).collect())
@@ -650,20 +706,17 @@ impl PyFit {
     }
 
     #[getter]
-    fn extra<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let Some([wl, off, tilt, az]) = self.extra else {
-            return Ok(None);
-        };
+    fn params<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        for (k, v) in [
-            ("wavelength", wl),
-            ("angle_offset", off),
-            ("sample_tilt", tilt),
-            ("sample_azimuth", az),
-        ] {
+        for (k, v) in &self.params {
             d.set_item(k, v)?;
         }
-        Ok(Some(d))
+        Ok(d)
+    }
+
+    #[getter]
+    fn directions(&self) -> Vec<String> {
+        self.directions.clone()
     }
 
     #[getter]
@@ -954,6 +1007,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("PeakFailure", py.get_type::<PeakFailure>())?;
     m.add("PeakRejected", py.get_type::<PeakRejected>())?;
+    m.add_function(wrap_pyfunction!(xu_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_area, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_linear, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_area_hkl, m)?)?;
