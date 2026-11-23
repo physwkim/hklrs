@@ -30,6 +30,26 @@ pub enum Error {
     },
     #[error("the detector point coincides with the sample position")]
     DetectorAtSample,
+    #[error("mask of {len} pixels does not match the detector shape {shape:?}")]
+    MaskShape { len: usize, shape: (usize, usize) },
+    #[error("roi {slow:?} x {fast:?} is empty or outside the detector shape {shape:?}")]
+    Roi {
+        slow: std::ops::Range<usize>,
+        fast: std::ops::Range<usize>,
+        shape: (usize, usize),
+    },
+    #[error("bin {slow}x{fast} is zero or larger than the detector shape {shape:?}")]
+    Bin {
+        slow: usize,
+        fast: usize,
+        shape: (usize, usize),
+    },
+    #[error("{what} must be finite, got {value}")]
+    NotFinite { what: &'static str, value: f64 },
+    #[error("xrayutilities direction {text:?} is not one of x+ x- y+ y- z+ z-")]
+    XuDirection { text: String },
+    #[error("{what} are parallel")]
+    ParallelDirections { what: &'static str },
     #[error("the two reflections are parallel in {space} (sin of their angle = {sin:e})")]
     ParallelReflections { space: &'static str, sin: f64 },
     #[error("U is not a proper rotation (max |UᵀU − I| = {deviation}, or det ≤ 0)")]
