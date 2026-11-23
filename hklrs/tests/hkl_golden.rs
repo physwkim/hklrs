@@ -8,6 +8,9 @@
 //! hkl comparison is made with the translation at 0 and the difference is
 //! checked separately (`translations_move_the_detector_point`). A translation
 //! along the ray (CRISTAL K4C `dtx`, PYFAI `sdd`) changes nothing in either.
+//!
+//! PYFAI's rot3 turns about −x as in pyFAI and about +x in hkl (HKL-37), so
+//! hkl at rot3 is asserted equal to hklrs at −rot3 and unequal at rot3.
 
 mod common;
 mod lattice_check;
@@ -22,6 +25,9 @@ use serde_json::Value;
 
 /// Translations that move the detector point off its ray from the sample.
 const OFF_RAY: &[(&str, &str)] = &[("PYFAI", "poni1"), ("PYFAI", "poni2")];
+
+/// HKL-37: the axis hkl turns the other way from hklrs.
+const HKL_37: (&str, &str) = ("PYFAI", "rot3");
 
 /// Axes hklrs adds that hkl does not list: P08 LISA's `tilt`, the
 /// wavelength-dependent monochromator deflection (`presets::lisa_tilt`).
@@ -100,11 +106,18 @@ fn presets_match_hkl_axis_tables() {
             assert!(class_ok, "{name} {}: unit {}", a.name(), h["unit"]);
             match (v, h["axis_v"].is_null()) {
                 (None, true) => {}
-                (Some(v), false) => assert!(
-                    (v - vec3(&h["axis_v"])).norm() < 1e-15,
-                    "{name} {}",
-                    a.name()
-                ),
+                (Some(v), false) => {
+                    let sign = if (*name, a.name()) == HKL_37 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    assert!(
+                        (v - sign * vec3(&h["axis_v"])).norm() < 1e-15,
+                        "{name} {}",
+                        a.name()
+                    )
+                }
                 _ => panic!("{name} {}: axis vector presence differs", a.name()),
             }
         }
@@ -115,6 +128,7 @@ fn presets_match_hkl_axis_tables() {
 fn forward_hkl_matches_hkl_engine() {
     let g = golden();
     let mut checked = 0;
+    let mut divergent = 0;
     for case in g["cases"].as_array().unwrap() {
         let name = case["geometry"].as_str().unwrap();
         if !presets::PRESETS.contains(&name) || NO_ENGINE.contains(&name) {
@@ -143,33 +157,49 @@ fn forward_hkl_matches_hkl_engine() {
         }
 
         let wl = Wavelength::new(f(&case["wavelength"])).unwrap();
-        // golden canonical values are degrees and millimetres
-        let user: Vec<f64> = geo
-            .axes()
-            .iter()
-            .map(|a| {
-                if EXTRA_AXES.contains(&(name, a.name())) {
-                    return hklrs::Deg::from(presets::lisa_tilt(wl).unwrap()).0;
-                }
-                if is_off_ray(name, a.name()) {
-                    0.0
-                } else {
-                    canonical_to_user(a, f(&case["axes_canonical_deg_mm"][a.name()]))
-                }
-            })
-            .collect();
-        let values = geo.values_from_degrees(&user).unwrap();
-        let out = forward(&geo, &sample, &values, wl, &detector_point(name, &geo)).unwrap();
+        // golden canonical values are degrees and millimetres; the HKL-37
+        // axis is multiplied by `hkl_37`
+        let values = |hkl_37: f64| {
+            let user: Vec<f64> = geo
+                .axes()
+                .iter()
+                .map(|a| {
+                    if EXTRA_AXES.contains(&(name, a.name())) {
+                        return hklrs::Deg::from(presets::lisa_tilt(wl).unwrap()).0;
+                    }
+                    if is_off_ray(name, a.name()) {
+                        return 0.0;
+                    }
+                    let v = canonical_to_user(a, f(&case["axes_canonical_deg_mm"][a.name()]));
+                    if (name, a.name()) == HKL_37 {
+                        hkl_37 * v
+                    } else {
+                        v
+                    }
+                })
+                .collect();
+            geo.values_from_degrees(&user).unwrap()
+        };
+        let point = detector_point(name, &geo);
         let expect = vec3(&case["hkl"]);
-        let via_hkl_ub = hkl_ub.lu().solve(&out.scattering.q_sample).unwrap();
-        let err = (via_hkl_ub - expect).abs().max();
-        assert!(
-            err < 1e-10,
-            "{ctx}: geometry: hkl {via_hkl_ub:?} vs {expect:?}"
-        );
+        let geometry_gap = |out: &hklrs::Forward| {
+            let via_hkl_ub = hkl_ub.lu().solve(&out.scattering.q_sample).unwrap();
+            (via_hkl_ub - expect).abs().max()
+        };
+        let out = forward(&geo, &sample, &values(-1.0), wl, &point).unwrap();
+        let err = geometry_gap(&out);
+        assert!(err < 1e-10, "{ctx}: geometry: hkl differs by {err}");
         if hkl_b_valid {
             let err = (out.hkl - expect).abs().max();
             assert!(err < 1e-10, "{ctx}: hkl {:?} vs {expect:?}", out.hkl);
+        }
+        if name == HKL_37.0 {
+            let unflipped = forward(&geo, &sample, &values(1.0), wl, &point).unwrap();
+            let gap = geometry_gap(&unflipped);
+            // 1e4 times the match tolerance; the smallest gap, 4.4e-4, is
+            // cubic λ=1.54 #7, where rot3 is −0.013°
+            assert!(gap > 1e-6, "{ctx}: HKL-37 not seen, hkl differs by {gap}");
+            divergent += 1;
         }
         checked += 1;
     }
@@ -178,6 +208,7 @@ fn forward_hkl_matches_hkl_engine() {
         (presets::PRESETS.len() - NO_ENGINE.len()) * 40,
         "every case of every ported preset that has an engine"
     );
+    assert_eq!(divergent, 40, "every PYFAI case shows HKL-37");
 }
 
 /// The full pose moves the point by the translation; the angle between the

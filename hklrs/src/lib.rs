@@ -11,6 +11,7 @@ mod forward;
 mod geometry;
 pub mod inverse;
 mod lattice;
+pub mod poni;
 pub mod presets;
 pub mod pseudo;
 mod qmap;
