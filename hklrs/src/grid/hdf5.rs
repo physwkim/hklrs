@@ -12,7 +12,10 @@
 //!
 //! hklrs writes counts as f64 and contributions as u64 (binoculars writes
 //! f32 and u32 and has HDF5 convert on read), and writes axes of one bin,
-//! which binoculars drops (BIN-14). New data goes in attributes or in datasets of
+//! which binoculars drops (BIN-14). Σweight goes beside them in `weight`,
+//! f64 and shaped like counts; a file without it, as binoculars writes,
+//! reads with Σweight = contributions, binoculars' meaning of
+//! photons/contributions. New data goes in attributes or in datasets of
 //! `/binoculars` beside these, which binoculars ignores, never in `axes`,
 //! whose every link binoculars reads as an axis.
 
@@ -25,6 +28,8 @@ use crate::Error;
 
 const ROOT: &str = "binoculars";
 const AXES: &str = "binoculars/axes";
+/// Σweight, which binoculars' files lack.
+const WEIGHT: &str = "weight";
 
 fn h5(e: Hdf5Error) -> Error {
     Error::Hdf5 {
@@ -119,19 +124,24 @@ pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Er
         .map_err(h5)?
         .write_raw(&cube.contributions)
         .map_err(h5)?;
+    root.new_dataset::<f64>()
+        .shape(&shape)
+        .create(WEIGHT)
+        .map_err(h5)?
+        .write_raw(&cube.weight)
+        .map_err(h5)?;
     file.close().map_err(h5)
 }
 
 /// Reads the cube and config at `path`. Every link in `axes` must be an
 /// axis of six values whose index column numbers them 0..n once each, and
-/// counts and contributions must have the axes' shape. Every axis gets
-/// binoculars' bins, anchored at −step/2.
+/// counts, contributions and any weight must have the axes' shape. Every
+/// axis gets binoculars' bins, anchored at −step/2.
 pub fn read(path: impl AsRef<Path>) -> Result<(Cube, String), Error> {
     let file = H5File::open(path).map_err(h5)?;
-    let names = file
-        .root_group()
-        .group(ROOT)
-        .and_then(|g| g.group("axes"))
+    let root = file.root_group().group(ROOT).map_err(h5)?;
+    let names = root
+        .group("axes")
         .and_then(|g| g.link_names())
         .map_err(h5)?;
     let n = names.len();
@@ -168,8 +178,11 @@ pub fn read(path: impl AsRef<Path>) -> Result<(Cube, String), Error> {
     let contributions = bins("contributions")?
         .read_numeric_as::<u64>()
         .map_err(h5)?;
-    // binoculars' meaning: photons/contributions, each contribution of weight 1
-    let weight = contributions.iter().map(|&c| c as f64).collect();
+    let weight = if root.link_names().map_err(h5)?.iter().any(|n| n == WEIGHT) {
+        bins(WEIGHT)?.read_numeric_as::<f64>().map_err(h5)?
+    } else {
+        contributions.iter().map(|&c| c as f64).collect()
+    };
 
     let config = file
         .dataset(&format!("{ROOT}/config"))
@@ -228,12 +241,13 @@ mod tests {
 
     fn cube(axes: Vec<Axis>) -> Cube {
         let mut c = Cube::zeros(axes).unwrap();
-        for (i, (p, n)) in c.photons.iter_mut().zip(&mut c.contributions).enumerate() {
-            // neither fits binoculars' f32 and u32
+        let bins = c.photons.iter_mut().zip(&mut c.weight);
+        for (i, ((p, w), n)) in bins.zip(&mut c.contributions).enumerate() {
+            // none fits binoculars' f32 and u32, and Σweight is not contributions
             *p = 0.1 * i as f64;
+            *w = 0.7 * i as f64;
             *n = (1 << 40) + i as u64;
         }
-        c.weight = c.contributions.iter().map(|&n| n as f64).collect();
         c
     }
 
@@ -296,6 +310,16 @@ mod tests {
     /// A file as binoculars writes it: f32 counts, u32 contributions, no
     /// anchor, with the given axis rows and bin shape.
     fn binoculars(name: &str, rows: &[(&str, &[f64])], shape: &[usize]) -> PathBuf {
+        file(name, rows, shape, None)
+    }
+
+    /// [`binoculars`]' file, with a weight of shape `weight` when given.
+    fn file(
+        name: &str,
+        rows: &[(&str, &[f64])],
+        shape: &[usize],
+        weight: Option<&[usize]>,
+    ) -> PathBuf {
         let p = path(name);
         let f = H5File::create(&p).unwrap();
         let root = f.create_group(ROOT).unwrap();
@@ -328,6 +352,14 @@ mod tests {
             .unwrap()
             .write_raw(&vec![3u32; n])
             .unwrap();
+        if let Some(shape) = weight {
+            root.new_dataset::<f64>()
+                .shape(shape)
+                .create(WEIGHT)
+                .unwrap()
+                .write_raw(&vec![0.25; shape.iter().product()])
+                .unwrap();
+        }
         f.close().unwrap();
         p
     }
@@ -352,6 +384,23 @@ mod tests {
             contributions: vec![3; 6],
         };
         assert_eq!(read(&p).unwrap(), (want, "cfg".to_owned()));
+    }
+
+    /// Σweight is read where the file has it, and must have the axes' shape.
+    #[test]
+    fn weight_is_read_where_the_file_has_one() {
+        let row: &[f64] = &[0.0, 0.0, 1.0, 0.5, 0.0, 2.0];
+        let (cube, _) = read(file("weight", &[("qx", row)], &[3], Some(&[3]))).unwrap();
+        assert_eq!(
+            (cube.weight(), cube.contributions()),
+            (&[0.25; 3][..], &[3; 3][..])
+        );
+        match read(file("weight_shape", &[("qx", row)], &[3], Some(&[2]))) {
+            Err(Error::CubeFile { reason }) => {
+                assert!(reason.contains("weight has shape [2]"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// binoculars' loader crashes on an empty axes group or a bad index

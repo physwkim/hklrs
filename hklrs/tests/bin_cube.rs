@@ -236,7 +236,8 @@ mod hdf5 {
     fn binoculars_file_reads_as_the_merged_cube() {
         let (cube, config) = hdf5::read(golden("bin_7be4f79_cube.h5")).unwrap();
         // binoculars' f32 counts widen exactly; its axes read as anchored
-        // at −step/2, the binnings of scan()
+        // at −step/2, the binnings of scan(); it has no weight, so Σweight
+        // reads as its contributions
         assert_eq!(cube, merged());
         let verdict = load("bin_7be4f79_hdf5.json");
         assert_eq!(config, verdict["config"].as_str().unwrap());
@@ -304,6 +305,10 @@ mod hdf5 {
             };
             assert_eq!(row(&a), row(&b), "{name}");
         }
+        // Σweight is a dataset binoculars' file lacks and loads past
+        assert!(b.dataset("binoculars/weight").is_err());
+        let weight = a.dataset("binoculars/weight").unwrap();
+        assert_eq!(weight.read_raw::<f64>().unwrap(), merged().weight());
         assert_eq!(hdf5::read(&ours).unwrap(), (merged(), config));
     }
 }
