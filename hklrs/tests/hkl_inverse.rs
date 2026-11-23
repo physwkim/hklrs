@@ -1,7 +1,8 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
 //! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C, the SOLEIL SIXS MED
-//! presets, SOLEIL MARS and APS POLAR but its "zaxis + beta-fixed", which hkl
-//! solves over other axes (see `aps_04id_polar::zaxis_beta_fixed`).
+//! presets, SOLEIL MARS, APS POLAR and PETRA3 P09 EH2 but their
+//! "zaxis + beta-fixed", which hkl solves over other axes (see
+//! `aps_04id_polar::zaxis_beta_fixed`).
 //!
 //! Per case: the mode writes hkl's axes, its slits hkl's fitted axis; every
 //! hkl solution within VIOLATION
@@ -21,7 +22,8 @@ mod common;
 mod inverse_check;
 
 use hklrs::inverse::{
-    aps_04id_polar as polar, e4c, e6c, esrf_bm28_psic, k4c, k6c, soleil_sixs_med, zaxis,
+    aps_04id_polar as polar, e4c, e6c, esrf_bm28_psic, k4c, k6c, petra3_p09_eh2 as p09,
+    soleil_sixs_med, zaxis,
 };
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
@@ -57,6 +59,7 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
     let emergence = || param("emergence").to_radians();
     let kappa = case["geometry"] == "K4CV";
     let k6c = case["geometry"] == "K6C";
+    let p09 = case["geometry"] == "PETRA3 P09 EH2";
     let mode = match case["mode"].as_str().unwrap() {
         "bissector_vertical" if k6c => k6c::bissector_vertical(geo),
         "constant_omega_vertical" if k6c => k6c::constant_omega_vertical(geo, rad("omega")),
@@ -115,6 +118,16 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         "pitch_fixed" => soleil_sixs_med::pitch_fixed(geo),
         "delta_fixed" => soleil_sixs_med::delta_fixed(geo),
         "gamma_fixed" => soleil_sixs_med::gamma_fixed(geo),
+        "zaxis + alpha-fixed" if p09 => p09::zaxis_alpha_fixed(geo),
+        "zaxis + alpha=beta" if p09 => p09::zaxis_alpha_eq_beta(geo),
+        "4-circles bissecting horizontal" if p09 => p09::bissecting_horizontal(geo),
+        "4-circles constant omega horizontal" if p09 => p09::constant_omega_horizontal(geo),
+        "4-circles constant chi horizontal" if p09 => p09::constant_chi_horizontal(geo),
+        "4-circles constant phi horizontal" if p09 => p09::constant_phi_horizontal(geo),
+        "lifting detector mu" if p09 => p09::lifting_detector_mu(geo),
+        "lifting detector omega" if p09 => p09::lifting_detector_omega(geo),
+        "lifting detector chi" if p09 => p09::lifting_detector_chi(geo),
+        "lifting detector phi" if p09 => p09::lifting_detector_phi(geo),
         "4-circles constant phi horizontal" => polar::constant_phi_horizontal(geo),
         "zaxis + alpha-fixed" => polar::zaxis_alpha_fixed(geo),
         "zaxis + alpha=beta" => polar::zaxis_alpha_eq_beta(geo),
@@ -491,4 +504,14 @@ golden! {
     polar_lifting_detector_phi: "APS POLAR" "lifting detector phi",
     polar_psi_constant_horizontal: "APS POLAR" "psi constant horizontal",
     polar_psi_constant_vertical: "APS POLAR" "psi constant vertical",
+    p09_zaxis_alpha_fixed: "PETRA3 P09 EH2" "zaxis + alpha-fixed",
+    p09_zaxis_alpha_eq_beta: "PETRA3 P09 EH2" "zaxis + alpha=beta",
+    p09_bissecting_horizontal: "PETRA3 P09 EH2" "4-circles bissecting horizontal",
+    p09_constant_omega_horizontal: "PETRA3 P09 EH2" "4-circles constant omega horizontal",
+    p09_constant_chi_horizontal: "PETRA3 P09 EH2" "4-circles constant chi horizontal",
+    p09_constant_phi_horizontal: "PETRA3 P09 EH2" "4-circles constant phi horizontal",
+    p09_lifting_detector_mu: "PETRA3 P09 EH2" "lifting detector mu",
+    p09_lifting_detector_omega: "PETRA3 P09 EH2" "lifting detector omega",
+    p09_lifting_detector_chi: "PETRA3 P09 EH2" "lifting detector chi",
+    p09_lifting_detector_phi: "PETRA3 P09 EH2" "lifting detector phi",
 }
