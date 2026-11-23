@@ -7,12 +7,14 @@ mod inverse_check;
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, soleil_sixs_med, zaxis};
-use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
+use hklrs::inverse::{
+    self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, soleil_sixs_med, zaxis,
+};
+use hklrs::nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
 use hklrs::presets::{KAPPA_ALPHA_DEG, kappa_axis, preset};
 use hklrs::{
     Deg, Equation, Eulerian, Geometry, InverseError, InverseRequest, Lattice, Mode, Picker, Target,
-    Wavelength,
+    Wavelength, scattering,
 };
 use inverse_check::wrap;
 
@@ -826,6 +828,43 @@ fn bm28_coplanar_at_chi_zero_reaches_only_q_normal_to_phi() {
     assert!(!solutions.is_empty());
     for s in &solutions {
         inverse_check::check(&mode, &ub, wavelength(), &oblique, &chi, s).unwrap();
+    }
+}
+
+/// APS POLAR zaxis + beta-fixed from a position hkl's mode cannot hold:
+/// with the surface normal along mu's axis (chi = phi = 0), every solution
+/// keeps the exit β = delta and moves the incidence α = tau, and the
+/// position itself is among them. hkl 5.1.9 writes delta here.
+#[test]
+fn polar_beta_fixed_holds_the_exit_angle() {
+    let geo = preset("APS POLAR").unwrap();
+    let mode = aps_04id_polar::zaxis_beta_fixed(&geo).unwrap();
+    let beam = geo.beam_direction().into_inner();
+    // tau, mu, chi, phi, gamma, delta
+    let at = geo
+        .values_from_degrees(&[3.0, 40.0, 0.0, 0.0, 25.0, 7.0])
+        .unwrap();
+    let q = scattering(&geo, &at, wavelength(), &Point3::from(beam))
+        .unwrap()
+        .q_sample;
+    let hkl = ub().lu().solve(&q).unwrap();
+    let current = geo
+        .values_from_degrees(&[10.0, 20.0, 0.0, 0.0, 10.0, 7.0])
+        .unwrap();
+    let solutions = request(&mode, hkl, &current).solve().unwrap();
+    assert!(
+        solutions
+            .iter()
+            .any(|s| s.iter().zip(&at).all(|(a, b)| wrap(a - b).abs() <= 1e-9)),
+        "{solutions:?}"
+    );
+    for s in &solutions {
+        assert_solution(&mode, &hkl, &current, s);
+        let poses = geo.poses(s).unwrap();
+        let n = poses.sample.rotation * Vector3::z();
+        let (ki, kf) = (poses.source * beam, poses.detector.rotation * beam);
+        assert!((n.dot(&kf) - current[5].sin()).abs() <= 1e-12, "{s:?}");
+        assert!((-n.dot(&ki) - s[0].sin()).abs() <= 1e-12, "{s:?}");
     }
 }
 

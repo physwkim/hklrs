@@ -7,6 +7,7 @@
 //! [`Equation`]s close the system over its written axes, and its [`Slits`],
 //! if any, are turned into the surface after. Other axes stay at `current`.
 
+pub mod aps_04id_polar;
 pub mod e4c;
 pub mod e6c;
 pub mod esrf_bm28_psic;
