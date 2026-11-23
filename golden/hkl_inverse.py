@@ -9,7 +9,8 @@ called from the start axes. Every returned solution is recorded in hkl's order
 forward hkl, and the residuals of the mode's own constraint.
 The C solver restarts with libc rand(); srand() is seeded per call through
 ctypes so the output is reproducible.
-Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c, -e6c.c, -k4c.c,
+Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c (E4CV, E4CH and
+SOLEIL MARS), -e6c.c, -k4c.c,
 -k6c.c, -zaxis.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
 _psi_constant_*, _emergence_fixed_func), -soleil-sixs-med.c; the ESRF BM28
 and ID01 PSIC modes only hold axes. SOLEIL SIXS MED2+3, and MED2+3 v2 with
@@ -41,7 +42,7 @@ N_UNREACH = 4
 TOL = 1e-6
 GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
               "ESRF ID01 PSIC", "SOLEIL SIXS MED2+2", "SOLEIL SIXS MED1+2",
-              "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2"]
+              "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS"]
 # Engine-list parameter sets run per geometry; [] where the list has none.
 LIST_PARAMS = {"SOLEIL SIXS MED2+3 v2": [[0.0], [1.0]]}
 PARAM_MODES = ("double_diffraction", "psi_constant", "constant_incidence",
@@ -248,7 +249,7 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable, fitted)
         om, chi, phi = (n.get(a) for a in ("omega", "chi", "phi"))
     pv = dict(zip(ctx.eng.parameters_names_get(), par))
     horiz = mode.endswith("horizontal")
-    tth = n["tth"] if g in ("E4CV", "E4CH", "K4CV") else n["delta"]
+    tth = n["tth"] if g in ("E4CV", "E4CH", "K4CV", "SOLEIL MARS") else n["delta"]
     if mode in ("bissector", "bissector_vertical"):
         r["tth-2*omega"] = wrap(tth - 2 * om)  # e4c.c:38, e6c.c:61, k4c.c:68, k6c.c:204
     if mode == "reflectivity" and g == "ZAXIS":
