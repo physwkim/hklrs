@@ -13,6 +13,7 @@ hklrs = { path = "../hklrs" }
 bsrs = { version = "=0.6.2", default-features = false }
 async-trait = "0.1"
 futures = "0.3"
+serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 rust-hdf5 = { workspace = true, optional = true }
@@ -22,4 +23,6 @@ rust-hdf5 = { workspace = true, optional = true }
 hdf5 = ["hklrs/hdf5", "dep:rust-hdf5"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Lua and the registry, to call the Lua methods as the queue server does
+bsrs = { version = "=0.6.2", default-features = false, features = ["host"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

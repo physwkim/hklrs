@@ -450,8 +450,8 @@ impl Diffractometer {
                 deg(l.beta()),
                 deg(l.gamma())
             ]),
-            rows(&sample.u().to_rotation_matrix().into_inner()),
-            rows(&sample.ub()),
+            json!(rows(&sample.u().to_rotation_matrix().into_inner())),
+            json!(rows(&sample.ub())),
             json!(wavelength.angstrom()),
             json!(mode),
         ];
@@ -556,12 +556,8 @@ pub(crate) fn datakey(key: &str, dtype: Dtype, shape: &[u64], units: Option<&str
     )
 }
 
-fn rows(m: &Matrix3<f64>) -> Value {
-    json!(
-        (0..3)
-            .map(|i| [m[(i, 0)], m[(i, 1)], m[(i, 2)]])
-            .collect::<Vec<_>>()
-    )
+pub(crate) fn rows(m: &Matrix3<f64>) -> [[f64; 3]; 3] {
+    [0, 1, 2].map(|i| [m[(i, 0)], m[(i, 1)], m[(i, 2)]])
 }
 
 impl NamedObj for Diffractometer {

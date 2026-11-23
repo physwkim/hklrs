@@ -5,6 +5,7 @@
 
 mod diffractometer;
 mod error;
+mod lua;
 mod plans;
 mod pseudo;
 mod rsm;
@@ -14,6 +15,7 @@ mod samples;
 
 pub use diffractometer::{Diffractometer, RealAxis, WavelengthSource};
 pub use error::DiffError;
+pub use lua::LuaDiffractometer;
 pub use plans::{hkl_list_scan, hkl_scan, mv_hkl, psi_scan, zone_scan};
 pub use pseudo::PseudoAxis;
 pub use rsm::{

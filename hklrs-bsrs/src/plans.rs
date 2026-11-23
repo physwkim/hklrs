@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bsrs::core::msg::{MovableObj, NamedObj, ReadableObj};
-use bsrs::core::{BsrsError, Msg, Plan, plan_box};
+use bsrs::core::{Msg, Plan, plan_box};
 use bsrs::plans::list_scan_nd;
 use bsrs::plans::preprocessors::msg_mutator;
 use bsrs::plans::stubs::mv_many;
@@ -15,6 +15,7 @@ use hklrs::{Lattice, ModeSpec, PARALLEL_SIN};
 use serde_json::{Map, Value, json};
 
 use crate::diffractometer::Snapshot;
+use crate::error::Fault;
 use crate::{DiffError, Diffractometer};
 
 /// `num` points from `start` to `stop`, both included.
@@ -206,19 +207,11 @@ fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     [0, 1, 2].map(|i| lerp(a[i], b[i], t))
 }
 
-#[derive(Debug, thiserror::Error)]
-enum Unprepared {
-    #[error(transparent)]
-    Device(#[from] BsrsError),
-    #[error(transparent)]
-    Diff(#[from] DiffError),
-}
-
 /// The plan `prepare` gives, or a `Fail` naming plan `name` and the error,
 /// before any other message.
 fn once<F>(name: &'static str, prepare: F) -> Plan
 where
-    F: Future<Output = Result<Plan, Unprepared>> + Send + 'static,
+    F: Future<Output = Result<Plan, Fault>> + Send + 'static,
 {
     stream::once(async move {
         prepare.await.unwrap_or_else(|e| {
@@ -299,7 +292,7 @@ fn readers(
 
 /// A data key read by two readers aborts the event bundle mid-run; this
 /// finds it before the run opens.
-async fn check_keys(readers: Vec<Arc<dyn ReadableObj>>) -> Result<(), Unprepared> {
+async fn check_keys(readers: Vec<Arc<dyn ReadableObj>>) -> Result<(), Fault> {
     let mut owners: HashMap<String, String> = HashMap::new();
     for reader in readers {
         let mut keys: Vec<String> = reader.describe_dyn().await?.into_keys().collect();

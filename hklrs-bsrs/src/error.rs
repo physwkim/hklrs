@@ -22,6 +22,8 @@ pub enum DiffError {
     DuplicateAxis { name: String },
     #[error("axis {name:?} has no real")]
     MissingAxis { name: String },
+    #[error("positions give no value for axis {axis:?}")]
+    MissingPosition { axis: String },
     #[error("wavelength signal {signal:?} reads fields {fields:?}, not exactly one")]
     WavelengthFields { signal: String, fields: Vec<String> },
     #[error("wavelength signal {signal:?} reads {value}, not a number")]
@@ -63,6 +65,16 @@ pub enum DiffError {
     Zone { start: [f64; 3], stop: [f64; 3] },
     #[error(transparent)]
     Core(#[from] hklrs::Error),
+}
+
+/// A device read that failed, or a diffractometer error; either's own
+/// message.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Fault {
+    #[error(transparent)]
+    Device(#[from] BsrsError),
+    #[error(transparent)]
+    Diff(#[from] DiffError),
 }
 
 impl From<DiffError> for BsrsError {
