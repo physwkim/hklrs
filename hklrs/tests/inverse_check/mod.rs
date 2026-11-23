@@ -89,6 +89,12 @@ pub fn residuals(
             let ki = ki.normalize();
             (n - ki * n.dot(&ki)).angle(&Vector3::y()) - azimuth
         }
+        Equation::Emergence { surface, emergence } => {
+            let poses = geo.poses(values).unwrap();
+            let n = poses.sample.rotation * surface;
+            let kf = poses.detector.rotation * geo.beam_direction().into_inner();
+            wrap(FRAC_PI_2 - n.cross(&kf).norm().atan2(n.dot(&kf)) - emergence)
+        }
     }));
     Ok(r)
 }

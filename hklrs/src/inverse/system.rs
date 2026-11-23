@@ -207,6 +207,14 @@ impl<'a> System<'a> {
                         d: a.d,
                     }
                 }
+                // sin of the emergence, monotonic on [−π/2, π/2]
+                Equation::Emergence { surface, emergence } => {
+                    let c = fr.sample(&surface.normalize()).dot(&fr.kf);
+                    Scalar {
+                        v: c.v - emergence.sin(),
+                        d: c.d,
+                    }
+                }
             });
         }
         Some(Eval {
@@ -292,6 +300,13 @@ mod tests {
                 e6c::bissector_horizontal(geo).unwrap(),
                 e6c::double_diffraction_horizontal(geo, hkl2).unwrap(),
                 e6c::psi_constant_horizontal(geo, reference, 0.4).unwrap(),
+                Mode::named(geo, "emergence", &["mu", "omega", "gamma", "delta"], |_| {
+                    vec![Equation::Emergence {
+                        surface: Vector3::new(0.2, 1.0, -0.3),
+                        emergence: 0.3,
+                    }]
+                })
+                .unwrap(),
             ],
             "K4CV" => [
                 Eulerian::Omega(0.2),
@@ -389,10 +404,10 @@ mod tests {
     }
 
     /// Analytic Jacobian against a central difference of the residual, for
-    /// every E4C mode, every kind of E6C mode, both ZAXIS modes (mu in both
-    /// stacks), every kappa eulerian row on K4CV and the surface rows on
-    /// K6C, at points away from the wrap cuts of the angular rows and from
-    /// kappa = 0.
+    /// every E4C mode, every kind of E6C mode and an emergence one, both
+    /// ZAXIS modes (mu in both stacks), every kappa eulerian row on K4CV
+    /// and the surface rows on K6C, at points away from the wrap cuts of
+    /// the angular rows and from kappa = 0.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);

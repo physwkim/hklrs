@@ -5,7 +5,7 @@
 
 mod inverse_check;
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, zaxis};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
@@ -424,6 +424,63 @@ fn kappa_mode_construction_errors() {
         Mode::new_kappa(&reversed, "m", [0, 1, 2], &all, chi(0.0)),
         Err(InverseError::KappaAlpha { .. })
     ));
+}
+
+/// An E6C mode on mu, omega, gamma, delta holding the emergence: every
+/// solution leaves the surface at it; ±π/2 are emergences, beyond is an
+/// error.
+#[test]
+fn emergence_is_held_and_bounded() {
+    let geo = preset("E6C").unwrap();
+    let written = ["mu", "omega", "gamma", "delta"].map(|n| geo.axis_index(n).unwrap());
+    let mode = |surface: Vector3<f64>, emergence: f64| {
+        Mode::new(
+            &geo,
+            "emergence",
+            &written,
+            vec![Equation::Emergence { surface, emergence }],
+        )
+    };
+    let surface = Vector3::new(0.2, 1.0, -0.3);
+    let current = geo
+        .values_from_degrees(&[5.0, 10.0, 20.0, 30.0, 15.0, 40.0])
+        .unwrap();
+    let mut solved = 0;
+    for e in [-0.4, 0.1, 0.5] {
+        let m = mode(surface, e).unwrap();
+        for t in TARGETS {
+            let hkl = Vector3::from(t);
+            match request(&m, hkl, &current).solve() {
+                Ok(solutions) => {
+                    solved += solutions.len();
+                    for s in &solutions {
+                        assert_solution(&m, &hkl, &current, s);
+                    }
+                }
+                Err(InverseError::NoSolution) => {}
+                Err(e) => panic!("{hkl}: {e}"),
+            }
+        }
+    }
+    assert!(solved > 0);
+    assert!(mode(surface, FRAC_PI_2).is_ok());
+    assert!(mode(surface, -FRAC_PI_2).is_ok());
+    assert_eq!(
+        mode(surface, next_out(FRAC_PI_2)),
+        Err(InverseError::EmergenceRange {
+            emergence: next_out(FRAC_PI_2)
+        })
+    );
+    assert_eq!(
+        mode(surface, f64::NAN),
+        Err(InverseError::NonFinite { what: "emergence" })
+    );
+    assert_eq!(
+        mode(Vector3::zeros(), 0.1),
+        Err(InverseError::ZeroReference {
+            what: "emergence surface"
+        })
+    );
 }
 
 #[test]

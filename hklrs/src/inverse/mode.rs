@@ -1,3 +1,5 @@
+use std::f64::consts::FRAC_PI_2;
+
 use nalgebra::Vector3;
 
 use super::kappa::{KappaAxes, restrict};
@@ -5,7 +7,8 @@ use super::{InverseError, finite};
 use crate::{Axis, AxisKind, Geometry};
 
 /// An equation a mode adds to the three hkl equations. Angles in rad,
-/// vectors in Miller indices.
+/// vectors in Miller indices but for surface normals, in the sample-holder
+/// frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Equation {
     /// detector ≡ 2·sample (mod 2π), axis indices.
@@ -30,6 +33,13 @@ pub enum Equation {
     /// hkl's azimuth of `normal`, as [`Equation::Incidence`]: the angle from
     /// lab y to n projected normal to k̂i, in [0, π], equals `azimuth`.
     Azimuth { normal: Vector3<f64>, azimuth: f64 },
+    /// k̂f leaves the sample surface, normal `surface` in the sample-holder
+    /// frame (not through UB), at `emergence` ∈ [−π/2, π/2]: π/2 minus the
+    /// angle from the lab surface normal to k̂f.
+    Emergence {
+        surface: Vector3<f64>,
+        emergence: f64,
+    },
 }
 
 /// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
@@ -149,6 +159,17 @@ impl Equation {
             } => {
                 reference(normal, "surface normal")?;
                 finite(&[*angle], "surface angle")
+            }
+            Self::Emergence { surface, emergence } => {
+                reference(surface, "emergence surface")?;
+                finite(&[*emergence], "emergence")?;
+                if emergence.abs() <= FRAC_PI_2 {
+                    Ok(())
+                } else {
+                    Err(InverseError::EmergenceRange {
+                        emergence: *emergence,
+                    })
+                }
             }
         }
     }

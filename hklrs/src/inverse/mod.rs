@@ -82,6 +82,8 @@ pub enum InverseError {
     NotInStack { name: String, holder: &'static str },
     #[error("{written} written axes need {written} equations, the mode has {equations}")]
     EquationCount { written: usize, equations: usize },
+    #[error("emergence {emergence} rad is outside [-π/2, π/2]")]
+    EmergenceRange { emergence: f64 },
     #[error("psi is undefined: Q, k̂f × k̂i or the reference projected normal to Q is null")]
     PsiUndefined,
     #[error("kappa arm tilt alpha = {alpha} rad is outside (0, π/2]")]
