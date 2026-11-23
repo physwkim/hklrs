@@ -1,5 +1,5 @@
 //! The diffractometer device: the reals that drive each geometry axis, the
-//! wavelength and the samples, read as one reading set with h, k, l.
+//! wavelength and the samples, read as one reading set with h, k, l and ψ.
 
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::{PI, TAU};
@@ -15,8 +15,8 @@ use futures::future::{join_all, try_join_all};
 use futures::try_join;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::{
-    AxisKind, Deg, Geometry, InverseRequest, Lattice, Mode, ModeParameters, ModeSpec, Orientation,
-    Picker, Reflection, Sample, Target, Wavelength, forward,
+    AxisKind, Deg, Geometry, InverseError, InverseRequest, Lattice, Mode, ModeParameters, ModeSpec,
+    Orientation, Picker, Reflection, Sample, Target, Wavelength, forward,
 };
 use serde_json::{Value, json};
 
@@ -174,6 +174,29 @@ impl State {
         }
     }
 
+    /// `component` at the readbacks `current` as [`State::locate`] reads it
+    /// back, but NaN where it has no value: ψ outside a psi mode or where it
+    /// is undefined, which `locate` refuses.
+    fn reading(
+        &self,
+        component: Component,
+        current: &[f64],
+        wavelength: Wavelength,
+    ) -> Result<f64, DiffError> {
+        match self.locate(component, current, wavelength) {
+            Ok(location) => Ok(location.readback),
+            Err(
+                DiffError::NoMode { .. }
+                | DiffError::NoPsi { .. }
+                | DiffError::Psi {
+                    source: InverseError::PsiUndefined,
+                    ..
+                },
+            ) => Ok(f64::NAN),
+            Err(e) => Err(e),
+        }
+    }
+
     fn set_wavelength(&mut self, wavelength: Wavelength) -> Result<(), DiffError> {
         match &self.wavelength {
             WavelengthSource::Fixed(_) => {
@@ -267,6 +290,17 @@ pub(crate) fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
 
 /// The one psi mode of [`ModeSpec::names`] `geometry` builds.
 pub(crate) fn psi_mode(geometry: &Geometry) -> Result<String, DiffError> {
+    match <[String; 1]>::try_from(psi_modes(geometry)) {
+        Ok([one]) => Ok(one),
+        Err(candidates) => Err(DiffError::PsiMode {
+            geometry: geometry.name().to_owned(),
+            candidates,
+        }),
+    }
+}
+
+/// The psi modes `geometry` builds.
+fn psi_modes(geometry: &Geometry) -> Vec<String> {
     // a psi mode refuses a geometry by its axes, whatever the reference
     let builds = |name: &&str| {
         let mode = ModeSpec {
@@ -275,18 +309,11 @@ pub(crate) fn psi_mode(geometry: &Geometry) -> Result<String, DiffError> {
         };
         mode.build(geometry).is_ok()
     };
-    let candidates: Vec<String> = ModeSpec::names()
+    ModeSpec::names()
         .filter(|&name| ModeSpec::parameters(name) == Some(ModeParameters::Psi))
         .filter(builds)
         .map(str::to_owned)
-        .collect();
-    match <[String; 1]>::try_from(candidates) {
-        Ok([one]) => Ok(one),
-        Err(candidates) => Err(DiffError::PsiMode {
-            geometry: geometry.name().to_owned(),
-            candidates,
-        }),
-    }
+        .collect()
 }
 
 /// [`Diffractometer::set_limits`] on `geometry`.
@@ -382,6 +409,15 @@ pub(crate) enum Component {
     Psi,
 }
 
+impl Component {
+    pub(crate) fn units(self) -> Option<&'static str> {
+        match self {
+            Component::Hkl(_) => None,
+            Component::Psi => Some("deg"),
+        }
+    }
+}
+
 /// Where a [`Diffractometer::move_to`] goes.
 pub(crate) enum Setpoint {
     /// One component replaced, the others kept: h, k or l in the hkl
@@ -406,6 +442,10 @@ pub struct Diffractometer {
     /// refuses while it is set. Set by [`Diffractometer::claim`] and cleared
     /// when its [`Scanning`] drops.
     scan: std::sync::Mutex<Option<&'static str>>,
+    /// The reading's ψ key, on a geometry with a psi mode. Fixed at
+    /// construction, so a mode change cannot change the reading's keys
+    /// during a run.
+    psi_key: Option<String>,
 }
 
 /// A scan's hold on the reals, from before it reads the readbacks it solves
@@ -457,6 +497,7 @@ impl Diffractometer {
             })
             .collect::<Result<_, _>>()?;
         let mode = default_mode(&geometry);
+        let psi_key = (!psi_modes(&geometry).is_empty()).then(|| format!("{name}_psi"));
         Ok(Self {
             name: name.to_owned(),
             reals,
@@ -469,6 +510,7 @@ impl Diffractometer {
             }),
             moving: futures::lock::Mutex::new(()),
             scan: std::sync::Mutex::new(None),
+            psi_key,
         })
     }
 
@@ -736,6 +778,12 @@ impl Diffractometer {
         Ok(self.state().locate(component, &current, wavelength)?)
     }
 
+    /// `component` at the readbacks for a reading: NaN where it has no value.
+    pub(crate) async fn reading(&self, component: Component) -> Result<f64, BsrsError> {
+        let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
+        Ok(self.state().reading(component, &current, wavelength)?)
+    }
+
     /// Delivers a pause's stop to every real.
     pub(crate) async fn stop_reals(&self, success: bool) -> Result<(), BsrsError> {
         try_join_all(self.reals.iter().map(|r| r.stop_on_pause(success))).await?;
@@ -815,13 +863,22 @@ impl NamedObj for Diffractometer {
 #[async_trait]
 impl ReadableObj for Diffractometer {
     /// Every axis readback and the h, k, l computed from those same
-    /// readbacks.
+    /// readbacks, and on a geometry with a psi mode ψ as the ψ axis reads
+    /// it.
     async fn read_dyn(&self) -> Result<HashMap<String, ReadingValue>, BsrsError> {
         let (positions, wavelength) = futures::try_join!(self.positions(), self.wavelength())?;
-        let hkl = self.hkl(&positions, wavelength)?;
+        let (hkl, psi) = {
+            let state = self.state();
+            let psi = self
+                .psi_key
+                .as_ref()
+                .map(|_| state.reading(Component::Psi, &positions, wavelength));
+            (state.hkl(&positions, wavelength)?, psi.transpose()?)
+        };
         let t = now();
-        let values = positions.iter().chain(hkl.iter());
+        let values = positions.iter().chain(hkl.iter()).chain(psi.iter());
         let keys = self.axis_keys().into_iter().chain(self.hkl_keys());
+        let keys = keys.chain(self.psi_key.clone());
         Ok(keys
             .zip(values)
             .map(|(k, &v)| (k, ReadingValue::new(json!(v), t)))
@@ -838,9 +895,12 @@ impl ReadableObj for Diffractometer {
             };
             (self.key(a.name()), units)
         });
-        let hkl = self.hkl_keys().into_iter().map(|k| (k, None));
+        let hkl = self.hkl_keys().into_iter().zip(0..);
+        let hkl = hkl.map(|(k, i)| (k, Component::Hkl(i).units()));
+        let psi = self.psi_key.clone().map(|k| (k, Component::Psi.units()));
         Ok(axes
             .chain(hkl)
+            .chain(psi)
             .map(|(k, units)| {
                 let key = datakey(&k, Dtype::Number, &[], units);
                 (k, key)

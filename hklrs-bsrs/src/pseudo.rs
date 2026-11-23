@@ -38,7 +38,8 @@ impl Diffractometer {
     /// keep it; the readback is ψ about the mode's reference. The setpoint
     /// is kept as given and the readback is taken on its branch, within
     /// 180° of it: a set to 200° reads back 200°, not −160°. Outside a psi
-    /// mode the axis refuses to move or be located.
+    /// mode the axis refuses to move or be located and reads NaN, as it
+    /// does where ψ is undefined.
     pub fn psi_axis(self: &Arc<Self>) -> PseudoAxis {
         PseudoAxis {
             dx: self.clone(),
@@ -119,13 +120,13 @@ impl LocatableObj for PseudoAxis {
 #[async_trait]
 impl ReadableObj for PseudoAxis {
     async fn read_dyn(&self) -> Result<HashMap<String, ReadingValue>, BsrsError> {
-        let readback = self.locate_dyn().await?.readback;
+        let readback = self.dx.reading(self.component).await?;
         let value = ReadingValue::new(json!(readback), now());
         Ok(HashMap::from([(self.name.clone(), value)]))
     }
 
     async fn describe_dyn(&self) -> Result<HashMap<String, DataKey>, BsrsError> {
-        let key = datakey(&self.name, Dtype::Number, &[], None);
+        let key = datakey(&self.name, Dtype::Number, &[], self.component.units());
         Ok(HashMap::from([(self.name.clone(), key)]))
     }
 }
