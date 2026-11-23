@@ -101,6 +101,18 @@ fn psi(kf: &Vec3, ki: &Vec3, reference: &Vec3) -> Option<Scalar> {
     Some(Scalar::atan2(&qn.dot(&n.cross(&p)), &n.dot(&p)))
 }
 
+/// The angle of `v` about k̂i from lab y, both projected normal to k̂i,
+/// right-handed about k̂i; `None` where either lies along k̂i.
+fn beam_azimuth(v: &Vec3, ki: &Vec3) -> Option<Scalar> {
+    let p = v.sub(&ki.scaled(&v.dot(ki)));
+    let y = Vec3::constant(Vector3::y(), ki.d.len());
+    let r = y.sub(&ki.scaled(&y.dot(ki)));
+    if p.v.norm() <= NULL * v.v.norm() || r.v.norm() <= NULL {
+        return None;
+    }
+    Some(Scalar::atan2(&ki.dot(&r.cross(&p)), &r.dot(&p)))
+}
+
 /// ψ of the sample-frame vector `reference` at `values`.
 pub(super) fn psi_at(
     geometry: &Geometry,
@@ -276,6 +288,20 @@ impl<'a> System<'a> {
                         d: c.d,
                     }
                 }
+                Equation::Qaz { qaz } => {
+                    let a = beam_azimuth(&fr.kf.sub(&fr.ki), &fr.ki)?;
+                    Scalar {
+                        v: wrap(a.v - qaz),
+                        d: a.d,
+                    }
+                }
+                Equation::Naz { normal, naz } => {
+                    let a = beam_azimuth(&fr.sample(normal), &fr.ki)?;
+                    Scalar {
+                        v: wrap(a.v - naz),
+                        d: a.d,
+                    }
+                }
             });
         }
         Some(Eval {
@@ -396,6 +422,21 @@ mod tests {
                     }]
                 })
                 .unwrap(),
+                Mode::named(
+                    geo,
+                    "qaz naz",
+                    &["mu", "omega", "chi", "phi", "gamma"],
+                    |_| {
+                        vec![
+                            Equation::Qaz { qaz: 0.4 },
+                            Equation::Naz {
+                                normal: reference,
+                                naz: -2.1,
+                            },
+                        ]
+                    },
+                )
+                .unwrap(),
             ],
             "K4CV" => [
                 Eulerian::Omega(0.2),
@@ -493,7 +534,8 @@ mod tests {
     }
 
     /// Analytic Jacobian against a central difference of the residual, for
-    /// every E4C mode, every kind of E6C mode and an emergence one, both
+    /// every E4C mode, every kind of E6C mode, an emergence one and one per
+    /// You constraint (qaz with naz), both
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
     /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
     /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa

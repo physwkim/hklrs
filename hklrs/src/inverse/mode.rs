@@ -40,6 +40,13 @@ pub enum Equation {
         surface: Vector3<f64>,
         emergence: f64,
     },
+    /// The azimuth of Q = k̂f − k̂i about k̂i, from lab y projected normal to
+    /// k̂i and right-handed about k̂i, in (−π, π], equals `qaz`: You's qaz
+    /// on E6C.
+    Qaz { qaz: f64 },
+    /// [`Equation::Azimuth`] signed as [`Equation::Qaz`], in (−π, π]: You's
+    /// naz of the reference vector `normal` on E6C.
+    Naz { normal: Vector3<f64>, naz: f64 },
 }
 
 /// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
@@ -184,10 +191,12 @@ impl Equation {
             | Self::Azimuth {
                 normal,
                 azimuth: angle,
-            } => {
+            }
+            | Self::Naz { normal, naz: angle } => {
                 reference(normal, "surface normal")?;
                 finite(&[*angle], "surface angle")
             }
+            Self::Qaz { qaz } => finite(&[*qaz], "qaz"),
             Self::Emergence { surface, emergence } => {
                 reference(surface, "emergence surface")?;
                 finite(&[*emergence], "emergence")?;
