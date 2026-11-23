@@ -116,19 +116,21 @@ fn weights(shape: (usize, usize), [data]: [Vec<f64>; 1]) -> Weights {
 }
 
 /// Solid angle of each pixel, sr: `|(e_slow × e_fast) · k̂f| / |p|²`, with
-/// the pixel area vector rotated by the detector pose. Needs a detector of
-/// at least 2×2 pixels to know its pixel steps.
+/// the pixel area vector rotated by the detector pose. A detector whose
+/// steps span no area (a point, or a linear detector built with a zero
+/// `e_slow` rather than a pixel height) has none and gets
+/// [`Error::NoPixelArea`].
 pub fn solid_angle(
     geometry: &Geometry,
     frame: &Frame,
     detector: &PixelDetector,
 ) -> Result<Weights, Error> {
     let shape = detector.shape();
-    if shape.0 < 2 || shape.1 < 2 {
+    let area = detector.e_slow().cross(&detector.e_fast());
+    let norm = area.norm();
+    if norm.is_nan() || norm <= 0.0 {
         return Err(Error::NoPixelArea { shape });
     }
-    let origin = detector.pixel(0, 0)?;
-    let area = (detector.pixel(1, 0)? - origin).cross(&(detector.pixel(0, 1)? - origin));
     let data = fill(geometry, frame, detector, |poses, p, s| {
         [(poses.detector.rotation * area).dot(&s.kf).abs() / p.norm_squared()]
     })?;
@@ -417,6 +419,38 @@ mod tests {
         let w = solid_angle(&g, &f, &flat(d, a, b)).unwrap();
         let normal = a * b / (d * d);
         assert!((w.get(0, 0) - normal).abs() < 1e-12 * normal);
+    }
+
+    #[test]
+    fn solid_angle_of_a_linear_detector_uses_its_row_height() {
+        let g = om_only();
+        let f = Frame {
+            values: vec![0.0],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        let (d, h, b) = (0.4_f64, 5e-3, 2e-3);
+        // one row along y, pixel height h along z
+        let row = |e_slow| {
+            PixelDetector::new(
+                (1, 4),
+                Vector3::new(d, 0.0, 0.0),
+                e_slow,
+                Vector3::new(0.0, b, 0.0),
+            )
+            .unwrap()
+        };
+        let w = solid_angle(&g, &f, &row(Vector3::new(0.0, 0.0, h))).unwrap();
+        assert_eq!(w.shape(), (1, 4));
+        let normal = h * b / (d * d);
+        assert!((w.get(0, 0) - normal).abs() < 1e-12 * normal);
+        let r2 = d * d + (3.0 * b).powi(2);
+        let tilted = h * b * d / r2.powf(1.5);
+        assert!((w.get(0, 3) - tilted).abs() < 1e-12 * tilted);
+        // built with a zero e_slow it has no height to give
+        assert_eq!(
+            solid_angle(&g, &f, &row(Vector3::zeros())),
+            Err(Error::NoPixelArea { shape: (1, 4) })
+        );
     }
 
     #[test]
