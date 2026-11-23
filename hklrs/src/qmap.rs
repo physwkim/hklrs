@@ -10,8 +10,8 @@ use rayon::prelude::*;
 
 use crate::absorption::{Absorber, Attenuation, Masked, SlabFrame, Weight};
 use crate::{
-    Error, Geometry, PixelDetector, Poses, Wavelength, detector_position, scattered_direction,
-    scattering_at,
+    Error, Geometry, Image, PixelDetector, Poses, Wavelength, detector_position,
+    scattered_direction, scattering_at,
 };
 
 /// Three contiguous f64 planes (x, y, z), row-major (slow, fast).
@@ -140,36 +140,27 @@ impl Weights {
         self.data[slow * self.shape.1 + fast]
     }
 
-    /// Weights given as numbers, row-major over `shape`: where `reasons`
+    /// Weights given as numbers: where `reasons`, of the shape of `values`,
     /// has a [`Masked`] the pixel has that reason, elsewhere its value,
     /// which must be positive and finite or the pixel is [`Masked::Opaque`].
     pub fn from_values(
-        shape: (usize, usize),
-        values: &[f64],
-        reasons: &[Option<Masked>],
+        values: &Image<f64>,
+        reasons: &Image<Option<Masked>>,
     ) -> Result<Self, Error> {
-        let expected = shape.0 * shape.1;
-        for (what, len) in [
-            ("weight values", values.len()),
-            ("weight reasons", reasons.len()),
-        ] {
-            if len != expected {
-                return Err(Error::PixelCount {
-                    what,
-                    len,
-                    expected,
-                });
-            }
-        }
+        reasons.check("weight reasons", values.shape())?;
         let data = values
+            .data()
             .iter()
-            .zip(reasons)
+            .zip(reasons.data())
             .map(|(&v, r)| match r {
                 Some(m) => Err(*m),
                 None => Weight::new(v, Masked::Opaque),
             })
             .collect();
-        Ok(Self { shape, data })
+        Ok(Self {
+            shape: values.shape(),
+            data,
+        })
     }
 }
 
@@ -333,6 +324,27 @@ mod tests {
             Lattice::cubic(4.0).unwrap(),
             Orientation::from_u_matrix(&nalgebra::Matrix3::identity()).unwrap(),
         )
+    }
+
+    /// Reasons of the transposed shape have the values' pixel count.
+    #[test]
+    fn from_values_refuses_reasons_of_another_shape() {
+        let values = Image::new((1, 3), vec![1.0, 2.0, 0.0]).unwrap();
+        let reasons = Image::new((3, 1), vec![None; 3]).unwrap();
+        assert_eq!(
+            Weights::from_values(&values, &reasons),
+            Err(Error::ShapeMismatch {
+                what: "weight reasons",
+                shape: (3, 1),
+                expected: (1, 3)
+            })
+        );
+        let reasons = Image::new((1, 3), vec![None, Some(Masked::EdgeOn), None]).unwrap();
+        let w = Weights::from_values(&values, &reasons).unwrap();
+        assert_eq!(w.shape(), (1, 3));
+        assert_eq!(w.get(0, 0), Weight::new(1.0, Masked::Opaque));
+        assert_eq!(w.get(0, 1), Err(Masked::EdgeOn));
+        assert_eq!(w.get(0, 2), Err(Masked::Opaque));
     }
 
     #[test]

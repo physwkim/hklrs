@@ -718,7 +718,8 @@ mod tests {
         let n = Normaliser::new(PixelFields::new((1, 3)), r).unwrap();
         let (g, f) = geometry_frame();
         let other = solid_angle(&g, &f, &detector((1, 2))).unwrap();
-        let transposed = Weights::from_values((3, 1), &[1.0; 3], &[None; 3]).unwrap();
+        let transposed =
+            Weights::from_values(&image((3, 1), &[1.0; 3]), &image((3, 1), &[None; 3])).unwrap();
         for (w, shape) in [(other, (1, 2)), (transposed, (3, 1))] {
             assert_eq!(
                 n.normalise(&ones, &FrameScalars::new(), &[&w]),
@@ -826,7 +827,11 @@ mod tests {
         use crate::grid::Binning;
         let det = detector((1, 4));
         let (_, red) = Region::new(0..1, 0..4, (1, 1)).apply(&det).unwrap();
-        let w = Weights::from_values((1, 4), &[2.0, 0.5, 4.0, 1.25], &[None; 4]).unwrap();
+        let w = Weights::from_values(
+            &image((1, 4), &[2.0, 0.5, 4.0, 1.25]),
+            &image((1, 4), &[None; 4]),
+        )
+        .unwrap();
         let raw = [10.0, 3.0, 7.0, 9.0];
         let scalars = FrameScalars::new()
             .monitor(500.0, 1000.0)

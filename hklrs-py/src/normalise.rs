@@ -2,9 +2,9 @@
 //! weight and a reason code (0 = has a value), as `solid_angle` does;
 //! counts and weight are NaN where masked.
 
-use hklrs::Weights;
 use hklrs::absorption::Masked;
 use hklrs::normalise as core;
+use hklrs::{Image, Weights};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -130,14 +130,15 @@ impl PyRegion {
     }
 }
 
-/// The weights of `solid_angle` and `polarisation`: (values, reasons).
+/// The weights of `solid_angle` and `polarisation`: (values, reasons), each
+/// of its own shape.
 fn geometric(
     (values, reasons): (PyReadonlyArray2<'_, f64>, PyReadonlyArray2<'_, u8>),
 ) -> PyResult<Weights> {
-    let shape = (values.shape()[0], values.shape()[1]);
-    let reasons = plane_u8(&reasons, shape)?
-        .into_iter()
-        .map(|c| match c {
+    let codes = reasons
+        .as_array()
+        .iter()
+        .map(|&c| match c {
             0 => Ok(None),
             c => MASKED
                 .iter()
@@ -146,18 +147,8 @@ fn geometric(
                 .ok_or_else(|| PyValueError::new_err(format!("{c} is not a reason code"))),
         })
         .collect::<PyResult<Vec<Option<Masked>>>>()?;
-    let values: Vec<f64> = values.as_array().iter().copied().collect();
-    Weights::from_values(shape, &values, &reasons).map_err(err)
-}
-
-fn plane_u8(a: &PyReadonlyArray2<'_, u8>, shape: (usize, usize)) -> PyResult<Vec<u8>> {
-    if a.shape() != [shape.0, shape.1] {
-        return Err(PyValueError::new_err(format!(
-            "reasons shape {:?} does not match the values' {shape:?}",
-            a.shape()
-        )));
-    }
-    Ok(a.as_array().iter().copied().collect())
+    let reasons = Image::new((reasons.shape()[0], reasons.shape()[1]), codes).map_err(err)?;
+    Weights::from_values(&image(&values)?, &reasons).map_err(err)
 }
 
 /// The per-pixel stages of one region of one detector: `Normaliser(fields,
