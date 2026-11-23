@@ -1,6 +1,7 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
 //! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C, the SOLEIL SIXS MED
-//! presets and SOLEIL MARS.
+//! presets, SOLEIL MARS and APS POLAR but its "zaxis + beta-fixed", which hkl
+//! solves over other axes (see `aps_04id_polar::zaxis_beta_fixed`).
 //!
 //! Per case: the mode writes hkl's axes, its slits hkl's fitted axis; every
 //! hkl solution within VIOLATION
@@ -19,7 +20,9 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, k4c, k6c, soleil_sixs_med, zaxis};
+use hklrs::inverse::{
+    aps_04id_polar as polar, e4c, e6c, esrf_bm28_psic, k4c, k6c, soleil_sixs_med, zaxis,
+};
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength};
@@ -112,6 +115,18 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         "pitch_fixed" => soleil_sixs_med::pitch_fixed(geo),
         "delta_fixed" => soleil_sixs_med::delta_fixed(geo),
         "gamma_fixed" => soleil_sixs_med::gamma_fixed(geo),
+        "4-circles constant phi horizontal" => polar::constant_phi_horizontal(geo),
+        "zaxis + alpha-fixed" => polar::zaxis_alpha_fixed(geo),
+        "zaxis + alpha=beta" => polar::zaxis_alpha_eq_beta(geo),
+        "4-circles bissecting horizontal" => polar::bissecting_horizontal(geo),
+        "4-circles constant mu horizontal" => polar::constant_mu_horizontal(geo),
+        "4-circles constant chi horizontal" => polar::constant_chi_horizontal(geo),
+        "lifting detector tau" => polar::lifting_detector_tau(geo),
+        "lifting detector mu" => polar::lifting_detector_mu(geo),
+        "lifting detector chi" => polar::lifting_detector_chi(geo),
+        "lifting detector phi" => polar::lifting_detector_phi(geo),
+        "psi constant horizontal" => polar::psi_constant_horizontal(geo, hkl2(), psi()),
+        "psi constant vertical" => polar::psi_constant_vertical(geo, hkl2(), psi()),
         m => panic!("mode {m}"),
     }
     .unwrap();
@@ -464,4 +479,16 @@ golden! {
     mars_constant_phi: "SOLEIL MARS" "constant_phi",
     mars_double_diffraction: "SOLEIL MARS" "double_diffraction",
     mars_psi_constant: "SOLEIL MARS" "psi_constant",
+    polar_constant_phi_horizontal: "APS POLAR" "4-circles constant phi horizontal",
+    polar_zaxis_alpha_fixed: "APS POLAR" "zaxis + alpha-fixed",
+    polar_zaxis_alpha_eq_beta: "APS POLAR" "zaxis + alpha=beta",
+    polar_bissecting_horizontal: "APS POLAR" "4-circles bissecting horizontal",
+    polar_constant_mu_horizontal: "APS POLAR" "4-circles constant mu horizontal",
+    polar_constant_chi_horizontal: "APS POLAR" "4-circles constant chi horizontal",
+    polar_lifting_detector_tau: "APS POLAR" "lifting detector tau",
+    polar_lifting_detector_mu: "APS POLAR" "lifting detector mu",
+    polar_lifting_detector_chi: "APS POLAR" "lifting detector chi",
+    polar_lifting_detector_phi: "APS POLAR" "lifting detector phi",
+    polar_psi_constant_horizontal: "APS POLAR" "psi constant horizontal",
+    polar_psi_constant_vertical: "APS POLAR" "psi constant vertical",
 }
