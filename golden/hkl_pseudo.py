@@ -2,7 +2,8 @@
 Run: python -I hkl_pseudo.py
 
 Engines of hkl/hkl-pseudoaxis-common-q.c: "q" (E4CV, E4CH, K4CV, MARS),
-"q2" (q, alpha), "tth2" (tth, alpha; common-tth.c) and "qper_qpar" (parameters x, y, z = surface normal in the
+"q2" (q, alpha), "tth2" (tth, alpha; common-tth.c), "qper_qpar", and "incidence"/"emergence"
+(common-readonly.c) (parameters x, y, z = surface normal in the
 sample frame) on every other preset that carries them. Per case the axes are
 set, engine_list.get() is called and the engine's pseudo values are recorded
 in hkl's user units (alpha in degrees), with an independent numpy forward
@@ -28,8 +29,9 @@ WL = 1.54
 N_RANDOM = 40
 UNIT = {"Degree": ("rot", 1.0), "Milli Radian": ("rot", math.pi / 180.0 * 1000.0),
         "Milli Meter": ("trans", 1.0), "Meter": ("trans", 1e-3)}
-ENGINES = ("q", "q2", "qper_qpar", "tth2")
-NORMALS = [(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 0.0), (-1.0, 2.0, 1.0)]
+ENGINES = ("q", "q2", "qper_qpar", "tth2", "incidence", "emergence")
+NORMALS = [(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 0.0), (-1.0, 2.0, 1.0), (0.0, 3.0, 4.0)]
+AZ_MIN = 1e-9  # |projection of the unit normal| below which azimuth is None (undefined)
 
 
 def mat(m):
@@ -58,6 +60,20 @@ def numpy_pseudo(geo, smp, det, n):
         out["qper"] = float(np.linalg.norm(qper_v)) * (-1 if qv @ nn < 0 else 1)
         out["qpar"] = float(np.linalg.norm(qpar_v)) * (-1 if qv @ npar < 0 else 1)
         out["qpar_sign_dot"] = float(qv @ npar)
+
+        def ang(a, b):
+            return math.atan2(np.linalg.norm(np.cross(a, b)), a @ b)
+
+        def az(nv, normal):
+            pr = nv - (nv @ normal) * normal
+            return math.degrees(ang(pr, np.array([0.0, 1, 0]))) if np.linalg.norm(pr) > AZ_MIN else None
+        x = np.array([1.0, 0, 0])
+        ki_u = ki / k
+        kf_u = kf / k
+        out["incidence"] = math.degrees(ang(nn, ki_u) - math.pi / 2)
+        out["emergence"] = math.degrees(math.pi / 2 - ang(nn, kf_u))
+        out["azimuth_incidence"] = az(nn, ki_u)
+        out["azimuth_emergence"] = az(nn, x)
     return out
 
 
@@ -95,7 +111,7 @@ def main():
         for canon in starts:
             for ename, eng in found.items():
                 params_list = [None]
-                if ename == "qper_qpar":
+                if ename in ("qper_qpar", "incidence", "emergence"):
                     params_list = [list(n) for n in NORMALS]
                 for params in params_list:
                     set_axes(canon)
@@ -110,7 +126,7 @@ def main():
                             "numpy": numpy_pseudo(geo, smp, det, params)}
                     cases.append(case)
     with open(OUT, "w") as f:
-        json.dump({"hkl_version": "5.1.9", "seed": SEED, "cases": cases}, f, indent=1)
+        json.dump({"hkl_version": "5.1.9", "seed": SEED, "cases": cases}, f, separators=(",", ":"))
     print(len(cases), "cases")
 
 
