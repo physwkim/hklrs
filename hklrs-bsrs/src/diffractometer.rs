@@ -778,6 +778,19 @@ impl Diffractometer {
         Ok(self.state().locate(component, &current, wavelength)?)
     }
 
+    /// h, k, l and, on a geometry with a psi mode, ψ at `current` under one
+    /// state, as the reading carries them: ψ is NaN where it has no value.
+    pub(crate) fn pseudos(
+        &self,
+        current: &[f64],
+        wavelength: Wavelength,
+    ) -> Result<(Vector3<f64>, Option<f64>), DiffError> {
+        let state = self.state();
+        let psi = self.psi_key.as_ref();
+        let psi = psi.map(|_| state.reading(Component::Psi, current, wavelength));
+        Ok((state.hkl(current, wavelength)?, psi.transpose()?))
+    }
+
     /// `component` at the readbacks for a reading: NaN where it has no value.
     pub(crate) async fn reading(&self, component: Component) -> Result<f64, BsrsError> {
         let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
@@ -867,14 +880,7 @@ impl ReadableObj for Diffractometer {
     /// it.
     async fn read_dyn(&self) -> Result<HashMap<String, ReadingValue>, BsrsError> {
         let (positions, wavelength) = futures::try_join!(self.positions(), self.wavelength())?;
-        let (hkl, psi) = {
-            let state = self.state();
-            let psi = self
-                .psi_key
-                .as_ref()
-                .map(|_| state.reading(Component::Psi, &positions, wavelength));
-            (state.hkl(&positions, wavelength)?, psi.transpose()?)
-        };
+        let (hkl, psi) = self.pseudos(&positions, wavelength)?;
         let t = now();
         let values = positions.iter().chain(hkl.iter()).chain(psi.iter());
         let keys = self.axis_keys().into_iter().chain(self.hkl_keys());

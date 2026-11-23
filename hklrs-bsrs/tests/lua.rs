@@ -6,6 +6,7 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 use std::sync::Arc;
 
 use bsrs::backends::soft::SoftMotor;
+use bsrs::core::msg::{MovableObj, NamedObj, ReadableObj};
 use bsrs::engine::RunEngine;
 use bsrs::host::manager_lua::ManagerLuaState;
 use bsrs::qs::{LuaEvaluator, Registry};
@@ -13,6 +14,7 @@ use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Lattice, ModeSpec, Orientation, Sample, Wavelength};
 use hklrs_bsrs::{Diffractometer, LuaDiffractometer, RealAxis, WavelengthSource};
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 const AXES: [&str; 4] = ["omega", "chi", "phi", "tth"];
@@ -34,10 +36,12 @@ fn e4cv(at: [f64; 4], u: UnitQuaternion<f64>) -> Arc<Diffractometer> {
     Arc::new(dx.unwrap())
 }
 
+/// A Lua state with `dx` registered under its name.
 fn lua(dx: &Arc<Diffractometer>) -> ManagerLuaState {
     let mut registry = Registry::new();
-    registry.register_readable("e4cv", dx.clone());
-    registry.register_lua_methods("e4cv", Arc::new(LuaDiffractometer::new(dx.clone())));
+    registry.register_readable(dx.name(), dx.clone());
+    let methods = Arc::new(LuaDiffractometer::new(dx.clone()));
+    registry.register_lua_methods(dx.name(), methods);
     let engine = Some(Arc::new(RunEngine::new(vec![])));
     ManagerLuaState::new(Arc::new(Mutex::new(engine)), Arc::new(registry))
 }
@@ -163,6 +167,64 @@ async fn forward_inverse_ca_and_wh_agree_with_the_device() {
     assert_close(&wh[..3], &at_start);
     assert_close(&wh[3..7], &start);
     assert_close(&wh[7..], &[LAMBDA]);
+}
+
+/// The reading's ψ.
+async fn psi_reading(dx: &Diffractometer) -> Value {
+    dx.read_dyn().await.unwrap()["e4cv_psi"].value.clone()
+}
+
+/// wh's ψ is the reading's: a number where the reading has one, nil where
+/// it has NaN.
+#[tokio::test(flavor = "multi_thread")]
+async fn wh_carries_psi_as_the_reading_does() {
+    let dx = e4cv([30.0, 0.0, 0.0, 60.0], UnitQuaternion::identity());
+    let lua = lua(&dx);
+    // bissector has no ψ
+    assert_eq!(psi_reading(&dx).await, Value::Null);
+    ok(&lua, "assert(e4cv:wh().psi == nil)").await;
+    // Q at (0, 0, 1) lies along the reference: ψ is undefined
+    ok(
+        &lua,
+        r#"e4cv:set_mode("psi_constant", {psi = {reference = {0, 0, 1}, angle = 30}})"#,
+    )
+    .await;
+    assert_eq!(psi_reading(&dx).await, Value::Null);
+    ok(&lua, "assert(e4cv:wh().psi == nil)").await;
+
+    let [h, ..] = dx.hkl_axes();
+    h.set_dyn(1.0).await.await.unwrap();
+    dx.psi_axis().set_dyn(200.0).await.await.unwrap();
+    let psi = numbers(&lua, "e4cv:wh().psi").await;
+    assert_eq!(psi, [psi_reading(&dx).await.as_f64().unwrap()]);
+    // on the setpoint's branch, as the reading has it
+    assert_close(&psi, &[200.0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wh_has_no_psi_on_a_geometry_without_a_psi_mode() {
+    let geometry = preset("ZAXIS").unwrap();
+    let reals = geometry.axes().iter().map(|a| {
+        let real = Arc::new(SoftMotor::new(a.name(), Some(0.0))) as Arc<dyn RealAxis>;
+        (a.name(), real)
+    });
+    let reals = reals.collect();
+    let sample = Sample::new(
+        "cubic",
+        Lattice::cubic(LAMBDA).unwrap(),
+        Orientation::Manual {
+            u: UnitQuaternion::identity(),
+        },
+    );
+    let wavelength = WavelengthSource::Fixed(Wavelength::new(LAMBDA).unwrap());
+    let dx = Diffractometer::new("zaxis", geometry.clone(), reals, wavelength, sample);
+    let dx = Arc::new(dx.unwrap());
+    let lua = lua(&dx);
+    ok(
+        &lua,
+        "local w = zaxis:wh() assert(w.psi == nil and #w.hkl == 3)",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
