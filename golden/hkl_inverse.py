@@ -12,7 +12,7 @@ ctypes so the output is reproducible.
 Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c (E4CV, E4CH and
 SOLEIL MARS), -e6c.c, -k4c.c,
 -k6c.c, -zaxis.c, -aps-04id-polar.c, -petra3-p09-eh2.c, -petra3-p23-4c.c,
-hkl-pseudoaxis-common-hkl.c (_double_diffraction,
+-petra3-p23-6c.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
 _psi_constant_*, _emergence_fixed_func), -soleil-sixs-med.c; the ESRF BM28
 and ID01 PSIC modes only hold axes. SOLEIL SIXS MED2+3, and MED2+3 v2 with
 its engine-list parameter eta_a_rotation = 1, refit eta_a after the solve
@@ -45,7 +45,8 @@ HKL_EPSILON = 1e-6  # hkl.h:49
 GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
               "ESRF ID01 PSIC", "SOLEIL SIXS MED2+2", "SOLEIL SIXS MED1+2",
               "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS",
-              "APS POLAR", "PETRA3 P09 EH2", "PETRA3 P23 4C"]
+              "APS POLAR", "PETRA3 P09 EH2", "PETRA3 P23 4C",
+              "PETRA3 P23 6C"]
 # Engine-list parameter sets run per geometry; [] where the list has none.
 LIST_PARAMS = {"SOLEIL SIXS MED2+3 v2": [[0.0], [1.0]]}
 PARAM_MODES = ("double_diffraction", "psi_constant", "psi constant",
@@ -259,7 +260,7 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable, fitted)
     # petra3-p23-4c.c:39,81: its bissector modes solve the hkl equations only
     bissect = g != "PETRA3 P23 4C"
     if bissect and mode in ("bissector", "bissector_vertical"):
-        r["tth-2*omega"] = wrap(tth - 2 * om)  # e4c.c:38, e6c.c:61, k4c.c:68, k6c.c:204
+        r["tth-2*omega"] = wrap(tth - 2 * om)  # e4c.c:38, e6c.c:61, k4c.c:68, k6c.c:204, p23-6c.c:70
     if mode == "reflectivity" and g == "ZAXIS":
         r["mu-gamma"] = n["mu"] - n["gamma"]  # zaxis.c:60, unwrapped as hkl solves it
     if mode == "reflectivity" and g == "SOLEIL SIXS MED2+2":
@@ -274,8 +275,8 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable, fitted)
     if g == "PETRA3 P09 EH2" and mode == "zaxis + alpha=beta":
         r["mu-gamma"] = wrap(n["mu"] - n["gamma"])  # petra3-p09-eh2.c:75
     if bissect and mode == "bissector_horizontal":
-        r["omega mod 180"] = wrap(om, 180.0)  # e6c.c:50, k6c.c:70
-        r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # e6c.c:51, k6c.c:80
+        r["omega mod 180"] = wrap(om, 180.0)  # e6c.c:50, k6c.c:70, p23-6c.c:51
+        r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # e6c.c:51, k6c.c:80, p23-6c.c:52
     if kappa:
         # f1/f2 branches differ by omega+-180, phi+-180, chi sign (k4c.c:127-285)
         if mode in ("constant_omega", "constant_omega_vertical"):
