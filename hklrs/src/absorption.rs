@@ -384,21 +384,21 @@ pub struct DetectorPath {
 }
 
 impl DetectorPath {
-    /// Weight of the pixel at `p` from the sample, on a detector with
-    /// `normal` of either sense, lab frame. Fails only when `p` is zero.
+    /// Weight of the pixel in direction `kf` at `distance` metres from the
+    /// sample, on a detector with `normal` of either sense, lab frame.
     pub fn weight(
         &self,
-        p: &Vector3<f64>,
+        kf: &Unit<Vector3<f64>>,
+        distance: f64,
         normal: &Unit<Vector3<f64>>,
-    ) -> Result<Result<Weight, Masked>, Error> {
-        let (kf, distance) = Unit::try_new_and_get(*p, 0.0).ok_or(Error::DetectorAtSample)?;
+    ) -> Result<Weight, Masked> {
         let cos = kf.dot(normal).abs();
         let air = self
             .air
             .map_or(1.0, |mu| (-mu.per_metre() * distance).exp());
         let window = self.window.map_or(1.0, |w| (-w.depth(cos)).exp());
         let sensor = self.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1());
-        Ok(Weight::new(air * window * sensor, Masked::Opaque))
+        Weight::new(air * window * sensor, Masked::Opaque)
     }
 }
 
@@ -837,10 +837,15 @@ mod tests {
         Layer::new(mu(m), t).unwrap()
     }
 
+    /// k̂f and |p| of the pixel at `p`.
+    fn ray(p: Vector3<f64>) -> (Unit<Vector3<f64>>, f64) {
+        Unit::try_new_and_get(p, 0.0).unwrap()
+    }
+
     #[test]
     fn detector_terms_at_normal_incidence() {
-        let (p, n) = (Vector3::new(0.0, 0.0, 0.5), Vector3::z_axis());
-        let alone = |path: DetectorPath| path.weight(&p, &n).unwrap().unwrap().get();
+        let ((kf, d), n) = (ray(Vector3::new(0.0, 0.0, 0.5)), Vector3::z_axis());
+        let alone = |path: DetectorPath| path.weight(&kf, d, &n).unwrap().get();
         assert_eq!(alone(DetectorPath::default()), 1.0);
         let air = alone(DetectorPath {
             air: Some(mu(1.2)),
@@ -868,7 +873,7 @@ mod tests {
             window: Some(layer(1e4, 25e-6)),
             sensor: Some(layer(3e3, 450e-6)),
         };
-        let w = all.weight(&p, &n).unwrap().unwrap().get();
+        let w = all.weight(&kf, d, &n).unwrap().get();
         assert!(close(w, air * window * sensor, 2.0 * f64::EPSILON), "{w}");
     }
 
@@ -876,7 +881,7 @@ mod tests {
     /// twice their thickness; the air path is |p| at any angle.
     #[test]
     fn detector_layers_at_60_degrees_double_the_path() {
-        let p = Vector3::new(3f64.sqrt(), 0.0, 1.0) * 0.25;
+        let (kf, d) = ray(Vector3::new(3f64.sqrt(), 0.0, 1.0) * 0.25);
         let path = DetectorPath {
             air: Some(mu(1.2)),
             window: Some(layer(1e4, 25e-6)),
@@ -884,7 +889,7 @@ mod tests {
         };
         let want = (-0.6f64).exp() * (-0.5f64).exp() * -(-2.7f64).exp_m1();
         for n in [Vector3::z_axis(), -Vector3::z_axis()] {
-            let w = path.weight(&p, &n).unwrap().unwrap().get();
+            let w = path.weight(&kf, d, &n).unwrap().get();
             assert!(close(w, want, 1e-15), "{n:?}: {w}");
         }
     }
@@ -897,8 +902,7 @@ mod tests {
             ..Default::default()
         };
         let w = path
-            .weight(&Vector3::z(), &Vector3::z_axis())
-            .unwrap()
+            .weight(&Vector3::z_axis(), 1.0, &Vector3::z_axis())
             .unwrap()
             .get();
         assert!(close(w, 1e-20, 4.0 * f64::EPSILON), "{w}");
@@ -908,24 +912,21 @@ mod tests {
     /// sensor absorbs everything.
     #[test]
     fn mask_opaque_when_the_detector_ray_runs_along_a_window() {
-        let (p, n) = (Vector3::x(), Vector3::z_axis());
+        let (kf, n) = (Vector3::x_axis(), Vector3::z_axis());
         let window = DetectorPath {
             window: Some(layer(1e4, 25e-6)),
             ..Default::default()
         };
-        assert_eq!(window.weight(&p, &n).unwrap(), Err(Masked::Opaque));
+        assert_eq!(window.weight(&kf, 1.0, &n), Err(Masked::Opaque));
         let sensor = DetectorPath {
             sensor: Some(layer(3e3, 450e-6)),
             ..Default::default()
         };
-        assert_eq!(sensor.weight(&p, &n).unwrap().map(Weight::get), Ok(1.0));
+        assert_eq!(sensor.weight(&kf, 1.0, &n).map(Weight::get), Ok(1.0));
     }
 
     #[test]
-    fn detector_path_rejects_bad_input() {
-        let path = DetectorPath::default();
-        let got = path.weight(&Vector3::zeros(), &Vector3::z_axis());
-        assert!(matches!(got, Err(Error::DetectorAtSample)), "{got:?}");
+    fn layer_rejects_a_bad_thickness() {
         for t in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
             assert!(Layer::new(mu(1.0), t).is_err(), "{t}");
         }
