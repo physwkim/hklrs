@@ -995,6 +995,18 @@ mod tests {
     }
 
     #[test]
+    fn detector_config_numbers_are_python_s_floats() {
+        // json.loads gives the double nearest the text, one ulp off 9.375e-6
+        let f = parse(
+            "poni_version: 2\nDetector: Detector\nDetector_config: {\"pixel1\": \
+             9.375000000000001e-06, \"pixel2\": 2e-4, \"max_shape\": [10, 20]}\n",
+        )
+        .unwrap();
+        assert_eq!(f.detector.pixel1, Some(9.375000000000001e-06));
+        assert_ne!(f.detector.pixel1, Some(9.375e-06));
+    }
+
+    #[test]
     fn parse_refuses_what_pyfai_refuses_or_leaves_without_a_detector() {
         let v1 = "Detector: Detector\npixelsize1: 1e-4\npixelsize2: 2e-4\n";
         let config = "Detector_config: {\"pixel1\": 1e-4, \"pixel2\": 2e-4";
