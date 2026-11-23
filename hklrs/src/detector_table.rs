@@ -5,12 +5,12 @@
 //!
 //! The frame is binoculars' own: x is the beam-parallel axis (0 for every
 //! detector except Cirpad), pixel (slow, fast) is image row, column, and
-//! column `i` sits at `y = -(0.5 + i) * pitch`, row `j` at
-//! `z = ±(0.5 + j) * pitch`. Metres.
+//! columns run along -y, rows along ±z, from a pixel corner at the origin.
+//! Metres.
 
 use nalgebra::{Point3, Rotation3, Vector3};
 
-use crate::{Error, PixelDetector};
+use crate::{Error, Module, PixelAxis, PixelDetector};
 
 /// Detector ids; the discriminants are the binoculars `HklBinocularsDetectorEnum`
 /// values, so a stored id keeps its meaning.
@@ -120,8 +120,9 @@ pub enum Layout {
     /// Square pixels on a regular grid; a [`Tiling`] with the gap in the data
     /// is also regular.
     Uniform,
-    /// imXpad chips of `chip` pixels (slow, fast): the pixel at a chip edge
-    /// is 2.5 pitches wide, so positions jump at chip boundaries.
+    /// imXpad chips of `chip` pixels (slow, fast): the two pixels either side
+    /// of an interior chip boundary are 2.5 pitches wide, as pyFAI has them
+    /// (binoculars places them otherwise, BIN-12).
     Chips { chip: (usize, usize) },
     /// 20 imXpad S70 modules (120 x 560) placed on a circle.
     Cirpad,
@@ -256,21 +257,18 @@ static CIRPAD_MODULES: [(f64, f64); 20] = [
 const CIRPAD_MODULE_SHAPE: (usize, usize) = (120, 560);
 const CIRPAD_CHIP: (usize, usize) = (120, 80);
 
-/// Position along one imXpad axis of pixel `i` in chips of `chip` pixels.
-fn chip_position(i: usize, chip: usize, s: f64) -> f64 {
-    let (quot, rem) = (i / chip, i % chip);
-    let t = (i + 3 * quot) as f64;
-    if i == 0 {
-        s / 2.0
-    } else if i == 1 {
-        s * 3.0 / 2.0
-    } else if rem == 0 {
-        s * (t - 0.25)
-    } else if rem <= chip - 2 {
-        s * (t + 0.5)
-    } else {
-        s * (t + 2.5)
-    }
+/// pyFAI's imXpad pixel edges along `n` pixels in chips of `chip`
+/// (`ImXPadS10._calc_pixels_size`, `calc_pixels_edges`), summed in order as
+/// numpy's cumsum does, so the centres equal pyFAI's to the bit.
+fn chip_edges(n: usize, chip: usize, p: f64) -> Vec<f64> {
+    let wide = |i: usize| (1..n / chip).any(|k| i == k * chip - 1 || i == k * chip);
+    let widths = (0..n).map(|i| p * if wide(i) { 2.5 } else { 1.0 });
+    std::iter::once(0.0)
+        .chain(widths.scan(0.0, |e, w| {
+            *e += w;
+            Some(*e)
+        }))
+        .collect()
 }
 
 impl Detector {
@@ -285,34 +283,6 @@ impl Detector {
     /// (slow, fast).
     pub fn shape(self) -> (usize, usize) {
         self.row().shape
-    }
-
-    /// Centre of pixel (`slow`, `fast`).
-    pub fn pixel(self, slow: usize, fast: usize) -> Result<Point3<f64>, Error> {
-        let row = self.row();
-        let (h, w) = row.shape;
-        if slow >= h || fast >= w {
-            return Err(Error::PixelOutside {
-                slow,
-                fast,
-                shape: row.shape,
-            });
-        }
-        let p = row.pitch;
-        let (y, z) = match (row.layout, row.tiling) {
-            (Layout::Cirpad, _) => return Ok(cirpad_pixel(slow, fast, p)),
-            (Layout::Chips { chip }, _) => (
-                chip_position(fast, chip.1, p),
-                chip_position(slow, chip.0, p),
-            ),
-            (Layout::Uniform, Some(t)) if !t.gap_in_data => {
-                let at =
-                    |i: usize, module: usize, gap: usize| ((i + i / module * gap) as f64 + 0.5) * p;
-                (at(fast, t.module.1, t.gap.1), at(slow, t.module.0, t.gap.0))
-            }
-            (Layout::Uniform, _) => ((0.5 + fast as f64) * p, (0.5 + slow as f64) * p),
-        };
-        Ok(Point3::new(0.0, -y, if row.flip_z { -z } else { z }))
     }
 
     /// Row-major masked pixels over [`shape`](Self::shape).
@@ -375,37 +345,77 @@ impl Detector {
         out
     }
 
-    /// The detector as a [`PixelDetector`] with its mask. Only detectors on a
-    /// regular grid have one; the imXpads, Cirpad and the Merlin whose gap is
-    /// not in the data do not.
-    pub fn pixel_detector(self) -> Result<PixelDetector, Error> {
-        let row = self.row();
-        let regular = match (row.layout, row.tiling) {
-            (Layout::Uniform, None) => true,
-            (Layout::Uniform, Some(t)) => t.gap_in_data,
-            _ => false,
-        };
-        if !regular {
-            return Err(Error::DetectorNotRegular { name: row.name });
-        }
-        let p = row.pitch;
-        let sign = if row.flip_z { -1.0 } else { 1.0 };
-        PixelDetector::new(
-            row.shape,
-            Vector3::new(0.0, -p / 2.0, sign * p / 2.0),
-            Vector3::new(0.0, 0.0, sign * p),
-            Vector3::new(0.0, -p, 0.0),
-        )?
-        .with_mask(self.mask())
+    /// The detector as a [`PixelDetector`] with its mask.
+    pub fn pixel_detector(self) -> PixelDetector {
+        self.modules()
+            .and_then(|m| PixelDetector::from_modules(self.shape(), m))
+            .and_then(|d| d.with_mask(self.mask()))
+            .expect("every table row is a valid detector")
     }
-}
 
-fn cirpad_pixel(slow: usize, fast: usize, p: f64) -> Point3<f64> {
-    let (module, local) = (slow / CIRPAD_MODULE_SHAPE.0, slow % CIRPAD_MODULE_SHAPE.0);
-    let (tx, ry) = CIRPAD_MODULES[module];
-    let y = -chip_position(fast, CIRPAD_CHIP.1, p);
-    let z = chip_position(local, CIRPAD_CHIP.0, p);
-    // Translate along x, then rotate z-y-x by (90 deg, ry, 0).
-    let rot = Rotation3::from_euler_angles(90f64.to_radians(), ry.to_radians(), 0.0);
-    Point3::from(rot * Vector3::new(tx, y, z))
+    fn modules(self) -> Result<Vec<Module>, Error> {
+        let row = self.row();
+        let (h, w) = row.shape;
+        let p = row.pitch;
+        let z = if row.flip_z {
+            -Vector3::z_axis()
+        } else {
+            Vector3::z_axis()
+        };
+        let y = -Vector3::y_axis();
+        let uniform = |dir, n| PixelAxis::uniform(dir, n, p);
+        let chips = |dir, n, chip| PixelAxis::edges(dir, chip_edges(n, chip, p));
+        match (row.layout, row.tiling) {
+            (Layout::Cirpad, _) => {
+                let (mh, mw) = CIRPAD_MODULE_SHAPE;
+                let (ch, cw) = CIRPAD_CHIP;
+                CIRPAD_MODULES
+                    .iter()
+                    .enumerate()
+                    .map(|(m, &(tx, ry))| {
+                        // An imXpad S70 translated along x, then rotated z-y-x
+                        // by (90 deg, ry, 0).
+                        let rot =
+                            Rotation3::from_euler_angles(90f64.to_radians(), ry.to_radians(), 0.0);
+                        Module::new(
+                            (m * mh, 0),
+                            rot * Point3::new(tx, 0.0, 0.0),
+                            chips(rot * z, mh, ch)?,
+                            chips(rot * y, mw, cw)?,
+                        )
+                    })
+                    .collect()
+            }
+            (Layout::Chips { chip }, _) => Ok(vec![Module::new(
+                (0, 0),
+                Point3::origin(),
+                chips(z, h, chip.0)?,
+                chips(y, w, chip.1)?,
+            )?]),
+            (Layout::Uniform, Some(t)) if !t.gap_in_data => {
+                let ((mh, mw), (gh, gw)) = (t.module, t.gap);
+                (0..h / mh)
+                    .flat_map(|a| (0..w / mw).map(move |b| (a, b)))
+                    .map(|(a, b)| {
+                        // The gap is not in the image, only between the
+                        // modules' positions.
+                        let corner = z.into_inner() * ((a * (mh + gh)) as f64 * p)
+                            + y.into_inner() * ((b * (mw + gw)) as f64 * p);
+                        Module::new(
+                            (a * mh, b * mw),
+                            Point3::from(corner),
+                            uniform(z, mh)?,
+                            uniform(y, mw)?,
+                        )
+                    })
+                    .collect()
+            }
+            (Layout::Uniform, _) => Ok(vec![Module::new(
+                (0, 0),
+                Point3::origin(),
+                uniform(z, h)?,
+                uniform(y, w)?,
+            )?]),
+        }
+    }
 }

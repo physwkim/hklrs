@@ -424,20 +424,55 @@ impl<A: Attenuation> DetectorPath<A> {
 }
 
 impl DetectorPath {
+    /// The path on a module whose lab-frame `normal`, of either sense, the
+    /// layers' thickness runs along. Air needs no normal; a window or sensor
+    /// on a module with none (a point axis) is [`Error::NoPixelArea`].
+    pub fn oriented(&self, normal: Option<Unit<Vector3<f64>>>) -> Result<OrientedPath, Error> {
+        let layers = match (self.window.is_some() || self.sensor.is_some(), normal) {
+            (false, _) => None,
+            (true, Some(normal)) => Some(OrientedLayers {
+                normal,
+                window: self.window,
+                sensor: self.sensor,
+            }),
+            (true, None) => return Err(Error::NoPixelArea),
+        };
+        Ok(OrientedPath {
+            air: self.air,
+            layers,
+        })
+    }
+}
+
+/// A [`DetectorPath`] on one module, its layers along the module's normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrientedPath {
+    air: Option<PerMetre>,
+    /// `None` when the path has neither window nor sensor.
+    layers: Option<OrientedLayers>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OrientedLayers {
+    normal: Unit<Vector3<f64>>,
+    window: Option<Layer>,
+    sensor: Option<Layer>,
+}
+
+impl OrientedPath {
     /// Weight of the pixel in direction `kf` at `distance` metres from the
-    /// sample, on a detector with `normal` of either sense, lab frame.
-    pub fn weight(
-        &self,
-        kf: &Unit<Vector3<f64>>,
-        distance: f64,
-        normal: &Unit<Vector3<f64>>,
-    ) -> Result<Weight, Masked> {
-        let cos = kf.dot(normal).abs();
+    /// sample, lab frame.
+    pub fn weight(&self, kf: &Unit<Vector3<f64>>, distance: f64) -> Result<Weight, Masked> {
         let air = self
             .air
             .map_or(1.0, |mu| (-mu.per_metre() * distance).exp());
-        let window = self.window.map_or(1.0, |w| (-w.depth(cos)).exp());
-        let sensor = self.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1());
+        let (window, sensor) = self.layers.map_or((1.0, 1.0), |l| {
+            let cos = kf.dot(&l.normal).abs();
+            (
+                l.window.map_or(1.0, |w| (-w.depth(cos)).exp()),
+                l.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1()),
+            )
+        });
         Weight::new(air * window * sensor, Masked::Opaque)
     }
 }
@@ -896,7 +931,13 @@ mod tests {
     #[test]
     fn detector_terms_at_normal_incidence() {
         let ((kf, d), n) = (ray(Vector3::new(0.0, 0.0, 0.5)), Vector3::z_axis());
-        let alone = |path: DetectorPath| path.weight(&kf, d, &n).unwrap().get();
+        let alone = |path: DetectorPath| {
+            path.oriented(Some(n))
+                .unwrap()
+                .weight(&kf, d)
+                .unwrap()
+                .get()
+        };
         assert_eq!(alone(DetectorPath::default()), 1.0);
         let air = alone(DetectorPath {
             air: Some(mu(1.2)),
@@ -924,7 +965,7 @@ mod tests {
             window: Some(layer(1e4, 25e-6)),
             sensor: Some(layer(3e3, 450e-6)),
         };
-        let w = all.weight(&kf, d, &n).unwrap().get();
+        let w = all.oriented(Some(n)).unwrap().weight(&kf, d).unwrap().get();
         assert!(close(w, air * window * sensor, 2.0 * f64::EPSILON), "{w}");
     }
 
@@ -940,7 +981,12 @@ mod tests {
         };
         let want = (-0.6f64).exp() * (-0.5f64).exp() * -(-2.7f64).exp_m1();
         for n in [Vector3::z_axis(), -Vector3::z_axis()] {
-            let w = path.weight(&kf, d, &n).unwrap().get();
+            let w = path
+                .oriented(Some(n))
+                .unwrap()
+                .weight(&kf, d)
+                .unwrap()
+                .get();
             assert!(close(w, want, 1e-15), "{n:?}: {w}");
         }
     }
@@ -953,7 +999,9 @@ mod tests {
             ..Default::default()
         };
         let w = path
-            .weight(&Vector3::z_axis(), 1.0, &Vector3::z_axis())
+            .oriented(Some(Vector3::z_axis()))
+            .unwrap()
+            .weight(&Vector3::z_axis(), 1.0)
             .unwrap()
             .get();
         assert!(close(w, 1e-20, 4.0 * f64::EPSILON), "{w}");
@@ -968,12 +1016,39 @@ mod tests {
             window: Some(layer(1e4, 25e-6)),
             ..Default::default()
         };
-        assert_eq!(window.weight(&kf, 1.0, &n), Err(Masked::Opaque));
+        let on = |path: DetectorPath| path.oriented(Some(n)).unwrap().weight(&kf, 1.0);
+        assert_eq!(on(window), Err(Masked::Opaque));
         let sensor = DetectorPath {
             sensor: Some(layer(3e3, 450e-6)),
             ..Default::default()
         };
-        assert_eq!(sensor.weight(&kf, 1.0, &n).map(Weight::get), Ok(1.0));
+        assert_eq!(on(sensor).map(Weight::get), Ok(1.0));
+    }
+
+    /// Only a layer needs the normal: air alone weighs the same on a module
+    /// with none, a window or sensor there is an error.
+    #[test]
+    fn oriented_needs_a_normal_only_for_a_layer() {
+        let (kf, d) = ray(Vector3::new(0.1, 0.2, 0.5));
+        let air = DetectorPath {
+            air: Some(mu(1.2)),
+            ..Default::default()
+        };
+        let w = |n| air.oriented(n).unwrap().weight(&kf, d).unwrap().get();
+        assert_eq!(w(None), w(Some(Vector3::z_axis())));
+        assert_eq!(w(None), (-1.2 * d).exp());
+        for path in [
+            DetectorPath {
+                window: Some(layer(1e4, 25e-6)),
+                ..air
+            },
+            DetectorPath {
+                sensor: Some(layer(3e3, 450e-6)),
+                ..air
+            },
+        ] {
+            assert_eq!(path.oriented(None), Err(Error::NoPixelArea));
+        }
     }
 
     #[test]

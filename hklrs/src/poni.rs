@@ -13,7 +13,7 @@ use nalgebra::{Matrix3, Unit, Vector3};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{Error, PixelDetector, Rad, Wavelength};
+use crate::{Error, PixelAxis, PixelDetector, Rad, Wavelength};
 
 /// Smallest sine of the angle between `up` and the beam for them to define
 /// pyFAI's axis 1.
@@ -43,6 +43,8 @@ pub enum PoniError {
     NamedDetector(String),
     #[error("pyFAI's {0} moves the pixels in a way a PONI importer does not model")]
     Unsupported(&'static str),
+    #[error("a PONI holds one module of uniform pixels with extent along both axes")]
+    NotRegular,
     #[error(transparent)]
     Core(#[from] Error),
 }
@@ -207,23 +209,24 @@ impl Poni {
     /// The PONI of `detector` read with `orientation`; [`Poni::detector`]
     /// of it gives `detector` back. rot2 comes out in [−π/2, π/2] and rot1,
     /// rot3 in [−π, π]; at rot2 = ±π/2, where rot1 and rot3 turn about one
-    /// axis, rot3 takes what rot1 leaves. A single row or column exports
-    /// with the step the detector was built with; a zero step, as
-    /// [`PixelDetector::point`] has, is refused.
+    /// axis, rot3 takes what rot1 leaves. The detector must be one module
+    /// of uniform pixels; a point axis, as [`PixelDetector::point`] has, is
+    /// refused.
     pub fn from_detector(
         detector: &PixelDetector,
         orientation: Orientation,
         lab: &LabAxes,
     ) -> Result<Poni, PoniError> {
         let shape = detector.shape();
-        let p00 = detector.origin().coords;
-        let (e_slow, e_fast) = (detector.e_slow(), detector.e_fast());
-        let (pixel1, pixel2) = (e_slow.norm(), e_fast.norm());
-        positive("pixel1", pixel1)?;
-        positive("pixel2", pixel2)?;
+        let [m] = detector.modules() else {
+            return Err(PoniError::NotRegular);
+        };
+        let axis = |a: &PixelAxis| a.dir().zip(a.pitch()).ok_or(PoniError::NotRegular);
+        let ((d1, pixel1), (d2, pixel2)) = (axis(m.slow())?, axis(m.fast())?);
+        let p00 = detector.pixel(0, 0)?.coords;
         let [(step1, first1), (step2, first2)] = orientation.index_map(shape);
-        let u1 = e_slow * (step1 / pixel1);
-        let u2 = e_fast * (step2 / pixel2);
+        let u1 = d1.into_inner() * step1;
+        let u2 = d2.into_inner() * step2;
         let cos = u1.dot(&u2);
         if cos.is_nan() || cos.abs() > MAX_SKEW_COS {
             return Err(PoniError::Skewed { cos });
@@ -503,7 +506,10 @@ impl PoniFile {
 mod tests {
     use std::f64::consts::{FRAC_PI_2, PI};
 
+    use nalgebra::Point3;
+
     use super::*;
+    use crate::Module;
 
     #[test]
     fn orientation_numbers_are_1_to_4() {
@@ -647,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn export_takes_one_row_and_refuses_a_zero_step_or_skewed_axes() {
+    fn export_takes_one_row_and_refuses_a_point_axis_edges_or_skewed_axes() {
         let lab = oblique();
         let o = Orientation::BottomRight;
         let x = Vector3::new(1e-4, 0.0, 0.0);
@@ -662,18 +668,29 @@ mod tests {
             let d = gap(&det, &back);
             assert!(d <= 1e-14, "{shape:?}: {d} m");
             // the step no pixel takes comes back too
-            let step = (back.e_slow() - x)
+            let m = &back.modules()[0];
+            let step = |a: &PixelAxis| a.dir().unwrap().into_inner() * a.pitch().unwrap();
+            let step = (step(m.slow()) - x)
                 .norm()
-                .max((back.e_fast() - y * 1.72).norm());
+                .max((step(m.fast()) - y * 1.72).norm());
             assert!(step <= 1e-18, "{shape:?}: {step} m");
         }
         let point = PixelDetector::point(Vector3::x_axis(), 0.3).unwrap();
         assert_eq!(
             Poni::from_detector(&point, o, &lab),
-            Err(PoniError::Core(Error::NotPositive {
-                what: "pixel1",
-                value: 0.0
-            }))
+            Err(PoniError::NotRegular)
+        );
+        let uneven = Module::new(
+            (0, 0),
+            Point3::new(0.3, 0.0, 0.0),
+            PixelAxis::uniform(Vector3::x_axis(), 1, 1e-4).unwrap(),
+            PixelAxis::edges(Vector3::y_axis(), vec![0.0, 1e-4, 3e-4]).unwrap(),
+        )
+        .unwrap();
+        let uneven = PixelDetector::from_modules((1, 2), vec![uneven]).unwrap();
+        assert_eq!(
+            Poni::from_detector(&uneven, o, &lab),
+            Err(PoniError::NotRegular)
         );
         let skewed = PixelDetector::new((5, 5), at, x, y + x * 1e-6).unwrap();
         assert!(matches!(

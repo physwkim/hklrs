@@ -69,12 +69,24 @@ pub enum Error {
     CutPoint { name: String, cut: f64 },
     #[error("axis {name:?} is not a rotation and has no cut point")]
     NoCutPoint { name: String },
-    #[error("detector steps span no pixel area, so it has no solid angle (shape {shape:?})")]
-    NoPixelArea { shape: (usize, usize) },
+    #[error(
+        "a detector module has a point axis, so its pixels span no area: no solid angle, and no normal for a window or sensor"
+    )]
+    NoPixelArea,
     #[error("polarisation factor must be in [-1, 1], got {value}")]
     PolarisationFactor { value: f64 },
+    #[error("pixel axis: {reason}")]
+    PixelAxis { reason: &'static str },
+    #[error(
+        "the detector modules do not tile the image {shape:?}: one is outside, two overlap, or a pixel is in none"
+    )]
+    ModuleTiling { shape: (usize, usize) },
+    #[error("bin {slow}x{fast} puts pixels of the module at {at:?} and of another in one block")]
+    BinModule {
+        slow: usize,
+        fast: usize,
+        at: (usize, usize),
+    },
     #[error("detector id {id} is not in the table of {count}")]
     UnknownDetector { id: u32, count: usize },
-    #[error("detector {name} has no regular pixel grid, so it is not a PixelDetector")]
-    DetectorNotRegular { name: &'static str },
 }
