@@ -94,6 +94,26 @@ impl PixelDetector {
         self.shape
     }
 
+    /// Centre of pixel (0, 0) in the detector-arm frame, metres.
+    pub fn origin(&self) -> Point3<f64> {
+        self.origin
+    }
+
+    /// Step from pixel (s, f) to (s + 1, f), metres. With one row no pixel
+    /// takes this step, so it is the value the detector was built with: zero
+    /// for [`PixelDetector::point`] and an xu linear detector, not a pixel
+    /// height.
+    pub fn e_slow(&self) -> Vector3<f64> {
+        self.e_slow
+    }
+
+    /// Step from pixel (s, f) to (s, f + 1), metres; along the row of a linear
+    /// detector. With one column, as for [`PixelDetector::point`] (zero), it
+    /// is likewise only the value the detector was built with.
+    pub fn e_fast(&self) -> Vector3<f64> {
+        self.e_fast
+    }
+
     /// Row-major mask over the shape, `None` when no pixel is masked.
     pub fn mask(&self) -> Option<&[bool]> {
         self.mask.as_deref()
@@ -265,6 +285,33 @@ mod tests {
         assert_eq!(b.shape(), (1, 2));
         assert!(close(b.pixel(0, 1).unwrap(), det.pixel(0, 5).unwrap()));
         assert!(matches!(det.bin(2, 1), Err(Error::Bin { .. })));
+    }
+
+    #[test]
+    fn origin_and_steps_give_every_pixel() {
+        let det = area();
+        for (s, f) in [(0, 0), (4, 0), (0, 6), (3, 5)] {
+            let p = det.origin() + det.e_slow() * s as f64 + det.e_fast() * f as f64;
+            assert_eq!(det.pixel(s, f).unwrap(), p);
+        }
+        let b = det.roi(1..5, 1..7).unwrap().bin(2, 3).unwrap();
+        assert_eq!(b.e_slow(), det.e_slow() * 2.0);
+        assert_eq!(b.e_fast(), det.e_fast() * 3.0);
+    }
+
+    #[test]
+    fn point_and_single_row_steps_are_as_built() {
+        let point = PixelDetector::point(Vector3::x_axis(), 0.7).unwrap();
+        assert_eq!(point.origin(), Point3::new(0.7, 0.0, 0.0));
+        assert_eq!(
+            (point.e_slow(), point.e_fast()),
+            (Vector3::zeros(), Vector3::zeros())
+        );
+
+        let e_fast = Vector3::new(0.0, 0.0, 1e-3);
+        let row = PixelDetector::new((1, 9), Vector3::x(), Vector3::zeros(), e_fast).unwrap();
+        assert_eq!((row.e_slow(), row.e_fast()), (Vector3::zeros(), e_fast));
+        assert_eq!(row.bin(1, 3).unwrap().e_fast(), e_fast * 3.0);
     }
 
     #[test]
