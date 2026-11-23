@@ -157,7 +157,7 @@ fn every_pixel_is_far_from_a_bin_edge_so_floor_and_rint_agree() {
     for (frame, (m, rows)) in s.frames.iter().zip(coordinates).enumerate() {
         for (i, row) in rows.as_array().unwrap().iter().enumerate() {
             for (d, (plane, b)) in m.points().planes().iter().zip(s.map.binnings()).enumerate() {
-                let ours = plane[i];
+                let ours = plane.data()[i];
                 let theirs = row[d].as_i64().unwrap() as f64 * fine;
                 assert!((ours - theirs).abs() < Q_TOL, "{frame} {i} {d}");
                 let k = b.bin(ours).unwrap();

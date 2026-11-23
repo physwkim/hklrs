@@ -133,7 +133,7 @@ impl Case {
         self.normaliser
             .normalise(&self.frames[k], self.scalars[k].as_ref().unwrap(), &[])
             .unwrap()
-            .data
+            .into_data()
     }
 }
 

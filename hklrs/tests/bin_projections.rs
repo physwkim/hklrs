@@ -94,7 +94,7 @@ impl Setup {
             )
             .unwrap();
         (0..out.pixels())
-            .map(|i| out.planes().iter().map(|plane| plane[i]).collect())
+            .map(|i| out.planes().iter().map(|plane| plane.data()[i]).collect())
             .collect()
     }
 }
@@ -171,7 +171,10 @@ fn angles_match_binoculars_except_tth_bin13() {
             assert!((b[k] - r[k].to_degrees()).abs() < 1e-9, "{i} {k}");
         }
         // BIN-13: binoculars' tth is acos of the pixel's x in metres
-        assert!((b[2] - p.x[i].acos().to_degrees()).abs() < 1e-9, "{i}");
+        assert!(
+            (b[2] - p.x().data()[i].acos().to_degrees()).abs() < 1e-9,
+            "{i}"
+        );
         assert!((b[2] - r[2].to_degrees()).abs() > 30.0, "{i}");
     }
 }

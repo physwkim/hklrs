@@ -293,23 +293,8 @@ impl Normalised {
     }
 }
 
-/// A frame's pixels over the binned shape, row-major (slow, fast).
-#[derive(Clone, Debug, PartialEq)]
-pub struct NormalisedFrame {
-    shape: (usize, usize),
-    pub data: Vec<Result<Normalised, Masked>>,
-}
-
-impl NormalisedFrame {
-    pub fn shape(&self) -> (usize, usize) {
-        self.shape
-    }
-
-    pub fn get(&self, slow: usize, fast: usize) -> Result<Normalised, Masked> {
-        assert!(slow < self.shape.0 && fast < self.shape.1);
-        self.data[slow * self.shape.1 + fast]
-    }
-}
+/// A frame's pixels over the binned shape.
+pub type NormalisedFrame = Image<Result<Normalised, Masked>>;
 
 /// The per-pixel stages of one region of one detector: the raw frame's
 /// fields and the region's blocks, on one raw shape.
@@ -358,50 +343,34 @@ impl Normaliser {
             return Err(Error::DarkNeedsTime);
         }
         for w in weights {
-            if w.shape() != reducer.shape {
-                return Err(Error::ShapeMismatch {
-                    what: "weights",
-                    shape: w.shape(),
-                    expected: reducer.shape,
-                });
-            }
+            w.check("weights", reducer.shape)?;
         }
-        let out = reducer.shape.0 * reducer.shape.1;
         let n = (reducer.bin.0 * reducer.bin.1) as f64;
         let time = scalars.count_time.unwrap_or(0.0);
-        let mut data = Vec::with_capacity(out);
-        for i in 0..reducer.shape.0 {
-            for j in 0..reducer.shape.1 {
-                // The one place a pixel is masked, in precedence order.
-                data.push((|| -> Result<Normalised, Masked> {
-                    let at = i * reducer.shape.1 + j;
-                    if reducer.mask.as_ref().is_some_and(|m| m[at]) {
-                        return Err(Masked::Detector);
-                    }
-                    let mut geometric = scalars.factor();
-                    for w in weights {
-                        geometric *= w.get(i, j)?.get();
-                    }
-                    let mut gain = 0.0;
-                    for p in reducer.block(i, j) {
-                        gain += match &f.flat {
-                            Some(flat) => flat[p].ok_or(Masked::BadFlat)?,
-                            None => 1.0,
-                        };
-                    }
-                    // a NaN or infinite raw count makes the sum non-finite
-                    let mut counts = 0.0;
-                    for p in reducer.block(i, j) {
-                        counts += raw[p] - f.dark_rate.as_ref().map_or(0.0, |d| d[p] * time);
-                    }
-                    Normalised::new(counts, Weight::new(geometric * gain / n, Masked::Opaque))
-                })());
+        // The one place a pixel is masked, in precedence order.
+        Ok(Image::from_fn(reducer.shape, |i, j| {
+            let at = i * reducer.shape.1 + j;
+            if reducer.mask.as_ref().is_some_and(|m| m[at]) {
+                return Err(Masked::Detector);
             }
-        }
-        Ok(NormalisedFrame {
-            shape: reducer.shape,
-            data,
-        })
+            let mut geometric = scalars.factor();
+            for w in weights {
+                geometric *= w.get(i, j)?.get();
+            }
+            let mut gain = 0.0;
+            for p in reducer.block(i, j) {
+                gain += match &f.flat {
+                    Some(flat) => flat[p].ok_or(Masked::BadFlat)?,
+                    None => 1.0,
+                };
+            }
+            // a NaN or infinite raw count makes the sum non-finite
+            let mut counts = 0.0;
+            for p in reducer.block(i, j) {
+                counts += raw[p] - f.dark_rate.as_ref().map_or(0.0, |d| d[p] * time);
+            }
+            Normalised::new(counts, Weight::new(geometric * gain / n, Masked::Opaque))
+        }))
     }
 }
 
@@ -532,7 +501,7 @@ mod tests {
             .unwrap()
             .normalise(&image((1, 3), &[5.0, 20.0, 50.0]), &s, &[])
             .unwrap();
-        let counts: Vec<f64> = out.data.iter().map(|p| p.unwrap().counts).collect();
+        let counts: Vec<f64> = out.data().iter().map(|p| p.unwrap().counts).collect();
         assert_eq!(counts, [-15.0, 0.0, 30.0]);
     }
 
@@ -554,7 +523,7 @@ mod tests {
         let (g, f) = geometry_frame();
         let mut w = solid_angle(&g, &f, binned).unwrap();
         for &k in errs {
-            w.data[k] = Err(Masked::EdgeOn);
+            w.data_mut()[k] = Err(Masked::EdgeOn);
         }
         w
     }
@@ -571,7 +540,7 @@ mod tests {
             .unwrap()
             .normalise(&image((1, 5), raw), scalars, &[w])
             .unwrap()
-            .data
+            .into_data()
     }
 
     #[test]
@@ -665,18 +634,18 @@ mod tests {
         // block 0 is clean; block 1 has a masked pixel (also a bad flat)
         let n = Normaliser::new(fields.clone(), r).unwrap();
         let out = n.normalise(&ones, &FrameScalars::new(), &[]).unwrap();
-        assert!(out.data[0].is_ok());
-        assert_eq!(out.data[1], Err(Masked::Detector));
+        assert!(out.data()[0].is_ok());
+        assert_eq!(out.data()[1], Err(Masked::Detector));
         let det = detector((2, 4));
         let (_, r) = Region::new(0..2, 0..4, (2, 2)).apply(&det).unwrap();
         let n = Normaliser::new(fields, r.clone()).unwrap();
         let out = n.normalise(&ones, &FrameScalars::new(), &[]).unwrap();
-        assert_eq!(out.data[1], Err(Masked::BadFlat));
+        assert_eq!(out.data()[1], Err(Masked::BadFlat));
         let n = Normaliser::new(PixelFields::new((2, 4)), r).unwrap();
         let raw = image((2, 4), &[1.0, 1.0, 1.0, f64::NAN, 1.0, 1.0, 1.0, 1.0]);
         let out = n.normalise(&raw, &FrameScalars::new(), &[]).unwrap();
-        assert!(out.data[0].is_ok());
-        assert_eq!(out.data[1], Err(Masked::BadCount));
+        assert!(out.data()[0].is_ok());
+        assert_eq!(out.data()[1], Err(Masked::BadCount));
     }
 
     #[test]
@@ -858,7 +827,7 @@ mod tests {
             .accumulate(
                 Wavelength::new(1.0).unwrap(),
                 Footprint::Point,
-                q.into_iter().zip(frame.data.iter().copied()),
+                q.into_iter().zip(frame.data().iter().copied()),
             )
             .unwrap();
         let g = [2.0, 0.5, 4.0, 1.25];

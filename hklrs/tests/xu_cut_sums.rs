@@ -103,7 +103,7 @@ fn unit_pixels(counts: &[f64]) -> Vec<Result<Normalised, Masked>> {
             &[],
         )
         .unwrap();
-    frame.data
+    frame.into_data()
 }
 
 struct Setup {

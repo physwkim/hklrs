@@ -1009,9 +1009,12 @@ type Planes<'py> = (
 );
 
 fn planes(py: Python<'_>, p: hklrs::Planes) -> PyResult<Planes<'_>> {
-    let shape = p.shape();
-    let plane = |v: Vec<f64>| PyArray1::from_vec(py, v).reshape(shape);
-    Ok((plane(p.x)?, plane(p.y)?, plane(p.z)?))
+    let plane = |p: hklrs::Image<f64>| {
+        let shape = p.shape();
+        PyArray1::from_vec(py, p.into_data()).reshape(shape)
+    };
+    let [x, y, z] = p.into_planes();
+    Ok((plane(x)?, plane(y)?, plane(z)?))
 }
 
 /// Q in the sample frame (Å⁻¹, with 2π) of every pixel of `detector` at
@@ -1087,7 +1090,7 @@ type WeightArrays<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<u8>>);
 /// code.
 fn split(w: hklrs::Weights) -> ((usize, usize), Vec<f64>, Vec<u8>) {
     let (values, reasons) = w
-        .data
+        .data()
         .iter()
         .map(|w| match w {
             Ok(v) => (v.get(), 0),

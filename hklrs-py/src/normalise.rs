@@ -190,7 +190,7 @@ impl PyNormaliser {
         let refs: Vec<&Weights> = weights.iter().collect();
         let frame = self.0.normalise(&raw, &scalars.0, &refs).map_err(err)?;
         let (counts, weight, reasons): (Vec<f64>, Vec<f64>, Vec<u8>) = frame
-            .data
+            .data()
             .iter()
             .map(|p| match p {
                 Ok(p) => (p.counts(), p.weight().get(), 0),
