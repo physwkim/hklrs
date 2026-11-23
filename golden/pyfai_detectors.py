@@ -1,0 +1,350 @@
+"""pyFAI 2026.9.0's detector classes as Detector.factory resolves a PONI
+file's detector name, for hklrs's PONI import.
+
+Every Detector subclass the factory reaches, by registry key or by attribute
+of pyFAI.detectors, with its constructor arguments and the default instance's
+pitch, shape, max_shape, binning and orientation, and the layout hklrs gives
+it: "generic" (Detector itself), "uniform" (calc_cartesian_positions equals
+the generic Detector of that pitch, shape and orientation, both index paths,
+every orientation), "edges" (the ImXPad flat chip layout), or the reason it
+has no model. A modelled class's mask rule reproduces its calc_mask and
+Detector.mask element by element; the golden keeps a fingerprint of that mask.
+"probes" are names put to detector_factory and the class it returns; "cases"
+are a PONI file pyFAI writes for each modelled class and calc_pos_zyx of some
+of its pixels after Geometry.load.
+
+Writes pyfai_detectors.json next to this script and the class table
+hklrs/src/poni/detectors/table.rs. Produced with pyFAI 2026.9.0, numpy 2.5.5,
+CPython 3.12.16 (the binpy env of the hkl repro scripts).
+Run: python -I pyfai_detectors.py"""
+import inspect
+import json
+import logging
+import os
+import tempfile
+
+import numpy
+import pyFAI
+import pyFAI.detectors
+from pyFAI.detectors import ALL_DETECTORS, Detector, detector_factory
+from pyFAI.geometry import Geometry
+from pyFAI.io.ponifile import PoniFile
+
+assert pyFAI.version == "2026.9.0", pyFAI.version
+# the factory logs every unknown probe name as an error
+logging.disable(logging.CRITICAL)
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, "pyfai_detectors.json")
+TABLE = os.path.join(HERE, "..", "hklrs", "src", "poni", "detectors", "table.rs")
+
+# calc_mask's owner -> the rule that reproduces it; strip is the [lo, hi)
+# window around each module's middle column (Eiger2CdTe, PilatusCdTe,
+# Pilatus4_CdTe add it to the module gaps)
+GAPS = {"_Dectris": None, "_Lambda": None, "Maxipix": None,
+        "Eiger2CdTe": (-1, 1), "PilatusCdTe": (-1, 2), "Pilatus4_CdTe": (0, 1)}
+DISC = {"Mar345", "Rayonix133", "RayonixSx165"}
+CHIPS = {"ImXPadS10"}
+
+
+def gaps_mask(shape, module, gap, strip):
+    (n0, n1), (m0, m1), (g0, g1) = shape, module, gap
+    mask = numpy.zeros(shape, dtype=bool)
+    for i in range(m0, n0, m0 + g0):
+        mask[i:i + g0, :] = True
+    for i in range(m1, n1, m1 + g1):
+        mask[:, i:i + g1] = True
+    if strip is not None:
+        assert m1 // 2 + strip[0] >= 0
+        for i in range(m1 // 2, n1, m1 + g1):
+            mask[:, i + strip[0]:i + strip[1]] = True
+    return mask
+
+
+def disc_mask(shape):
+    c0, c1 = shape[0] // 2, shape[1] // 2
+    x, y = numpy.ogrid[:shape[0], :shape[1]]
+    return (x + 0.5 - c0) ** 2 + (y + 0.5 - c1) ** 2 > c0 ** 2
+
+
+def chips_mask(shape, module):
+    edges = []
+    for n, m in zip(shape, module):
+        pos = numpy.zeros(n, dtype=bool)
+        for i in range(1, n // m):
+            pos[i * m - 1] = pos[i * m] = True
+        pos[0] = pos[-1] = True
+        edges.append(pos)
+    return edges[0][:, None] | edges[1][None, :]
+
+
+def fingerprint(mask):
+    """count, sum and sum of squares (mod 2**64) of the row-major indices of
+    the masked pixels"""
+    k = numpy.flatnonzero(mask).astype(numpy.uint64)
+    return [int(k.size), int(k.sum(dtype=numpy.uint64)),
+            int((k * k).sum(dtype=numpy.uint64))]
+
+
+def owner(cls, method):
+    return getattr(cls, method).__qualname__.split(".")[0]
+
+
+def mask_rule(det):
+    """(rule, mask) reproducing det.calc_mask and det.mask, or (reason, None)"""
+    m = det.calc_mask()
+    family = owner(type(det), "calc_mask")
+    if family in GAPS:
+        gap = [int(g) for g in type(det).MODULE_GAP]
+        rule = {"rule": "gaps", "module": [int(n) for n in det.module_size],
+                "gap": gap, "strip": None if GAPS[family] is None else list(GAPS[family])}
+        assert tuple(det.shape) == tuple(det.max_shape)
+        mine = gaps_mask(det.shape, det.module_size, gap, GAPS[family])
+    elif family in DISC:
+        rule, mine = {"rule": "disc"}, disc_mask(det.shape)
+    elif family in CHIPS:
+        rule = {"rule": "chips", "module": [int(n) for n in det.module_size]}
+        assert tuple(det.shape) == tuple(det.max_shape)
+        mine = chips_mask(det.shape, det.module_size)
+    elif m is None or not numpy.asarray(m).any():
+        rule, mine = None, numpy.zeros(det.shape, dtype=bool)
+    else:
+        return f"mask ({family}.calc_mask)", None
+    if m is None:
+        assert not mine.any()
+    else:
+        assert (numpy.asarray(m) != 0).shape == mine.shape
+        assert ((numpy.asarray(m) != 0) == mine).all(), det
+    full = det.mask
+    assert (not mine.any()) if full is None else ((numpy.asarray(full) != 0) == mine).all()
+    return rule, mine
+
+
+def same_as_generic(cls, rng):
+    """calc_cartesian_positions of cls equals the generic Detector's of the
+    same pitch, shape and orientation: explicit indices (calc_pos_zyx's
+    path) and no indices (position_array's), every orientation"""
+    for o in (1, 2, 3, 4):
+        det = cls(orientation=o)
+        ref = Detector(pixel1=det.pixel1, pixel2=det.pixel2, max_shape=det.shape,
+                       orientation=o)
+        n0, n1 = det.shape
+        d1 = numpy.concatenate([numpy.arange(n0), numpy.arange(n0), numpy.zeros(n1),
+                                numpy.full(n1, n0 - 1), rng.integers(0, n0, 4000)])
+        d2 = numpy.concatenate([numpy.zeros(n0), numpy.full(n0, n1 - 1), numpy.arange(n1),
+                                numpy.arange(n1), rng.integers(0, n1, 4000)])
+        for args in ((d1.astype(float), d2.astype(float)), ()):
+            a, b = det.calc_cartesian_positions(*args), ref.calc_cartesian_positions(*args)
+            if a[2] is not None or not (numpy.array_equal(a[0], b[0])
+                                        and numpy.array_equal(a[1], b[1])):
+                return False
+    return True
+
+
+def flat_edges(det):
+    """ImXPad's flat layout: p1 a function of the row only, p2 of the column"""
+    p1, p2, p3 = det.calc_cartesian_positions()
+    return p3 is None and (p1 == p1[:, :1]).all() and (p2 == p2[:1, :]).all()
+
+
+def describe(name, cls, rng):
+    args = [a for a in inspect.getfullargspec(cls).args if a != "self"]
+    doc = {"class": name, "args": args, "force_pixel": bool(cls.force_pixel)}
+    try:
+        det = cls()
+    except Exception as err:  # base classes that need a file or a layout
+        return {**doc, "layout": f"no default instance ({type(err).__name__})"}
+    shape = det.shape
+    # ModuleDetector's is (None, None)
+    module = getattr(det, "module_size", None)
+    module = [int(n) for n in module] if module and None not in module else None
+    doc.update({
+        "pixel": [repr(det.pixel1), repr(det.pixel2)] if det.pixel1 else None,
+        "shape": None if shape is None else [int(n) for n in shape],
+        "max_shape": None if det.max_shape is None else [int(n) for n in det.max_shape],
+        "binning": [int(b) for b in det.binning],
+        "orientation": int(det.orientation),
+        "module_size": module,
+    })
+    if cls is Detector:
+        return {**doc, "layout": "generic", "mask": None}
+    if shape is None or det.pixel1 is None:
+        return {**doc, "layout": "no fixed shape or pitch"}
+    if not det.IS_FLAT:
+        return {**doc, "layout": "curved"}
+    if det.splinefile is not None:
+        return {**doc, "layout": "spline"}
+    if det._pixel_corners is not None or not det.IS_CONTIGUOUS:
+        return {**doc, "layout": "pixel corners"}
+    if same_as_generic(cls, rng):
+        layout = "uniform"
+    elif owner(cls, "calc_cartesian_positions") == "ImXPadS10" and flat_edges(det):
+        layout = "edges"
+    else:
+        return {**doc, "layout": "non-uniform pixels"}
+    rule, mask = mask_rule(det)
+    if mask is None:
+        return {**doc, "layout": rule}
+    if rule is not None and rule.get("module") is not None:
+        assert rule["module"] == doc["module_size"]
+    return {**doc, "layout": layout, "mask": rule, "fingerprint": fingerprint(mask)}
+
+
+def probes(attributes, registry):
+    names = set(attributes) | {n.lower() for n in attributes} | {n.upper() for n in attributes}
+    for key in registry:
+        names |= {key, key.upper(), key.replace("_", " "), key.replace("_", " ").upper(),
+                  key.replace(" ", "_")}
+    # pyFAI.detectors attributes that are not Detector classes fail the lookup
+    names |= {"no such detector", "Pilatus 1 M", "detector", "DETECTOR", "Orientation",
+              "SensorConfig", "logger", "ALL_DETECTORS"}
+    out = {}
+    for name in sorted(names):
+        try:
+            out[name] = type(detector_factory(name)).__name__
+        except Exception as err:
+            # the class the factory had picked when its constructor raised
+            # (HexDetector needs arguments); none when the name is unknown
+            found, tb = None, err.__traceback__
+            while tb is not None:
+                if tb.tb_frame.f_code is Detector.factory.__func__.__code__:
+                    found = tb.tb_frame.f_locals.get("detectorClass")
+                tb = tb.tb_next
+            out[name] = found.__name__ if found else None
+    return out
+
+
+def case(doc, tmp, i):
+    """a PONI file pyFAI writes for doc's class and calc_pos_zyx after load"""
+    cls = getattr(pyFAI.detectors, doc["class"], None) or next(
+        c for c in ALL_DETECTORS.values() if c.__name__ == doc["class"])
+    o = 1 + i % 4 if doc["layout"] == "uniform" else 3
+    det = cls(orientation=o)
+    n0, n1 = det.shape
+    geo = Geometry(dist=0.31, poni1=0.37 * n0 * det.pixel1, poni2=0.61 * n1 * det.pixel2,
+                   rot1=0.1, rot2=-0.2, rot3=0.3, detector=det, wavelength=1e-10)
+    path = os.path.join(tmp, f"{doc['class']}.poni")
+    with open(path, "w") as f:
+        PoniFile(geo).write(f)
+    with open(path) as f:
+        text = f.read()
+    # the date line changes on every run
+    text = "".join(line for line in text.splitlines(True) if not line.startswith("# Calibration done"))
+    back = Geometry()
+    back.load(path)
+    assert type(back.detector) is cls and int(back.detector.orientation) == o
+    pixels = [(0, 0), (n0 - 1, 0), (0, n1 - 1), (n0 - 1, n1 - 1), (n0 // 3, n1 // 2)]
+    z, y, x = back.calc_pos_zyx(d1=numpy.array([p[0] for p in pixels], dtype=float),
+                                d2=numpy.array([p[1] for p in pixels], dtype=float))
+    return {"class": doc["class"], "orientation": o, "poni": text,
+            "pixels": [list(p) for p in pixels],
+            "zyx": [[float(z[k]), float(y[k]), float(x[k])] for k in range(len(pixels))]}
+
+
+def rust_pair(v):
+    return "None" if v is None else f"Some(({v[0]}, {v[1]}))"
+
+
+def rust_rule(rule):
+    if rule["rule"] == "gaps":
+        strip = "None" if rule["strip"] is None else f"Some(({rule['strip'][0]}, {rule['strip'][1]}))"
+        return (f"Rule::Gaps {{ module: ({rule['module'][0]}, {rule['module'][1]}), "
+                f"gap: ({rule['gap'][0]}, {rule['gap'][1]}), strip: {strip} }}")
+    if rule["rule"] == "chips":
+        return f"Rule::Chips {{ module: ({rule['module'][0]}, {rule['module'][1]}) }}"
+    return "Rule::Disc"
+
+
+def rust_grid(c):
+    return (f"Grid {{ pixel: ({c['pixel'][0]}, {c['pixel'][1]}), "
+            f"shape: ({c['shape'][0]}, {c['shape'][1]}), "
+            f"max_shape: ({c['max_shape'][0]}, {c['max_shape'][1]}), "
+            f"binning: ({c['binning'][0]}, {c['binning'][1]}), "
+            f"orientation: {c['orientation']}, "
+            f"module_size: {rust_pair(c['module_size'])} }}")
+
+
+def rust_class(c):
+    args = ", ".join(f'"{a}"' for a in c["args"])
+    layout = c["layout"]
+    if layout == "generic":
+        lay = "Layout::Generic"
+    elif layout == "uniform":
+        rule = "None" if c["mask"] is None else f"Some({rust_rule(c['mask'])})"
+        lay = f"Layout::Uniform({rust_grid(c)}, {rule})"
+    elif layout == "edges":
+        lay = f"Layout::Edges({rust_grid(c)}, {rust_rule(c['mask'])})"
+    else:
+        lay = f'Layout::Unsupported("{layout}")'
+    force = "true" if c.get("force_pixel") else "false"
+    return (f'    Class {{ name: "{c["class"]}", args: &[{args}], force_pixel: {force}, '
+            f"layout: {lay} }},\n")
+
+
+def write_table(doc):
+    lines = ["// @generated by golden/pyfai_detectors.py from pyFAI "
+             f"{doc['pyfai']}; do not edit.\n",
+             "use super::{Class, Grid, Layout, Rule};\n\n",
+             "/// Every class Detector.factory reaches, sorted by name.\n",
+             "pub(super) static CLASSES: &[Class] = &[\n"]
+    lines += [rust_class(c) for c in doc["classes"]]
+    lines += ["];\n\n",
+              "/// Detector.factory's first lookup: the Detector subclasses among the\n",
+              "/// attributes of pyFAI.detectors, sorted by attribute name.\n",
+              "pub(super) static ATTRIBUTES: &[(&str, &str)] = &[\n"]
+    lines += [f'    ("{k}", "{v}"),\n' for k, v in sorted(doc["attributes"].items())]
+    lines += ["];\n\n",
+              "/// Detector.registry: lower-case names and aliases, sorted.\n",
+              "pub(super) static REGISTRY: &[(&str, &str)] = &[\n"]
+    lines += [f'    ("{k}", "{v}"),\n' for k, v in sorted(doc["registry"].items())]
+    lines += ["];\n"]
+    for line in lines:
+        assert "\\" not in line
+    os.makedirs(os.path.dirname(TABLE), exist_ok=True)
+    with open(TABLE, "w") as f:
+        f.writelines(lines)
+
+
+def main():
+    rng = numpy.random.default_rng(20261123)
+    attributes = {n: c.__name__ for n in dir(pyFAI.detectors)
+                  if isinstance(c := getattr(pyFAI.detectors, n), type) and issubclass(c, Detector)}
+    registry = {k: c.__name__ for k, c in ALL_DETECTORS.items()}
+    classes = {c.__name__: c for c in ALL_DETECTORS.values()}
+    for n in attributes:
+        c = getattr(pyFAI.detectors, n)
+        assert classes.setdefault(c.__name__, c) is c
+    described = [describe(n, classes[n], rng) for n in sorted(classes)]
+    doc = {
+        "program": f"pyFAI {pyFAI.version} Detector.factory, calc_mask, "
+                   "calc_cartesian_positions, PoniFile.write and Geometry.calc_pos_zyx",
+        "pyfai": pyFAI.version,
+        "numpy": numpy.__version__,
+        "note": "pixel: repr of the default instance's pixel1, pixel2; fingerprint: "
+                "count, sum and sum of squares mod 2**64 of the row-major indices of "
+                "the masked pixels; zyx = calc_pos_zyx = (t3, t1, t2)",
+        "attributes": attributes,
+        "registry": registry,
+        "classes": described,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = os.getcwd()
+        os.chdir(tmp)  # the factory takes an existing file name for a NeXus file
+        try:
+            doc["probes"] = probes(attributes, registry)
+        finally:
+            os.chdir(cwd)
+        modelled = [c for c in described if c["layout"] in ("uniform", "edges")]
+        doc["cases"] = [case(c, tmp, i) for i, c in enumerate(modelled)]
+    with open(OUT, "w") as f:
+        json.dump(doc, f, indent=1)
+        f.write("\n")
+    write_table(doc)
+    counts = {}
+    for c in described:
+        counts[c["layout"]] = counts.get(c["layout"], 0) + 1
+    print(counts)
+
+
+if __name__ == "__main__":
+    main()
