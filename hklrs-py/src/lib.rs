@@ -3,7 +3,7 @@
 
 mod normalise;
 
-use hklrs::absorption::Masked;
+use hklrs::absorption::{Absorber, Beam, DetectorPath, Face, Layer, Masked, Slab};
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -33,7 +33,7 @@ create_exception!(
     hklrs,
     NoSolutionInLimits,
     NoSolution,
-    "Every solution takes a written axis outside its limits; carries them as \
+    "Every solution takes an axis outside its limits; carries them as \
      solutions (degrees / metres, nearest to current first)."
 );
 
@@ -202,9 +202,10 @@ impl PyGeometry {
 
     /// Limits axis `name` to [min, max], inclusive, degrees for a rotation
     /// and metres otherwise; an infinite end is unbounded. The inverse keeps
-    /// the solutions whose written axes are all within their limits, after
-    /// wrapping to their cut points. A mode solves on its geometry as it is
-    /// when solving.
+    /// the solutions whose axes are all within their limits: a written
+    /// rotation after wrapping to its cut point, a held axis at its value in
+    /// `current`, never wrapped. A mode solves on its geometry as it is when
+    /// solving.
     fn set_limits(&mut self, name: &str, min: f64, max: f64) -> PyResult<()> {
         let axis = self.axis(name)?;
         let (lo, hi) = (internal_value(axis, min), internal_value(axis, max));
@@ -247,28 +248,21 @@ impl PyGeometry {
 
 /// Axis values (degrees / metres, geometry axis order), wavelength (Å) and
 /// detector point (detector-arm frame, metres; default 1 m along the beam).
-fn frame(geo: &hklrs::Geometry, axes: &[f64], wavelength: f64) -> PyResult<hklrs::Frame> {
-    Ok(hklrs::Frame {
-        values: geo.values_from_degrees(axes).map_err(err)?,
-        wavelength: hklrs::Wavelength::new(wavelength).map_err(err)?,
-    })
-}
-
 fn kernel_inputs(
     geo: &hklrs::Geometry,
     axes: &[f64],
     wavelength: f64,
     point: Option<[f64; 3]>,
 ) -> PyResult<(Vec<f64>, hklrs::Wavelength, Point3<f64>)> {
-    let hklrs::Frame {
-        values,
-        wavelength: wl,
-    } = frame(geo, axes, wavelength)?;
     let p = point.map_or_else(
         || Point3::from(geo.beam_direction().into_inner()),
         Point3::from,
     );
-    Ok((values, wl, p))
+    Ok((
+        geo.values_from_degrees(axes).map_err(err)?,
+        hklrs::Wavelength::new(wavelength).map_err(err)?,
+        p,
+    ))
 }
 
 #[pyclass(name = "Reflection", frozen)]
@@ -614,8 +608,8 @@ fn pseudo(
 }
 
 /// Pixels in the detector-arm frame (all axes zero), metres. Built by the
-/// xu and PONI importers; opaque apart from its shape, mask and pixel
-/// positions.
+/// detector table (`detector`), `sixs` and the xu and PONI importers;
+/// opaque apart from its shape, mask and pixel positions.
 #[pyclass(name = "PixelDetector", frozen)]
 struct PyPixelDetector(hklrs::PixelDetector);
 
@@ -1093,25 +1087,28 @@ fn q_map<'py>(
     detector: &PyPixelDetector,
 ) -> PyResult<Planes<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
-    let q = py.detach(|| hklrs::q_map(geo, &frame, det)).map_err(err)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
+    let wl = hklrs::Wavelength::new(wavelength).map_err(err)?;
+    let q = py
+        .detach(|| hklrs::q_map(geo, &values, wl, det))
+        .map_err(err)?;
     planes(py, q)
 }
 
-/// Pixel positions relative to the sample in the lab frame (metres) at
-/// `axes`, arguments as for `q_map`: (x, y, z), each a (slow, fast) array.
+/// Pixel positions relative to the sample in the lab frame (metres) of
+/// every pixel of `detector` at `axes` (geometry axis order, degrees /
+/// metres): (x, y, z), each a (slow, fast) array.
 #[pyfunction]
 fn detector_positions<'py>(
     py: Python<'py>,
     geometry: &PyGeometry,
     axes: Vec<f64>,
-    wavelength: f64,
     detector: &PyPixelDetector,
 ) -> PyResult<Planes<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
     let p = py
-        .detach(|| hklrs::detector_positions(geo, &frame, det))
+        .detach(|| hklrs::detector_positions(geo, &values, det))
         .map_err(err)?;
     planes(py, p)
 }
@@ -1171,48 +1168,169 @@ fn weight_arrays(
     ))
 }
 
-/// Solid angle of every pixel (sr) at `axes`, arguments as for `q_map`:
-/// (values, reasons), each a (slow, fast) array. A pixel with no value has
-/// NaN and its `Masked` reason, `EdgeOn` here; the others have reason 0.
+/// Solid angle of every pixel (sr) at `axes`, arguments as for
+/// `detector_positions`: (values, reasons), each a (slow, fast) array. A
+/// pixel with no value has NaN and its `Masked` reason, `EdgeOn` here; the
+/// others have reason 0.
 #[pyfunction]
 fn solid_angle<'py>(
     py: Python<'py>,
     geometry: &PyGeometry,
     axes: Vec<f64>,
-    wavelength: f64,
     detector: &PyPixelDetector,
 ) -> PyResult<WeightArrays<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
     let w = py
-        .detach(|| hklrs::solid_angle(geo, &frame, det).map(split))
+        .detach(|| hklrs::solid_angle(geo, &values, det).map(split))
         .map_err(err)?;
     weight_arrays(py, w)
 }
 
-/// Polarisation factor of every pixel at `axes`, arguments as for `q_map`,
-/// for a beam whose electric field lies along `e` (lab frame, projected
-/// normal to the beam) with degree `factor` in [-1, 1]: 1 fully along `e`,
-/// 0 unpolarised. Values and reasons as for `solid_angle`, `Extinct` where
-/// the factor vanishes.
+/// Polarisation factor of every pixel at `axes`, arguments as for
+/// `detector_positions`, for a beam whose electric field lies along `e`
+/// (lab frame, projected normal to the beam) with degree `factor` in
+/// [-1, 1]: 1 fully along `e`, 0 unpolarised. Values and reasons as for
+/// `solid_angle`, `Extinct` where the factor vanishes.
 #[pyfunction]
 fn polarisation<'py>(
     py: Python<'py>,
     geometry: &PyGeometry,
     axes: Vec<f64>,
-    wavelength: f64,
     detector: &PyPixelDetector,
     e: [f64; 3],
     factor: f64,
 ) -> PyResult<WeightArrays<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
     let pol = hklrs::Polarisation {
         e: Vector3::from(e),
         factor,
     };
     let w = py
-        .detach(|| hklrs::polarisation(geo, &frame, det, pol).map(split))
+        .detach(|| hklrs::polarisation(geo, &values, det, pol).map(split))
+        .map_err(err)?;
+    weight_arrays(py, w)
+}
+
+fn face(normal: [f64; 3], axis: [f64; 3], length: f64, width: f64) -> PyResult<Face> {
+    Face::new(normal.into(), axis.into(), length, width).map_err(err)
+}
+
+/// A flat sample: its entrance face, `normal` pointing out of the sample,
+/// `length` along the part of `axis` in the face plane and `width` across it
+/// (sample frame, centred on the sample position), and `thickness` along the
+/// normal; metres.
+#[pyclass(name = "Slab", frozen)]
+struct PySlab(Slab);
+
+#[pymethods]
+impl PySlab {
+    #[new]
+    fn new(
+        normal: [f64; 3],
+        axis: [f64; 3],
+        length: f64,
+        width: f64,
+        thickness: f64,
+    ) -> PyResult<Self> {
+        Slab::new(face(normal, axis, length, width)?, thickness)
+            .map(Self)
+            .map_err(err)
+    }
+
+    /// A crystal too thick for the beam to leave through the back.
+    #[staticmethod]
+    fn bulk(normal: [f64; 3], axis: [f64; 3], length: f64, width: f64) -> PyResult<Self> {
+        Ok(Self(Slab::bulk(face(normal, axis, length, width)?)))
+    }
+}
+
+/// Beam profile across the incident beam with unit total flux, centred on
+/// the sample position. Its first size lies along `axis` (lab frame)
+/// projected across the beam, the second across both; metres.
+#[pyclass(name = "Beam", frozen)]
+struct PyBeam(Beam);
+
+#[pymethods]
+impl PyBeam {
+    /// Uniform over a `width[0]` x `width[1]` rectangle.
+    #[staticmethod]
+    fn top_hat(axis: [f64; 3], width: [f64; 2]) -> PyResult<Self> {
+        Beam::top_hat(axis.into(), width).map(Self).map_err(err)
+    }
+
+    /// Gaussian with full widths at half maximum `fwhm`.
+    #[staticmethod]
+    fn gaussian_fwhm(axis: [f64; 3], fwhm: [f64; 2]) -> PyResult<Self> {
+        Beam::gaussian_fwhm(axis.into(), fwhm)
+            .map(Self)
+            .map_err(err)
+    }
+}
+
+fn per_metre(mu: f64) -> PyResult<hklrs::PerMetre> {
+    hklrs::PerMetre::new(mu).map_err(err)
+}
+
+fn layer(layer: Option<(f64, f64)>) -> PyResult<Option<Layer>> {
+    layer
+        .map(|(mu, thickness)| Layer::new(per_metre(mu)?, thickness).map_err(err))
+        .transpose()
+}
+
+/// What absorbs: the sample `slab` of linear attenuation `mu` (1/m) lit by
+/// `beam`, and on the way to each pixel `air` (1/m), a `window` transmitted
+/// and a `sensor` absorbed, each (mu 1/m, thickness m along the detector
+/// normal). An absent term weighs 1. Every mu is the same at all energies.
+#[pyclass(name = "Absorber", frozen)]
+struct PyAbsorber(Absorber<hklrs::PerMetre>);
+
+#[pymethods]
+impl PyAbsorber {
+    #[new]
+    #[pyo3(signature = (slab, beam, mu, air=None, window=None, sensor=None))]
+    fn new(
+        slab: &PySlab,
+        beam: &PyBeam,
+        mu: f64,
+        air: Option<f64>,
+        window: Option<(f64, f64)>,
+        sensor: Option<(f64, f64)>,
+    ) -> PyResult<Self> {
+        Ok(Self(Absorber {
+            slab: slab.0,
+            beam: beam.0,
+            sample: per_metre(mu)?,
+            detector: DetectorPath {
+                air: air.map(per_metre).transpose()?,
+                window: layer(window)?,
+                sensor: layer(sensor)?,
+            },
+        }))
+    }
+}
+
+/// Absorption weight of every pixel at `axes`, arguments as for `q_map`:
+/// the sample's effective path (m) times the detector path's transmission,
+/// by which the correction divides. Values and reasons as for
+/// `solid_angle`; where the sample and the detector path both mask, the
+/// pixel carries the sample's reason. A window or sensor needs a detector
+/// with a pixel area.
+#[pyfunction]
+fn absorption<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+    absorber: &PyAbsorber,
+) -> PyResult<WeightArrays<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
+    let wl = hklrs::Wavelength::new(wavelength).map_err(err)?;
+    let w = py
+        .detach(|| hklrs::absorption(geo, &values, wl, det, &absorber.0).map(split))
         .map_err(err)?;
     weight_arrays(py, w)
 }
@@ -1220,6 +1338,46 @@ fn polarisation<'py>(
 #[pyfunction]
 fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
+}
+
+/// Names of the binoculars detector table rows, in binoculars id order.
+#[pyfunction]
+fn detectors() -> Vec<&'static str> {
+    hklrs::Detector::ALL.map(hklrs::Detector::name).to_vec()
+}
+
+/// The binoculars detector table row `name`, with its mask, in binoculars'
+/// frame: pixel (slow, fast) is image (row, column), columns run along -y
+/// and rows along +z or -z from a pixel corner at the origin, and x is 0
+/// except on the Cirpad.
+#[pyfunction]
+fn detector(name: &str) -> PyResult<PyPixelDetector> {
+    hklrs::Detector::ALL
+        .into_iter()
+        .find(|d| d.name() == name)
+        .map(|d| PyPixelDetector(d.pixel_detector()))
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown detector {name:?}; one of {:?}",
+                detectors()
+            ))
+        })
+}
+
+/// binoculars' SIXS calibration: `detector` moved so that its pixel
+/// `centre` (slow, fast) lies at (`sdd`, 0, 0) metres, then turned `detrot`
+/// degrees about x. The mask is kept. The central pixel lands on x = `sdd`
+/// even on the Cirpad, whose pixels have an x.
+#[pyfunction]
+fn sixs(
+    detector: &PyPixelDetector,
+    centre: (usize, usize),
+    sdd: f64,
+    detrot: f64,
+) -> PyResult<PyPixelDetector> {
+    hklrs::sixs(&detector.0, centre, sdd, radians(detrot).0)
+        .map(PyPixelDetector)
+        .map_err(err)
 }
 
 fn submodule(
@@ -1246,6 +1404,9 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySample>()?;
     m.add_class::<PyMode>()?;
     m.add_class::<PyPixelDetector>()?;
+    m.add_class::<PySlab>()?;
+    m.add_class::<PyBeam>()?;
+    m.add_class::<PyAbsorber>()?;
     submodule(m, "xu", |xu| {
         xu.add_class::<PyXuArea>()?;
         xu.add_class::<PyXuLinear>()
@@ -1269,10 +1430,14 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(pseudo, m)?)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
+    m.add_function(wrap_pyfunction!(detectors, m)?)?;
+    m.add_function(wrap_pyfunction!(detector, m)?)?;
+    m.add_function(wrap_pyfunction!(sixs, m)?)?;
     m.add_function(wrap_pyfunction!(q_map, m)?)?;
     m.add_function(wrap_pyfunction!(detector_positions, m)?)?;
     m.add_function(wrap_pyfunction!(solid_angle, m)?)?;
     m.add_function(wrap_pyfunction!(polarisation, m)?)?;
+    m.add_function(wrap_pyfunction!(absorption, m)?)?;
     let members: Vec<(String, u8)> = MASKED
         .iter()
         .map(|&r| (format!("{r:?}"), masked_code(r)))

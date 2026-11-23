@@ -195,7 +195,7 @@ def frames(name, qc, det, dim, tag):
     out = []
     for ang in angles(name, 4, tag):
         q_h = np.stack(hklrs.q_map(geo, ang, WL, det), axis=-1)
-        p_h = np.stack(hklrs.detector_positions(geo, ang, WL, det), axis=-1)
+        p_h = np.stack(hklrs.detector_positions(geo, ang, det), axis=-1)
         if dim == 1:
             q_h, p_h = q_h[0], p_h[0]
         q_x = xu_vectors(xu_q(*ang))

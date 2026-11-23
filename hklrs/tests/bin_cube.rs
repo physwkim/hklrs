@@ -15,7 +15,7 @@ use hklrs::grid::{Binning, Bounds, Cube, Projected};
 use hklrs::nalgebra::Vector3;
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
-use hklrs::{Frame, PixelDetector, Wavelength};
+use hklrs::{PixelDetector, Wavelength};
 use serde_json::Value;
 
 /// binoculars' single-precision Q against hklrs' (bin_projections.rs).
@@ -79,12 +79,9 @@ fn scan() -> Scan {
     for frame in 0..golden["frames"].as_u64().unwrap() as usize {
         let mut deg = list("values_deg");
         deg[scanned] += frame as f64 * f(&golden["step_deg"]);
-        let at = Frame {
-            values: geometry.values_from_degrees(&deg).unwrap(),
-            wavelength,
-        };
+        let values = geometry.values_from_degrees(&deg).unwrap();
         let p = Projection::QSample
-            .project(&geometry, &at, &detector)
+            .project(&geometry, &values, wavelength, &detector)
             .unwrap();
         let lit: Vec<usize> = (0..p.pixels()).filter(|i| !masked.contains(i)).collect();
         let planes = p

@@ -6,9 +6,14 @@ cut points are drawn away from every solution value, then limits between
 solution values on the written axes. Asserted: each returned rotation lies in
 [cut, cut + 360) where hklpy2's apply_cut leaves it, hklrs keeps a solution
 exactly when hklpy2's constraints accept it, and hklpy2 keeps and drops the
-same libhkl solutions. Held axes start inside their window with no limits:
-hklrs returns them as given, hklpy2 wraps and limits them too. Modes needing
-hkl2, reference or psi are left out: the filter does not read the equations.
+same libhkl solutions. Held axes start inside their window with no limits.
+
+Both limit held axes too; hklrs checks one at its current value, unwrapped,
+as the motor stands, where hklpy2 wraps it to its cut point first. So both
+return nothing for a held axis outside its limits, and they differ on purpose
+for one outside its window that its limits admit only once wrapped: hklpy2
+keeps every solution, hklrs none. Modes needing hkl2, reference or psi are
+left out: the filter does not read the equations.
 """
 import functools
 import math
@@ -69,6 +74,22 @@ def match(p, sols):
     hits = [i for i, s in enumerate(sols) if np.abs(np.subtract(s, p)).max() < TOL]
     assert len(hits) <= 1, (p, hits)
     return hits[0] if hits else None
+
+
+def cuts_away(c, first):
+    """Cut points away from every value an axis takes in `first`, set with no
+    limits; a held axis's window holds its current value, which both return."""
+    cuts = {}
+    for i, n in enumerate(c.names):
+        values = [s[i] for s in first]
+        lo, hi = (-360, 180) if i in c.written else (c.start[i] - 360, c.start[i])
+        while True:
+            cut = c.rng.uniform(lo, hi)
+            if all(abs(turn(cut - v)) > MARGIN for v in values):
+                break
+        cuts[n] = cut
+        c.set(n, (-math.inf, math.inf), cut)
+    return cuts
 
 
 class Case:
@@ -141,19 +162,7 @@ def test_kept_and_dropped_as_hklpy2(preset, mode):
             c.set(n, (-math.inf, math.inf), -180.0)
         first = c.hklrs()
         assert first, "no solution through the axes the hkl came from"
-
-        # cut points away from every value an axis takes in a solution; a
-        # held axis's window holds its current value, which both return
-        cuts = {}
-        for i, n in enumerate(c.names):
-            values = [s[i] for s in first]
-            lo, hi = (-360, 180) if i in c.written else (c.start[i] - 360, c.start[i])
-            while True:
-                cut = c.rng.uniform(lo, hi)
-                if all(abs(turn(cut - v)) > MARGIN for v in values):
-                    break
-            cuts[n] = cut
-            c.set(n, (-math.inf, math.inf), cut)
+        cuts = cuts_away(c, first)
         everything = c.hklrs()
         assert len(everything) == len(first)
         for s in everything:
@@ -201,3 +210,64 @@ def assert_hklpy2_filters_alike(c, raw, everything, kept):
     by_hklpy2 = [match(p, kept) for p in c.hklpy2()]
     assert None not in by_hklpy2
     assert sorted(by_hklpy2) == sorted(match(p, kept) for p in raw if c.accepted(p))
+
+
+def held_case(preset, mode, seed):
+    """A Case with no limits and cut points away from its solutions, those
+    solutions on both sides, and one held axis."""
+    if preset not in Hkl.factories():
+        pytest.skip(f"preset {preset} is not in the installed libhkl {Hkl.VERSION}")
+    c = Case(preset, mode, seed)
+    held = [i for i in range(len(c.names)) if i not in c.written]
+    if not held:
+        pytest.skip(f"{mode} holds no axis")
+    for n in c.names:
+        c.set(n, (-math.inf, math.inf), -180.0)
+    first = c.hklrs()
+    assert first, "no solution through the axes the hkl came from"
+    cuts_away(c, first)
+    everything = c.hklrs()
+    assert len(everything) == len(first)
+    i = c.rng.choice(held)
+    # held exactly; the binding's degrees go through radians and back
+    assert all(s[i] == math.degrees(math.radians(c.start[i])) for s in everything)
+    return c, everything, c.hklpy2(), i
+
+
+@pytest.mark.parametrize("preset,mode", CASES)
+def test_held_axis_outside_its_limits_has_no_solution(preset, mode):
+    """The held axis's current value is in its window, below its limits."""
+    found = 0
+    for seed in SEEDS:
+        c, everything, raw, i = held_case(preset, mode, seed)
+        found += bool(raw)
+        v = c.start[i]
+        c.set(c.names[i], (v + MARGIN, v + 10.0))
+        with pytest.raises(hklrs.NoSolutionInLimits) as e:
+            hklrs.solve(c.mode, c.sample, c.hkl, WL, c.start)
+        assert e.value.solutions == everything
+        assert c.hklpy2() == []
+    assert found, "libhkl found no solution for any seed"
+
+
+@pytest.mark.parametrize("preset,mode", CASES)
+def test_held_axis_in_its_limits_only_once_wrapped_differs_on_purpose(preset, mode):
+    """The held axis stands at v below its window [cut, cut + 360), limited
+    to v + 360 +- 1. hklpy2 wraps v to v + 360 and keeps every solution there;
+    hklrs neither wraps nor admits v, and raises with the same solutions as
+    without the limits."""
+    found = 0
+    for seed in SEEDS:
+        c, everything, raw, i = held_case(preset, mode, seed)
+        found += bool(raw)
+        v = c.start[i]
+        c.set(c.names[i], (v + 359.0, v + 361.0), c.rng.uniform(v + 1.0, v + 359.0))
+        with pytest.raises(hklrs.NoSolutionInLimits) as e:
+            hklrs.solve(c.mode, c.sample, c.hkl, WL, c.start)
+        assert e.value.solutions == everything
+        kept = c.hklpy2()
+        assert len(kept) == len(raw)
+        for p in kept:
+            assert p[i] == pytest.approx(v + 360.0, rel=0, abs=1e-9)
+            assert match(p[:i] + [v] + p[i + 1:], everything) is not None, p
+    assert found, "libhkl found no solution for any seed"

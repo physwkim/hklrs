@@ -10,8 +10,7 @@ use hklrs::nalgebra::{Matrix3, Unit, Vector3};
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
 use hklrs::{
-    Frame, Geometry, Lattice, Orientation, PixelDetector, Rad, Sample, Wavelength,
-    detector_positions,
+    Geometry, Lattice, Orientation, PixelDetector, Rad, Sample, Wavelength, detector_positions,
 };
 use serde_json::Value;
 
@@ -20,7 +19,8 @@ const Q_TOL: f64 = 1e-6;
 struct Setup {
     golden: Value,
     geometry: Geometry,
-    frame: Frame,
+    values: Vec<f64>,
+    wavelength: Wavelength,
     detector: PixelDetector,
     sample: Sample,
 }
@@ -33,10 +33,8 @@ fn setup() -> Setup {
         Vector3::new(a[0], a[1], a[2])
     };
     let geometry = preset("K6C").unwrap();
-    let frame = Frame {
-        values: geometry.values_from_degrees(&list("values_deg")).unwrap(),
-        wavelength: Wavelength::new(f(&golden["wavelength"])).unwrap(),
-    };
+    let values = geometry.values_from_degrees(&list("values_deg")).unwrap();
+    let wavelength = Wavelength::new(f(&golden["wavelength"])).unwrap();
     let shape = list("shape");
     let detector = PixelDetector::new(
         (shape[0] as usize, shape[1] as usize),
@@ -54,7 +52,8 @@ fn setup() -> Setup {
     Setup {
         golden,
         geometry,
-        frame,
+        values,
+        wavelength,
         detector,
         sample,
     }
@@ -87,7 +86,12 @@ impl Setup {
     /// hklrs' coordinates for `p`, one row per pixel.
     fn project(&self, p: &Projection) -> Vec<Vec<f64>> {
         let out = p
-            .project(&self.geometry, &self.frame, &self.detector)
+            .project(
+                &self.geometry,
+                &self.values,
+                self.wavelength,
+                &self.detector,
+            )
             .unwrap();
         (0..out.pixels())
             .map(|i| out.planes().iter().map(|plane| plane[i]).collect())
@@ -161,7 +165,7 @@ fn angles_match_binoculars_except_tth_bin13() {
     let s = setup();
     let bin = s.space("angles", Projection::Angles.names());
     let ours = s.project(&Projection::Angles);
-    let p = detector_positions(&s.geometry, &s.frame, &s.detector).unwrap();
+    let p = detector_positions(&s.geometry, &s.values, &s.detector).unwrap();
     for (i, (b, r)) in bin.iter().zip(&ours).enumerate() {
         for k in 0..2 {
             assert!((b[k] - r[k].to_degrees()).abs() < 1e-9, "{i} {k}");

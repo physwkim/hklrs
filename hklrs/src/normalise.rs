@@ -392,7 +392,7 @@ mod tests {
     use nalgebra::Vector3;
 
     use super::*;
-    use crate::{Frame, Geometry, Wavelength, solid_angle};
+    use crate::{Geometry, Wavelength, solid_angle};
 
     fn detector(shape: (usize, usize)) -> PixelDetector {
         PixelDetector::new(
@@ -404,16 +404,12 @@ mod tests {
         .unwrap()
     }
 
-    fn geometry_frame() -> (Geometry, Frame) {
+    fn geometry_frame() -> (Geometry, Vec<f64>) {
         let g = Geometry::builder("t")
             .sample_rotation("om", [0.0, 0.0, 1.0])
             .build()
             .unwrap();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
-        (g, f)
+        (g, vec![0.0])
     }
 
     fn close(a: f64, b: f64) -> bool {

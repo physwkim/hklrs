@@ -7,10 +7,7 @@ pub mod common;
 use common::{f, load};
 use hklrs::nalgebra::{Unit, Vector3};
 use hklrs::poni::{LabAxes, Orientation, Poni};
-use hklrs::{
-    Frame, Geometry, PixelDetector, Polarisation, Rad, Wavelength, Weights, polarisation,
-    solid_angle,
-};
+use hklrs::{Geometry, PixelDetector, Polarisation, Rad, Weights, polarisation, solid_angle};
 use serde_json::Value;
 
 /// Relative; both sides are float64 to a few ulp.
@@ -102,14 +99,6 @@ fn cases(g: &Value) -> Vec<Case<'_>> {
     out
 }
 
-/// Neither weight depends on the wavelength.
-fn frame() -> Frame {
-    Frame {
-        values: vec![],
-        wavelength: Wavelength::new(1.0).unwrap(),
-    }
-}
-
 /// Every pixel of `w` times `scale` against `want[slow][fast]`; a masked
 /// pixel or a NaN fails.
 fn compare(w: &Weights, want: &Value, scale: f64, tol: impl Fn(f64) -> f64, what: &str) {
@@ -142,7 +131,7 @@ fn solid_angle_matches_pyfai_solid_angle_array() {
     let g = load("pyfai_weights.json");
     let scale = f(&g["dist"]).powi(2) / (f(&g["pixel1"]) * f(&g["pixel2"]));
     for c in cases(&g) {
-        let w = solid_angle(&c.geometry, &frame(), &c.detector).unwrap();
+        let w = solid_angle(&c.geometry, &[], &c.detector).unwrap();
         compare(
             &w,
             &c.golden["solid_angle"],
@@ -164,13 +153,8 @@ fn polarisation_matches_pyfai_polarization() {
         for pol in c.golden["polarization"].as_array().unwrap() {
             let (factor, offset) = (f(&pol["factor"]), f(&pol["axis_offset"]));
             let e = c.a2 * offset.cos() - c.a1 * offset.sin();
-            let w = polarisation(
-                &c.geometry,
-                &frame(),
-                &c.detector,
-                Polarisation { e, factor },
-            )
-            .unwrap();
+            let w =
+                polarisation(&c.geometry, &[], &c.detector, Polarisation { e, factor }).unwrap();
             let what = format!("{} factor {factor} axis_offset {offset}", c.what);
             compare(&w, &pol["values"], 1.0, polarisation_tol, &what);
             factors.push(factor);

@@ -12,7 +12,7 @@ use nalgebra::{Unit, Vector3};
 
 use crate::grid::Projected;
 use crate::{
-    Error, Frame, Geometry, Orientation, PixelDetector, Planes, Sample, angle_between,
+    Error, Geometry, Orientation, PixelDetector, Planes, Sample, Wavelength, angle_between,
     detector_positions, q_map,
 };
 
@@ -50,23 +50,24 @@ impl Projection {
         }
     }
 
-    /// The coordinates of every pixel of `detector` for one frame, in the
-    /// detector's row-major order.
+    /// The coordinates of every pixel of `detector` for one frame at axis
+    /// `values`, in the detector's row-major order.
     pub fn project(
         &self,
         geometry: &Geometry,
-        frame: &Frame,
+        values: &[f64],
+        wavelength: Wavelength,
         detector: &PixelDetector,
     ) -> Result<Projected, Error> {
         let planes = match self {
             Self::QLab => {
-                let rotation = geometry.poses(&frame.values)?.sample.rotation;
-                map(&q_map(geometry, frame, detector)?, |q| {
+                let rotation = geometry.poses(values)?.sample.rotation;
+                map(&q_map(geometry, values, wavelength, detector)?, |q| {
                     (rotation * q).into()
                 })
             }
             Self::QSample => {
-                let q = q_map(geometry, frame, detector)?;
+                let q = q_map(geometry, values, wavelength, detector)?;
                 vec![q.x, q.y, q.z]
             }
             Self::Hkl(sample) => {
@@ -76,18 +77,22 @@ impl Projection {
                     sample.lattice,
                     Orientation::Manual { u: sample.u() },
                 );
-                map(&q_map(geometry, frame, detector)?, |q| fixed.hkl(&q).into())
+                map(&q_map(geometry, values, wavelength, detector)?, |q| {
+                    fixed.hkl(&q).into()
+                })
             }
-            Self::QparQper { normal } => map(&q_map(geometry, frame, detector)?, |q| {
-                let qper = q.dot(normal);
-                [(q - qper * normal.into_inner()).norm(), qper]
-            }),
+            Self::QparQper { normal } => {
+                map(&q_map(geometry, values, wavelength, detector)?, |q| {
+                    let qper = q.dot(normal);
+                    [(q - qper * normal.into_inner()).norm(), qper]
+                })
+            }
             Self::Angles => {
-                let poses = geometry.poses(&frame.values)?;
+                let poses = geometry.poses(values)?;
                 let ki = (poses.source * geometry.beam_direction()).into_inner();
                 // binoculars takes acos(x) of the unnormalised pixel
                 // position (hkl-binoculars.c:369, BIN-13)
-                map(&detector_positions(geometry, frame, detector)?, |p| {
+                map(&detector_positions(geometry, values, detector)?, |p| {
                     [
                         p.z.atan2(p.x),
                         p.y.atan2(p.x.hypot(p.z)),
@@ -120,18 +125,15 @@ mod tests {
     use super::*;
     use crate::grid::{Binning, Cube};
     use crate::presets::preset;
-    use crate::{Lattice, Rad, Wavelength, forward};
+    use crate::{Lattice, Rad, forward};
 
-    fn setup() -> (Geometry, Frame, PixelDetector) {
+    fn setup() -> (Geometry, Vec<f64>, Wavelength, PixelDetector) {
         let g = preset("K6C").unwrap();
         // mu, komega, kappa, kphi, gamma, delta
         let values = g
             .values_from_degrees(&[3.0, 20.0, -30.0, 40.0, 12.0, 25.0])
             .unwrap();
-        let frame = Frame {
-            values,
-            wavelength: Wavelength::new(1.54).unwrap(),
-        };
+        let wavelength = Wavelength::new(1.54).unwrap();
         let d = PixelDetector::new(
             (3, 4),
             Vector3::new(0.5, -0.002, -0.0015),
@@ -139,7 +141,7 @@ mod tests {
             Vector3::new(0.0, 0.001, 0.0),
         )
         .unwrap();
-        (g, frame, d)
+        (g, values, wavelength, d)
     }
 
     fn sample() -> Sample {
@@ -165,22 +167,15 @@ mod tests {
 
     #[test]
     fn every_pixel_matches_forward() {
-        let (g, frame, d) = setup();
+        let (g, values, wavelength, d) = setup();
         let s = sample();
         let n = Unit::new_normalize(Vector3::new(0.2, -0.1, 1.0));
-        let out = all().map(|p| p.project(&g, &frame, &d).unwrap());
+        let out = all().map(|p| p.project(&g, &values, wavelength, &d).unwrap());
         let (slow, fast) = d.shape();
         for i in 0..slow {
             for j in 0..fast {
                 let px = i * fast + j;
-                let f = forward(
-                    &g,
-                    &s,
-                    &frame.values,
-                    frame.wavelength,
-                    &d.pixel(i, j).unwrap(),
-                )
-                .unwrap();
+                let f = forward(&g, &s, &values, wavelength, &d.pixel(i, j).unwrap()).unwrap();
                 let sc = f.scattering;
                 let at = |k: usize| -> Vec<f64> { out[k].planes().iter().map(|p| p[px]).collect() };
                 let close =
@@ -202,9 +197,9 @@ mod tests {
     fn bin8_names_come_from_the_projection() {
         // BIN-8: binoculars labelled a 2θ axis `q`; here the planes are
         // labelled by the variant that computed them
-        let (g, frame, d) = setup();
+        let (g, values, wavelength, d) = setup();
         for p in all() {
-            let out = p.project(&g, &frame, &d).unwrap();
+            let out = p.project(&g, &values, wavelength, &d).unwrap();
             assert_eq!(out.names(), p.names());
             assert_eq!(out.planes().len(), p.names().len());
             let mut cube = Cube::default();
@@ -225,12 +220,11 @@ mod tests {
         let values = g
             .values_from_degrees(&[0.0, 0.0, 0.0, 0.0, 0.0, 90.0])
             .unwrap();
-        let frame = Frame {
-            values,
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
+        let wavelength = Wavelength::new(1.0).unwrap();
         let d = PixelDetector::point(Unit::new_normalize(Vector3::x()), 2.0).unwrap();
-        let a = Projection::Angles.project(&g, &frame, &d).unwrap();
+        let a = Projection::Angles
+            .project(&g, &values, wavelength, &d)
+            .unwrap();
         let v: Vec<f64> = a.planes().iter().map(|p| p[0]).collect();
         for (x, y) in v.iter().zip([FRAC_PI_2, 0.0, FRAC_PI_2]) {
             assert!((x - y).abs() < 1e-12, "{v:?}");
