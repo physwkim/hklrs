@@ -44,9 +44,10 @@ pub fn tth2(s: &Scattering) -> (Rad, Rad) {
 /// `sample_rotation`, the rotation of the sample stack at these axes.
 ///
 /// qper = ±|(Q·n̂)n̂| signed by Q·n̂; qpar = ±|Q − (Q·n̂)n̂| signed by
-/// Q·(k̂i × n̂) (`common-q.c:233-247`). The qpar sign is 0 when k_f lies in
-/// the k_i–n̂ plane; zero then counts as positive, where hkl takes the sign
-/// bit of the rounded product.
+/// Q·(k̂i × n̂) (`common-q.c:344-362`). The qpar sign is a convention where
+/// k_f lies in the k_i–n̂ plane (the product is 0 there); zero counts as
+/// positive, which matches hkl at exact delta = 0 and gamma = 0 (the sign
+/// bit of the rounded product, as hkl takes it, differs on −0.0).
 pub fn qper_qpar(
     s: &Scattering,
     sample_rotation: &UnitQuaternion<f64>,
