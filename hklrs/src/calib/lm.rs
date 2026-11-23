@@ -92,8 +92,18 @@ impl Solution {
     /// `rank_tol` of the largest, with the parameters carrying that null
     /// direction. A parameter the residuals do not depend on is named alone.
     pub fn covariance(&self, rank_tol: f64) -> Result<DMatrix<f64>, Vec<usize>> {
-        let n = self.x.len();
-        let eig = SymmetricEigen::new(self.jtj.clone());
+        let all: Vec<usize> = (0..self.x.len()).collect();
+        self.covariance_of(&all, rank_tol)
+    }
+
+    /// [`covariance`](Self::covariance) of the parameters `keep` with every
+    /// other parameter held at its fitted value: the conditional covariance,
+    /// for a nuisance parameter that has no identifiable error of its own.
+    /// The result is `keep.len()` square; `Err` indices are into `x`.
+    pub fn covariance_of(&self, keep: &[usize], rank_tol: f64) -> Result<DMatrix<f64>, Vec<usize>> {
+        let n = keep.len();
+        let sub = DMatrix::from_fn(n, n, |i, j| self.jtj[(keep[i], keep[j])]);
+        let eig = SymmetricEigen::new(sub);
         let lmax = eig.eigenvalues.max();
         let floor = rank_tol * lmax;
         let mut named = vec![false; n];
@@ -107,7 +117,7 @@ impl Solution {
             }
         }
         if any {
-            return Err((0..n).filter(|&j| named[j]).collect());
+            return Err((0..n).filter(|&j| named[j]).map(|j| keep[j]).collect());
         }
         let mut inv = DMatrix::zeros(n, n);
         for k in 0..n {
@@ -116,7 +126,7 @@ impl Solution {
         }
         for i in 0..n {
             for j in 0..n {
-                inv[(i, j)] *= self.scale[i] * self.scale[j];
+                inv[(i, j)] *= self.scale[keep[i]] * self.scale[keep[j]];
             }
         }
         Ok(inv)
