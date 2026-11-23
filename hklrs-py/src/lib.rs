@@ -33,7 +33,7 @@ create_exception!(
     hklrs,
     NoSolutionInLimits,
     NoSolution,
-    "Every solution takes a written axis outside its limits; carries them as \
+    "Every solution takes an axis outside its limits; carries them as \
      solutions (degrees / metres, nearest to current first)."
 );
 
@@ -202,9 +202,10 @@ impl PyGeometry {
 
     /// Limits axis `name` to [min, max], inclusive, degrees for a rotation
     /// and metres otherwise; an infinite end is unbounded. The inverse keeps
-    /// the solutions whose written axes are all within their limits, after
-    /// wrapping to their cut points. A mode solves on its geometry as it is
-    /// when solving.
+    /// the solutions whose axes are all within their limits: a written
+    /// rotation after wrapping to its cut point, a held axis at its value in
+    /// `current`, never wrapped. A mode solves on its geometry as it is when
+    /// solving.
     fn set_limits(&mut self, name: &str, min: f64, max: f64) -> PyResult<()> {
         let axis = self.axis(name)?;
         let (lo, hi) = (internal_value(axis, min), internal_value(axis, max));
