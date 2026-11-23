@@ -1,8 +1,9 @@
 //! Python bindings: conversions only. Angles are degrees at this boundary,
 //! translations metres, wavelength Å.
 
+use hklrs::absorption::Masked;
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
-use hklrs::xu;
+use hklrs::{poni, xu};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -501,7 +502,8 @@ fn pseudo(
 }
 
 /// Pixels in the detector-arm frame (all axes zero), metres. Built by the
-/// xu importers; opaque apart from its shape, mask and pixel positions.
+/// xu and PONI importers; opaque apart from its shape, mask and pixel
+/// positions.
 #[pyclass(name = "PixelDetector", frozen)]
 struct PyPixelDetector(hklrs::PixelDetector);
 
@@ -563,16 +565,15 @@ fn xu_direction(text: &str) -> PyResult<xu::Direction> {
     text.parse().map_err(err)
 }
 
-/// `r_i` of the frame the direction strings are given in.
-fn xu_beam(beam: [f64; 3]) -> PyResult<Unit<Vector3<f64>>> {
-    let v = Vector3::from(beam);
+fn unit(what: &str, v: [f64; 3]) -> PyResult<Unit<Vector3<f64>>> {
+    let v = Vector3::from(v);
     v.iter()
         .all(|x| x.is_finite())
         .then(|| Unit::try_new(v, 0.0))
         .flatten()
         .ok_or_else(|| {
             err(hklrs::Error::ZeroVector {
-                what: "xu beam".to_owned(),
+                what: what.to_owned(),
             })
         })
 }
@@ -656,7 +657,7 @@ impl PyXuArea {
     /// strings are given in.
     fn detector(&self, beam: [f64; 3]) -> PyResult<PyPixelDetector> {
         self.0
-            .detector(xu_beam(beam)?)
+            .detector(unit("xu beam", beam)?)
             .map(PyPixelDetector)
             .map_err(err)
     }
@@ -719,10 +720,241 @@ impl PyXuLinear {
     /// string is given in.
     fn detector(&self, beam: [f64; 3]) -> PyResult<PyPixelDetector> {
         self.0
-            .detector(xu_beam(beam)?)
+            .detector(unit("xu beam", beam)?)
             .map(PyPixelDetector)
             .map_err(err)
     }
+}
+
+fn poni_err(e: poni::PoniError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+fn orientation(n: u32) -> PyResult<poni::Orientation> {
+    poni::Orientation::try_from(n).map_err(poni_err)
+}
+
+/// pyFAI's axes in the lab: axis 3 along `beam`, axis 1 along the part of
+/// `up` normal to it.
+fn lab_axes(beam: [f64; 3], up: [f64; 3]) -> PyResult<poni::LabAxes> {
+    poni::LabAxes::new(unit("beam", beam)?, unit("up", up)?).map_err(poni_err)
+}
+
+fn degrees(r: hklrs::Rad) -> f64 {
+    hklrs::Deg::from(r).0
+}
+
+fn radians(d: f64) -> hklrs::Rad {
+    hklrs::Deg(d).into()
+}
+
+/// pyFAI's geometry of a flat detector, lengths in metres and rotations in
+/// degrees (a `.poni` file's are radians): `Poni(dist, (poni1, poni2),
+/// (rot1, rot2, rot3), (pixel1, pixel2), shape, orientation)`, `shape` being
+/// (slow, fast) = pyFAI's (dim1, dim2) and `orientation` pyFAI's 1-4.
+#[pyclass(name = "Poni", module = "hklrs.poni", frozen)]
+struct PyPoni(poni::Poni);
+
+#[pymethods]
+impl PyPoni {
+    #[new]
+    fn new(
+        dist: f64,
+        poni: [f64; 2],
+        rot: [f64; 3],
+        pixel: [f64; 2],
+        shape: (usize, usize),
+        orientation: u32,
+    ) -> PyResult<Self> {
+        Ok(Self(poni::Poni {
+            dist,
+            poni1: poni[0],
+            poni2: poni[1],
+            rot1: radians(rot[0]),
+            rot2: radians(rot[1]),
+            rot3: radians(rot[2]),
+            pixel1: pixel[0],
+            pixel2: pixel[1],
+            shape,
+            orientation: self::orientation(orientation)?,
+        }))
+    }
+
+    /// The PONI of `detector` read in `orientation`, lab axes as for
+    /// `detector`, whose `detector` gives `detector` back. rot2 comes out in
+    /// [-90, 90] and rot1, rot3 in [-180, 180].
+    #[staticmethod]
+    fn from_detector(
+        detector: &PyPixelDetector,
+        orientation: u32,
+        beam: [f64; 3],
+        up: [f64; 3],
+    ) -> PyResult<Self> {
+        let lab = lab_axes(beam, up)?;
+        poni::Poni::from_detector(&detector.0, self::orientation(orientation)?, &lab)
+            .map(Self)
+            .map_err(poni_err)
+    }
+
+    /// The detector with pyFAI's axis 3 along `beam` and axis 1 along the
+    /// part of `up` normal to it, positions relative to the sample.
+    fn detector(&self, beam: [f64; 3], up: [f64; 3]) -> PyResult<PyPixelDetector> {
+        self.0
+            .detector(&lab_axes(beam, up)?)
+            .map(PyPixelDetector)
+            .map_err(poni_err)
+    }
+
+    #[getter]
+    fn dist(&self) -> f64 {
+        self.0.dist
+    }
+
+    #[getter]
+    fn poni1(&self) -> f64 {
+        self.0.poni1
+    }
+
+    #[getter]
+    fn poni2(&self) -> f64 {
+        self.0.poni2
+    }
+
+    #[getter]
+    fn rot1(&self) -> f64 {
+        degrees(self.0.rot1)
+    }
+
+    #[getter]
+    fn rot2(&self) -> f64 {
+        degrees(self.0.rot2)
+    }
+
+    #[getter]
+    fn rot3(&self) -> f64 {
+        degrees(self.0.rot3)
+    }
+
+    #[getter]
+    fn pixel1(&self) -> f64 {
+        self.0.pixel1
+    }
+
+    #[getter]
+    fn pixel2(&self) -> f64 {
+        self.0.pixel2
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        self.0.shape
+    }
+
+    #[getter]
+    fn orientation(&self) -> u32 {
+        self.0.orientation as u32
+    }
+}
+
+/// A `.poni` file as pyFAI reads it, lengths in metres and rotations in
+/// degrees. `detector` is pyFAI's detector name; `orientation` is None where
+/// the file gives none, which is 3 for pyFAI's generic `Detector`.
+#[pyclass(name = "PoniFile", module = "hklrs.poni", frozen)]
+struct PyPoniFile(poni::PoniFile);
+
+#[pymethods]
+impl PyPoniFile {
+    /// The PONI of pyFAI's generic flat detector. A named detector takes its
+    /// pixels, shape and default orientation from pyFAI, so it is a
+    /// ValueError here, as are a spline, parallax and binning.
+    fn poni(&self) -> PyResult<PyPoni> {
+        self.0.poni().map(PyPoni).map_err(poni_err)
+    }
+
+    /// `poni_version` as pyFAI raises it from the file's contents.
+    #[getter]
+    fn version(&self) -> f64 {
+        self.0.version
+    }
+
+    #[getter]
+    fn detector(&self) -> &str {
+        &self.0.detector.name
+    }
+
+    #[getter]
+    fn pixel1(&self) -> Option<f64> {
+        self.0.detector.pixel1
+    }
+
+    #[getter]
+    fn pixel2(&self) -> Option<f64> {
+        self.0.detector.pixel2
+    }
+
+    #[getter]
+    fn max_shape(&self) -> Option<(usize, usize)> {
+        self.0.detector.max_shape
+    }
+
+    #[getter]
+    fn orientation(&self) -> Option<u32> {
+        self.0.detector.orientation.map(|o| o as u32)
+    }
+
+    #[getter]
+    fn binning(&self) -> (u64, u64) {
+        self.0.detector.binning
+    }
+
+    #[getter]
+    fn splinefile(&self) -> Option<&str> {
+        self.0.detector.splinefile.as_deref()
+    }
+
+    #[getter]
+    fn parallax(&self) -> bool {
+        self.0.parallax
+    }
+
+    #[getter]
+    fn dist(&self) -> f64 {
+        self.0.dist
+    }
+
+    #[getter]
+    fn poni1(&self) -> f64 {
+        self.0.poni1
+    }
+
+    #[getter]
+    fn poni2(&self) -> f64 {
+        self.0.poni2
+    }
+
+    #[getter]
+    fn rot1(&self) -> f64 {
+        degrees(self.0.rot1)
+    }
+
+    #[getter]
+    fn rot2(&self) -> f64 {
+        degrees(self.0.rot2)
+    }
+
+    #[getter]
+    fn rot3(&self) -> f64 {
+        degrees(self.0.rot3)
+    }
+}
+
+/// The `.poni` text as pyFAI reads it, and beside it the file's wavelength
+/// (Å), None if it gives none.
+#[pyfunction]
+fn parse(text: &str) -> PyResult<(PyPoniFile, Option<f64>)> {
+    let file = poni::PoniFile::parse(text).map_err(poni_err)?;
+    let wavelength = file.wavelength.map(hklrs::Wavelength::angstrom);
+    Ok((PyPoniFile(file), wavelength))
 }
 
 type Planes<'py> = (
@@ -772,9 +1004,119 @@ fn detector_positions<'py>(
     planes(py, p)
 }
 
+/// The code a reasons array holds for `m`; 0 is a pixel with a value.
+fn masked_code(m: Masked) -> u8 {
+    match m {
+        Masked::Unlit => 1,
+        Masked::GrazingExit => 2,
+        Masked::ThroughBulk => 3,
+        Masked::Opaque => 4,
+        Masked::EdgeOn => 5,
+        Masked::Extinct => 6,
+    }
+}
+
+/// Every reason, for the Python enum; a new variant fails to compile in
+/// `masked_code` first.
+const MASKED: [Masked; 6] = [
+    Masked::Unlit,
+    Masked::GrazingExit,
+    Masked::ThroughBulk,
+    Masked::Opaque,
+    Masked::EdgeOn,
+    Masked::Extinct,
+];
+
+type WeightArrays<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<u8>>);
+
+/// Row-major values and reasons: the weight and 0, or NaN and the reason's
+/// code.
+fn split(w: hklrs::Weights) -> ((usize, usize), Vec<f64>, Vec<u8>) {
+    let (values, reasons) = w
+        .data
+        .iter()
+        .map(|w| match w {
+            Ok(v) => (v.get(), 0),
+            Err(m) => (f64::NAN, masked_code(*m)),
+        })
+        .unzip();
+    (w.shape(), values, reasons)
+}
+
+fn weight_arrays(
+    py: Python<'_>,
+    (shape, values, reasons): ((usize, usize), Vec<f64>, Vec<u8>),
+) -> PyResult<WeightArrays<'_>> {
+    Ok((
+        PyArray1::from_vec(py, values).reshape(shape)?,
+        PyArray1::from_vec(py, reasons).reshape(shape)?,
+    ))
+}
+
+/// Solid angle of every pixel (sr) at `axes`, arguments as for `q_map`:
+/// (values, reasons), each a (slow, fast) array. A pixel with no value has
+/// NaN and its `Masked` reason, `EdgeOn` here; the others have reason 0.
+#[pyfunction]
+fn solid_angle<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+) -> PyResult<WeightArrays<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let frame = frame(geo, &axes, wavelength)?;
+    let w = py
+        .detach(|| hklrs::solid_angle(geo, &frame, det).map(split))
+        .map_err(err)?;
+    weight_arrays(py, w)
+}
+
+/// Polarisation factor of every pixel at `axes`, arguments as for `q_map`,
+/// for a beam whose electric field lies along `e` (lab frame, projected
+/// normal to the beam) with degree `factor` in [-1, 1]: 1 fully along `e`,
+/// 0 unpolarised. Values and reasons as for `solid_angle`, `Extinct` where
+/// the factor vanishes.
+#[pyfunction]
+fn polarisation<'py>(
+    py: Python<'py>,
+    geometry: &PyGeometry,
+    axes: Vec<f64>,
+    wavelength: f64,
+    detector: &PyPixelDetector,
+    e: [f64; 3],
+    factor: f64,
+) -> PyResult<WeightArrays<'py>> {
+    let (geo, det) = (&geometry.0, &detector.0);
+    let frame = frame(geo, &axes, wavelength)?;
+    let pol = hklrs::Polarisation {
+        e: Vector3::from(e),
+        factor,
+    };
+    let w = py
+        .detach(|| hklrs::polarisation(geo, &frame, det, pol).map(split))
+        .map_err(err)?;
+    weight_arrays(py, w)
+}
+
 #[pyfunction]
 fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
+}
+
+fn submodule(
+    m: &Bound<'_, PyModule>,
+    name: &str,
+    fill: impl FnOnce(&Bound<'_, PyModule>) -> PyResult<()>,
+) -> PyResult<()> {
+    let sub = PyModule::new(m.py(), name)?;
+    fill(&sub)?;
+    m.add_submodule(&sub)?;
+    // lets `import hklrs.<name>` find the submodule of an extension module
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item(format!("hklrs.{name}"), &sub)
 }
 
 #[pymodule]
@@ -786,15 +1128,15 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySample>()?;
     m.add_class::<PyMode>()?;
     m.add_class::<PyPixelDetector>()?;
-    let xu = PyModule::new(m.py(), "xu")?;
-    xu.add_class::<PyXuArea>()?;
-    xu.add_class::<PyXuLinear>()?;
-    m.add_submodule(&xu)?;
-    // lets `import hklrs.xu` find the submodule of an extension module
-    m.py()
-        .import("sys")?
-        .getattr("modules")?
-        .set_item("hklrs.xu", &xu)?;
+    submodule(m, "xu", |xu| {
+        xu.add_class::<PyXuArea>()?;
+        xu.add_class::<PyXuLinear>()
+    })?;
+    submodule(m, "poni", |p| {
+        p.add_class::<PyPoni>()?;
+        p.add_class::<PyPoniFile>()?;
+        p.add_function(wrap_pyfunction!(parse, p)?)
+    })?;
     m.add("InverseError", m.py().get_type::<InverseError>())?;
     m.add("Unreachable", m.py().get_type::<Unreachable>())?;
     m.add("NoSolution", m.py().get_type::<NoSolution>())?;
@@ -806,5 +1148,23 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(presets, m)?)?;
     m.add_function(wrap_pyfunction!(q_map, m)?)?;
     m.add_function(wrap_pyfunction!(detector_positions, m)?)?;
+    m.add_function(wrap_pyfunction!(solid_angle, m)?)?;
+    m.add_function(wrap_pyfunction!(polarisation, m)?)?;
+    let members: Vec<(String, u8)> = MASKED
+        .iter()
+        .map(|&r| (format!("{r:?}"), masked_code(r)))
+        .collect();
+    let kwargs = PyDict::new(m.py());
+    kwargs.set_item("module", "hklrs")?;
+    let masked = m
+        .py()
+        .import("enum")?
+        .getattr("IntEnum")?
+        .call(("Masked", members), Some(&kwargs))?;
+    masked.setattr(
+        "__doc__",
+        "Why a pixel has no weight: the codes of a reasons array, 0 being none.",
+    )?;
+    m.add("Masked", masked)?;
     Ok(())
 }
