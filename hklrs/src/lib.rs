@@ -11,6 +11,7 @@ pub mod inverse;
 mod lattice;
 pub mod presets;
 pub mod pseudo;
+mod qmap;
 mod sample;
 mod units;
 pub mod xu;
@@ -21,6 +22,7 @@ pub use forward::{Forward, Scattering, angle_between, forward, scattering, scatt
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
 pub use inverse::{Equation, Eulerian, InverseError, InverseRequest, Mode, Picker, Slits, Target};
 pub use lattice::Lattice;
+pub use qmap::{Frame, Planes, QMap, detector_positions, q_map};
 pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
 pub use units::{Deg, Energy, HC_KEV_ANGSTROM, Rad, Wavelength};
 
