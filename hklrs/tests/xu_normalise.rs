@@ -3,8 +3,7 @@
 //!
 //! Where xu is correct the values agree to 1e-12. Where xu is wrong, the
 //! test asserts what xu returned and that hklrs differs, citing the
-//! upstream-defects entry; XU-17..XU-20 are provisional numbers of entries
-//! not yet filed.
+//! upstream-defects entry.
 
 pub mod common;
 
@@ -204,11 +203,11 @@ fn xu10_ccd_without_a_monitor_normalises() {
     }
 }
 
-/// XU-17 (to file): xu's 3D branch ignores dark and flat field arguments
+/// XU-21: xu's 3D branch ignores dark and flat field arguments
 /// ("still missing"), so a CCD stack is corrected for monitor, time and
 /// absfun only.
 #[test]
-fn xu17_ccd_applies_dark_and_flat() {
+fn xu21_ccd_applies_dark_and_flat() {
     let doc = load("xu_normalise.json");
     let case = &cases(&doc, "divergence")["ccd_dark_flat_ignored"];
     let with_fields = build(case);
@@ -243,10 +242,10 @@ fn xu17_ccd_applies_dark_and_flat() {
     );
 }
 
-/// XU-18 (to file): xu sets a dark-subtracted pixel below 0 to 0; hklrs
+/// XU-22: xu sets a dark-subtracted pixel below 0 to 0; hklrs
 /// keeps the sign, which an unbiased mean of low counts needs.
 #[test]
-fn xu18_dark_subtraction_is_signed() {
+fn xu22_dark_subtraction_is_signed() {
     let doc = load("xu_normalise.json");
     let case = &cases(&doc, "divergence")["dark_clamped"];
     let c = build(case);
@@ -268,11 +267,11 @@ fn xu18_dark_subtraction_is_signed() {
     assert!(negative > 0, "the case must have a pixel below the dark");
 }
 
-/// XU-19 (to file): a monitor of 0 makes xu's factor infinite, and xu
+/// XU-23: a monitor of 0 makes xu's factor infinite, and xu
 /// replaces it by 1 without a word, returning the raw counts as the
 /// normalised intensity; hklrs refuses the frame.
 #[test]
-fn xu19_a_zero_monitor_is_an_error() {
+fn xu23_a_zero_monitor_is_an_error() {
     let doc = load("xu_normalise.json");
     let case = &cases(&doc, "divergence")["zero_monitor"];
     let c = build(case);
@@ -282,10 +281,10 @@ fn xu19_a_zero_monitor_is_an_error() {
     assert!(c.scalars[0].is_ok() && c.scalars[2].is_ok());
 }
 
-/// XU-20 (to file): xu sets a flat-field pixel below 1e-5 to 1 and
+/// XU-24: xu sets a flat-field pixel below 1e-5 to 1 and
 /// normalises with it; hklrs masks the pixel.
 #[test]
-fn xu20_a_dead_flat_pixel_is_masked() {
+fn xu24_a_dead_flat_pixel_is_masked() {
     let doc = load("xu_normalise.json");
     let case = &cases(&doc, "divergence")["flat_below_1e-5"];
     let c = build(case);
