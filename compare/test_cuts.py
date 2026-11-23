@@ -114,9 +114,10 @@ def test_width_footprint_is_xu_fuzzy_gridder(case):
     dx = (x[-1] - x[0]) / (NP - 1)
     edge_safe(along, x[0], dx, width)
     r = accumulate(cut, c["q"], c["inten"], hc.Footprint.width(width))
-    w = dense(r, r.weights)
-    got = np.divide(dense(r, r.counts), w, out=np.zeros(NP), where=w > 1e-16)
-    np.testing.assert_allclose(got, data, rtol=1e-9, atol=1e-12)
+    # the ratio of the sums is xu's value; an empty bin is NaN here and 0 in xu
+    np.testing.assert_allclose(dense(r, r.intensity), data, rtol=1e-9, atol=1e-12)
+    assert not np.isnan(r.intensity).any()
+    assert np.all(data[np.setdiff1d(np.arange(NP), r.bins)] == 0)
     np.testing.assert_allclose(r.centres, x[r.bins], rtol=0, atol=1e-9)
     assert int(mask.sum()) == int(c["sel"].sum())
     # hklrs counts every selected pixel once somewhere; xu's `mask` is a bin mask
@@ -133,8 +134,8 @@ def test_point_footprint_is_xu_gridder1d(case):
     r = accumulate(cut, c["q"], c["inten"], hc.Footprint.point())
     n = dense(r, r.contributions)
     np.testing.assert_array_equal(n, g._gnorm)
-    got = np.divide(dense(r, r.counts), n, out=np.zeros(NP), where=n > 0)
-    np.testing.assert_allclose(got, g.data, rtol=1e-9, atol=1e-12)
+    # weight 1: the ratio of the sums is Gridder1D's mean
+    np.testing.assert_allclose(dense(r, r.intensity), g.data, rtol=1e-9, atol=1e-12)
     np.testing.assert_array_equal(r.weights, r.contributions)  # weight 1
 
 
@@ -229,6 +230,24 @@ def test_reason_wins_and_a_bad_weight_is_opaque():
         + r.skipped["no_coordinate"] == N
 
 
+def test_intensity_is_nan_where_the_weight_sums_to_zero():
+    # every weight is positive, so Σweight is 0 only by underflow: a quarter of the smallest
+    # subnormal rounds to 0 while the counts (8 * 0.25) do not
+    cut = hc.Cut("qz", "q", 1.0, (1.0, 0.0))
+    r = cut.accumulate(WL, hc.Footprint.width(1.0), np.array([[0.0, 0.0, 1.25]]),  # [0.75, 1.75]
+                       np.array([8.0]), np.array([5e-324]), np.zeros(1, np.uint8))
+    np.testing.assert_array_equal(r.bins, [0, 1])
+    assert r.weights[0] == 0.0 and r.counts[0] == 2.0 and r.contributions[0] == 1
+    assert np.isnan(r.intensity[0]) and not np.isnan(r.intensity[1])
+    # nothing accumulated: no bins, an empty array
+    r = cut.accumulate(WL, hc.Footprint.point(), np.zeros((2, 3)), np.ones(2), np.ones(2),
+                       np.array([1, 2], np.uint8))
+    assert r.intensity.shape == (0,) and len(r) == 0
+    r = cut.accumulate(WL, hc.Footprint.point(), np.zeros((2, 3)), np.array([6.0, 2.0]),
+                       np.array([4.0, 4.0]), np.zeros(2, np.uint8))
+    np.testing.assert_array_equal(r.intensity, [1.0])
+
+
 def test_argument_errors():
     cut = hc.Cut("qz", "q", 1.0, (1.0, 0.0))
     q = np.zeros((4, 3))
@@ -242,7 +261,7 @@ def test_argument_errors():
     for bad in (("nope", "q"), ("qx", "radial"), ("line", "q")):
         with pytest.raises(ValueError):
             hc.Cut(*bad, 1.0, (1.0, 0.0))
-    assert not hasattr(hc.CutResult, "value") and not hasattr(hc.CutResult, "mean")
+    assert not hasattr(hc.CutResult, "mean")
     c = hc.Cut("omega", "2theta", 0.5, (0.1, 0.05), at=[0.0, 2.0, 5.0])
     assert (c.kind, c.intdir, c.half_width) == ("omega", "2theta", 0.5)
     assert c.binning == pytest.approx((0.1, 0.05))
