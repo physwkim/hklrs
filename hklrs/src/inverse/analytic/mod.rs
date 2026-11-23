@@ -463,9 +463,10 @@ mod tests {
     }
 
     /// The closed form's set against the numeric search's for `mode`, from
-    /// three held positions and four targets: per case `None` where the
-    /// closed form refuses the mode, else whether a position solves it (the
-    /// same positions within 1e-6) or the same error, or the disagreement.
+    /// three held positions and five targets, the last at 2θ near 1.3°:
+    /// per case `None` where the closed form refuses the mode, else whether
+    /// a position solves it (the same positions within 1e-6) or the same
+    /// error, or the disagreement.
     fn cases(mode: &Mode) -> Vec<Option<Result<bool, String>>> {
         let ub = nalgebra::Rotation3::from_euler_angles(0.3, -0.2, 0.5).into_inner() * 1.5;
         let targets = [
@@ -473,6 +474,7 @@ mod tests {
             Vector3::new(0.3, -0.4, 1.1),
             Vector3::new(1.2, 0.8, -0.5),
             Vector3::new(2.5, 1.0, 1.5),
+            Vector3::new(0.002, -0.012, -0.019),
         ];
         let n = mode.geometry().axes().len();
         let turned: Vec<f64> = (0..n).map(|i| 0.3 - 0.17 * i as f64).collect();
