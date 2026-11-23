@@ -1,5 +1,5 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
-//! ESRF BM28 PSIC and ZAXIS.
+//! ESRF BM28 PSIC, ZAXIS and ESRF ID01 PSIC.
 //!
 //! Per case: the mode writes hkl's axes; every hkl solution within VIOLATION
 //! of hkl's own mode equations is in the hklrs set within MATCH rad, directly
@@ -343,4 +343,7 @@ golden! {
     bm28_constant_eta_noncoplanar: "ESRF BM28 PSIC" "constant_eta_noncoplanar",
     zaxis_zaxis: "ZAXIS" "zaxis",
     zaxis_reflectivity: "ZAXIS" "reflectivity",
+    id01_constant_nu_coplanar: "ESRF ID01 PSIC" "constant_nu_coplanar",
+    id01_constant_delta_coplanar: "ESRF ID01 PSIC" "constant_delta_coplanar",
+    id01_constant_eta_noncoplanar: "ESRF ID01 PSIC" "constant_eta_noncoplanar",
 }
