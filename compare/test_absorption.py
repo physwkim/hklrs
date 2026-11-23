@@ -198,6 +198,50 @@ def test_mu_is_the_same_at_every_wavelength():
     assert np.array_equal(a, b, equal_nan=True)
 
 
+HC = 12.398419843320026  # keV Å, hklrs::units::HC_KEV_ANGSTROM
+KEV = [5.0, 8.04778, 17.47934, 30.0, 80.0]
+# formula, density (g/cm³); air is dry air at 20 °C by atoms
+MATERIALS = {
+    "Si": ([("Si", 1.0)], 2.33),
+    "air": ([("N", 1.56168), ("O", 0.41892), ("Ar", 0.00934)], 1.205e-3),
+    "Be": ([("Be", 1.0)], 1.848),
+    "Kapton": ([("C", 22.0), ("H", 10.0), ("N", 2.0), ("O", 5.0)], 1.43),
+}
+
+
+@pytest.mark.parametrize("name", MATERIALS)
+def test_material_mu_matches_xrt(name):
+    """Against Python xrt on Chantler's total cross-sections, which takes eV
+    and gives 1/cm."""
+    xm = pytest.importorskip("xrt.backends.raycing.materials")
+    formula, density = MATERIALS[name]
+    elements, quantities = zip(*formula)
+    want = xm.Material(list(elements), list(quantities), rho=density,
+                       table="Chantler total")
+    got = hklrs.Material(formula, density)
+    for kev in KEV:
+        wl = HC / kev
+        per_cm = want.get_absorption_coefficient(np.array([HC / wl * 1e3]))[0]
+        assert abs(got.mu(wl) / (per_cm * 100) - 1) < 1e-14, kev
+
+
+def test_material_mu_follows_the_wavelength():
+    """Each Material weighs as its mu at the beam energy given as a number."""
+    si, air, be, kapton = (hklrs.Material(*MATERIALS[n]) for n in ("Si", "air", "Be", "Kapton"))
+    by_material = hklrs.Absorber(slab(Z, 50e-6), PENCIL, si, air=air, window=(be, 25e-6),
+                                 sensor=(kapton, 450e-6))
+    got = {}
+    for wl in (WAVELENGTH, 0.7, HC / 30.0):
+        by_number = hklrs.Absorber(slab(Z, 50e-6), PENCIL, si.mu(wl), air=air.mu(wl),
+                                   window=(be.mu(wl), 25e-6), sensor=(kapton.mu(wl), 450e-6))
+        got[wl], reasons = hklrs.absorption(GEOMETRY, [15, 0, 0, 30], wl, NEAR, by_material)
+        want = hklrs.absorption(GEOMETRY, [15, 0, 0, 30], wl, NEAR, by_number)
+        assert not reasons.any()
+        assert np.array_equal(got[wl], want[0]) and np.array_equal(reasons, want[1])
+    a, b, c = got.values()
+    assert not (np.array_equal(a, b) or np.array_equal(b, c))
+
+
 def test_layers_need_a_pixel_area():
     """An xu linear detector's pixels have no area: air is fine, a window or
     sensor is an error."""
@@ -228,6 +272,15 @@ INVALID = {
         [15, 0, 0, 30], FAR, Z, None, beam=hklrs.Beam.top_hat(X_, [1e-4, 1e-4])),
     "zero-wavelength": lambda: hklrs.absorption(
         GEOMETRY, [15, 0, 0, 30], 0.0, FAR, hklrs.Absorber(slab(Z, None), PENCIL, MU)),
+    "unknown-element": lambda: hklrs.Material([("Xx", 1.0)], 1.0),
+    "empty-formula": lambda: hklrs.Material([], 1.0),
+    "zero-density": lambda: hklrs.Material([("Si", 1.0)], 0.0),
+    "negative-quantity": lambda: hklrs.Material([("Si", 1.0), ("O", -2.0)], 2.2),
+    # 620 keV, past the end of every table at 432.9 keV
+    "material-past-its-table": lambda: hklrs.Material(*MATERIALS["Si"]).mu(0.02),
+    "air-past-its-table": lambda: hklrs.absorption(
+        GEOMETRY, [15, 0, 0, 30], 0.02, FAR,
+        hklrs.Absorber(slab(Z, None), PENCIL, MU, air=hklrs.Material(*MATERIALS["air"]))),
 }
 
 
