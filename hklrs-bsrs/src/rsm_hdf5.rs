@@ -10,7 +10,9 @@
 //! `[frames, slow, fast]` (NumExtraDims=0, `host/areadetector.rs:972`), and
 //! a datum's indices count its frames along the first axis.
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use bsrs::event_model::StreamResource;
 use hklrs::Image;
@@ -21,6 +23,7 @@ use rust_hdf5::format::messages::filter::{
     FILTER_LZF, FILTER_NBIT, FILTER_SCALEOFFSET, FILTER_SHUFFLE, FILTER_SZIP, FILTER_ZFP,
     FILTER_ZSTD,
 };
+use rust_hdf5::format::superblock::{FLAG_SWMR_WRITE, FLAG_WRITE_ACCESS, HDF5_SIGNATURE};
 use rust_hdf5::{DatatypeMessage, Filter, H5File, Hdf5Error};
 
 use crate::rsm::{FrameReader, ReadError};
@@ -53,6 +56,12 @@ pub enum Hdf5FrameError {
     NotLocal { uri: String },
     #[error("file {} does not exist", path.display())]
     MissingFile { path: PathBuf },
+    /// A file libhdf5's SWMR reader does not open yet (`H5Fint.c:1478-1488`
+    /// of ADSupport's HDF5 1.10.1): its superblock not flushed yet, or open
+    /// for writing outside SWMR, as NDFileHDF5 has it from `H5Fcreate` until
+    /// it has laid the file out (`NDFileHDF5.cpp:279`, 326).
+    #[error("file {} is being created: its writer has not started SWMR", path.display())]
+    Creating { path: PathBuf },
     #[error("frame {index} is out of range: the dataset holds {frames} frames")]
     IndexOutOfRange { index: u64, frames: usize },
     #[error("dataset of shape {shape:?} is not [frames, slow, fast]")]
@@ -118,6 +127,94 @@ fn undecodable(pipeline: &[Filter]) -> Option<Hdf5FrameError> {
     })
 }
 
+/// Who writes a file as a read of it begins.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Writer {
+    /// None: what the read finds is final.
+    None,
+    /// A SWMR writer, which may yet write what the read does not find.
+    Swmr,
+}
+
+/// The file's writer, from the consistency flags of a version 2 or 3
+/// superblock, which libhdf5 sets as it opens a file for writing, adds SWMR
+/// to in `H5Fstart_swmr_write` and clears as it closes the file, after the
+/// rest of its metadata (`H5Fint.c:1459-1463`, `H5F.c:1718`,
+/// `H5Fint.c:933-945`); or why a SWMR reader does not open it yet. A file
+/// whose first 8 bytes are not written yet has no superblock yet; a version
+/// 0 or 1 superblock carries no flags libhdf5 reads (`H5Fint.c:1451`), and
+/// it and a file that is not HDF5 have no writer.
+fn writer(path: &Path) -> Result<Writer, Hdf5FrameError> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(Hdf5FrameError::MissingFile {
+                path: path.to_owned(),
+            });
+        }
+        // As unreadable to H5File::open, which says why.
+        Err(_) => return Ok(Writer::None),
+    };
+    let creating = || Hdf5FrameError::Creating {
+        path: path.to_owned(),
+    };
+    let mut blank = true;
+    // H5FD_locate_signature's offsets: 0, then each power of two from 512.
+    for at in std::iter::once(0).chain((9..63).map(|bit| 1u64 << bit)) {
+        let mut head = Vec::with_capacity(12);
+        let read = file
+            .seek(SeekFrom::Start(at))
+            .and_then(|_| (&mut file).take(12).read_to_end(&mut head));
+        match read {
+            Ok(n) if n >= 8 => {}
+            Ok(_) => break,
+            Err(_) => return Ok(Writer::None),
+        }
+        if head[..8] == HDF5_SIGNATURE {
+            return match head[8..] {
+                [version, _, _, flags] if version >= 2 => {
+                    match flags & (FLAG_WRITE_ACCESS | FLAG_SWMR_WRITE) {
+                        0 => Ok(Writer::None),
+                        f if f == FLAG_WRITE_ACCESS | FLAG_SWMR_WRITE => Ok(Writer::Swmr),
+                        _ => Err(creating()),
+                    }
+                }
+                [_, _, _, _] => Ok(Writer::None),
+                _ => Err(creating()),
+            };
+        }
+        if at == 0 {
+            blank = head[..8] == [0; 8];
+        }
+    }
+    if blank {
+        Err(creating())
+    } else {
+        Ok(Writer::None)
+    }
+}
+
+/// The file and dataset of an image resource bsrs's AdHdfWriter emits.
+fn locate(resource: &StreamResource) -> Result<(PathBuf, &str), Hdf5FrameError> {
+    let dataset = match resource.parameters.get("dataset") {
+        Some(serde_json::Value::String(d)) if resource.mimetype == MIMETYPE => d,
+        _ => {
+            let mut parameters: Vec<String> = resource.parameters.keys().cloned().collect();
+            parameters.sort();
+            return Err(Hdf5FrameError::UnknownResource {
+                mimetype: resource.mimetype.clone(),
+                parameters,
+            });
+        }
+    };
+    match resource.uri.strip_prefix(LOCALHOST) {
+        Some(rest) => Ok((PathBuf::from(format!("/{rest}")), dataset)),
+        None => Err(Hdf5FrameError::NotLocal {
+            uri: resource.uri.clone(),
+        }),
+    }
+}
+
 impl Hdf5FrameReader {
     /// Frame `index` in the dataset's own (slow, fast) shape. Integer
     /// pixels are converted exactly or refused; float pixels are widened.
@@ -126,80 +223,66 @@ impl Hdf5FrameReader {
         resource: &StreamResource,
         index: u64,
     ) -> Result<Image<f64>, Hdf5FrameError> {
-        let dataset = match resource.parameters.get("dataset") {
-            Some(serde_json::Value::String(d)) if resource.mimetype == MIMETYPE => d,
-            _ => {
-                let mut parameters: Vec<String> = resource.parameters.keys().cloned().collect();
-                parameters.sort();
-                return Err(Hdf5FrameError::UnknownResource {
-                    mimetype: resource.mimetype.clone(),
-                    parameters,
-                });
-            }
-        };
-        let path = match resource.uri.strip_prefix(LOCALHOST) {
-            Some(rest) => PathBuf::from(format!("/{rest}")),
-            None => {
-                return Err(Hdf5FrameError::NotLocal {
-                    uri: resource.uri.clone(),
-                });
-            }
-        };
-        let file = H5File::open(&path).map_err(|e| match path.try_exists() {
-            Ok(false) => Hdf5FrameError::MissingFile { path: path.clone() },
-            _ => e.into(),
-        })?;
-        let ds = file.dataset(dataset)?;
-        if let Some(e) = undecodable(&ds.filters()?) {
-            return Err(e);
-        }
-        let shape = ds.shape();
-        let &[frames, slow, fast] = shape.as_slice() else {
-            return Err(Hdf5FrameError::NotFrames { shape });
-        };
-        let i = usize::try_from(index)
-            .ok()
-            .filter(|&i| i < frames)
-            .ok_or(Hdf5FrameError::IndexOutOfRange { index, frames })?;
-        let (starts, counts) = ([i, 0, 0], [1, slow, fast]);
-        let data = match ds.datatype()? {
-            DatatypeMessage::FloatingPoint { .. } => {
-                ds.read_numeric_slice_as::<f64>(&starts, &counts)?
-            }
-            _ => ds
-                .read_numeric_slice_as::<i128>(&starts, &counts)?
-                .into_iter()
-                .enumerate()
-                .map(|(pixel, value)| {
-                    if value.unsigned_abs() <= EXACT {
-                        Ok(value as f64)
-                    } else {
-                        Err(Hdf5FrameError::Inexact { pixel, value })
-                    }
-                })
-                .collect::<Result<_, _>>()?,
-        };
-        Image::new((slow, fast), data).map_err(|e| Hdf5FrameError::Hdf5(e.to_string()))
+        let (path, dataset) = locate(resource)?;
+        writer(&path)?;
+        read_frame(&path, dataset, index)
     }
 }
 
+fn read_frame(path: &Path, dataset: &str, index: u64) -> Result<Image<f64>, Hdf5FrameError> {
+    let file = H5File::open(path)?;
+    let ds = file.dataset(dataset)?;
+    if let Some(e) = undecodable(&ds.filters()?) {
+        return Err(e);
+    }
+    let shape = ds.shape();
+    let &[frames, slow, fast] = shape.as_slice() else {
+        return Err(Hdf5FrameError::NotFrames { shape });
+    };
+    let i = usize::try_from(index)
+        .ok()
+        .filter(|&i| i < frames)
+        .ok_or(Hdf5FrameError::IndexOutOfRange { index, frames })?;
+    let (starts, counts) = ([i, 0, 0], [1, slow, fast]);
+    let data = match ds.datatype()? {
+        DatatypeMessage::FloatingPoint { .. } => {
+            ds.read_numeric_slice_as::<f64>(&starts, &counts)?
+        }
+        _ => ds
+            .read_numeric_slice_as::<i128>(&starts, &counts)?
+            .into_iter()
+            .enumerate()
+            .map(|(pixel, value)| {
+                if value.unsigned_abs() <= EXACT {
+                    Ok(value as f64)
+                } else {
+                    Err(Hdf5FrameError::Inexact { pixel, value })
+                }
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    Image::new((slow, fast), data).map_err(|e| Hdf5FrameError::Hdf5(e.to_string()))
+}
+
 /// Not readable yet: a file the IOC has not created, which it creates at
-/// its first frame (LazyOpen, `host/areadetector.rs:975`); a frame past
-/// those flushed, as when the datum is sent after a failed flush
-/// (`host/areadetector.rs:1933`); and metadata read mid-rewrite.
+/// its first frame (LazyOpen, `host/areadetector.rs:975`), or has not
+/// started SWMR on; and, while a SWMR writer has the file, what it may yet
+/// write: a frame past those flushed, as when the datum is sent after a
+/// failed flush (`host/areadetector.rs:1933`), and metadata read
+/// mid-rewrite. What a file no writer has lacks, it lacks for good.
 impl FrameReader for Hdf5FrameReader {
     fn read(&self, resource: &StreamResource, index: u64) -> Result<Image<f64>, ReadError> {
-        self.frame(resource, index).map_err(|e| match e {
-            Hdf5FrameError::MissingFile { .. }
-            | Hdf5FrameError::IndexOutOfRange { .. }
-            | Hdf5FrameError::ChecksumMismatch(_) => ReadError::NotYet(e.into()),
-            Hdf5FrameError::UnknownResource { .. }
-            | Hdf5FrameError::NotLocal { .. }
-            | Hdf5FrameError::NotFrames { .. }
-            | Hdf5FrameError::Inexact { .. }
-            | Hdf5FrameError::UnsupportedFilter { .. }
-            | Hdf5FrameError::UnsupportedType(_)
-            | Hdf5FrameError::Hdf5(_) => ReadError::Permanent(e.into()),
+        let (path, dataset) = locate(resource).map_err(|e| ReadError::Permanent(e.into()))?;
+        let writer = writer(&path).map_err(|e| ReadError::NotYet(e.into()))?;
+        read_frame(&path, dataset, index).map_err(|e| match e {
+            Hdf5FrameError::IndexOutOfRange { .. }
+            | Hdf5FrameError::ChecksumMismatch(_)
+            | Hdf5FrameError::Hdf5(_)
+                if writer == Writer::Swmr =>
+            {
+                ReadError::NotYet(e.into())
+            }
+            _ => ReadError::Permanent(e.into()),
         })
     }
 }
