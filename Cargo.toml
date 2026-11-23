@@ -12,3 +12,8 @@ license = "MIT OR Apache-2.0"
 nalgebra = "0.34"
 thiserror = "2"
 serde_json = "1"
+
+# cargo nextest run -p hklrs (inverse golden): 42 s at opt-level 0,
+# 1.8 s at 1.
+[profile.test]
+opt-level = 1
