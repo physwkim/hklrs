@@ -116,6 +116,57 @@ impl PyGeometry {
     }
 }
 
+/// Axis values (degrees / metres, geometry axis order), wavelength (Å) and
+/// detector point (detector-arm frame, metres; default 1 m along the beam).
+fn kernel_inputs(
+    geo: &hklrs::Geometry,
+    axes: &[f64],
+    wavelength: f64,
+    point: Option<[f64; 3]>,
+) -> PyResult<(Vec<f64>, hklrs::Wavelength, Point3<f64>)> {
+    let values = geo.values_from_degrees(axes).map_err(err)?;
+    let wl = hklrs::Wavelength::new(wavelength).map_err(err)?;
+    let p = point.map_or_else(
+        || Point3::from(geo.beam_direction().into_inner()),
+        Point3::from,
+    );
+    Ok((values, wl, p))
+}
+
+#[pyclass(name = "Reflection", frozen)]
+struct PyReflection(hklrs::Reflection);
+
+#[pymethods]
+impl PyReflection {
+    /// Miller indices found at `axes`; arguments as for `forward`.
+    #[new]
+    #[pyo3(signature = (geometry, hkl, axes, wavelength, point=None))]
+    fn new(
+        geometry: &PyGeometry,
+        hkl: [f64; 3],
+        axes: Vec<f64>,
+        wavelength: f64,
+        point: Option<[f64; 3]>,
+    ) -> PyResult<Self> {
+        let geo = &geometry.0;
+        let (values, wl, p) = kernel_inputs(geo, &axes, wavelength, point)?;
+        hklrs::Reflection::measure(Vector3::from(hkl), geo, &values, wl, &p)
+            .map(Self)
+            .map_err(err)
+    }
+
+    #[getter]
+    fn hkl(&self) -> [f64; 3] {
+        v3(self.0.hkl())
+    }
+
+    /// Measured Q in the sample frame, Å⁻¹ with 2π.
+    #[getter]
+    fn q_sample(&self) -> [f64; 3] {
+        v3(self.0.q_sample())
+    }
+}
+
 #[pyclass(name = "Sample", frozen)]
 struct PySample(hklrs::Sample);
 
@@ -127,6 +178,20 @@ impl PySample {
     fn new(name: &str, lattice: &PyLattice, u: Option<[[f64; 3]; 3]>) -> PyResult<Self> {
         let u = u.map_or_else(Matrix3::identity, |m| Matrix3::from_fn(|i, j| m[i][j]));
         let o = hklrs::Orientation::from_u_matrix(&u).map_err(err)?;
+        Ok(Self(hklrs::Sample::new(name, lattice.0, o)))
+    }
+
+    /// U from two reflections: the primary exactly, the secondary fixes the
+    /// rotation about it.
+    #[staticmethod]
+    fn busing_levy(
+        name: &str,
+        lattice: &PyLattice,
+        primary: &PyReflection,
+        secondary: &PyReflection,
+    ) -> PyResult<Self> {
+        let o =
+            hklrs::Orientation::busing_levy(primary.0.clone(), secondary.0.clone()).map_err(err)?;
         Ok(Self(hklrs::Sample::new(name, lattice.0, o)))
     }
 
@@ -153,12 +218,7 @@ fn forward<'py>(
     point: Option<[f64; 3]>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let geo = &geometry.0;
-    let values = geo.values_from_degrees(&axes).map_err(err)?;
-    let wl = hklrs::Wavelength::new(wavelength).map_err(err)?;
-    let p = point.map_or_else(
-        || Point3::from(geo.beam_direction().into_inner()),
-        Point3::from,
-    );
+    let (values, wl, p) = kernel_inputs(geo, &axes, wavelength, point)?;
     let f = hklrs::forward(geo, &sample.0, &values, wl, &p).map_err(err)?;
     let d = PyDict::new(py);
     d.set_item("hkl", v3(&f.hkl))?;
@@ -182,6 +242,7 @@ fn presets() -> Vec<&'static str> {
 fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLattice>()?;
     m.add_class::<PyGeometry>()?;
+    m.add_class::<PyReflection>()?;
     m.add_class::<PySample>()?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(presets, m)?)?;
