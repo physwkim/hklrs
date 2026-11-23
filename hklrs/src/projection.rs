@@ -51,7 +51,7 @@ impl Projection {
     }
 
     /// The coordinates of every pixel of `detector` for one frame at axis
-    /// `values`, in the detector's row-major order.
+    /// `values`, over the detector's shape.
     pub fn project(
         &self,
         geometry: &Geometry,
@@ -68,7 +68,7 @@ impl Projection {
             }
             Self::QSample => {
                 let q = q_map(geometry, values, wavelength, detector)?;
-                q.into_planes().map(Image::into_data).into()
+                q.into_planes().into()
             }
             Self::Hkl(sample) => {
                 // U once per frame, not per pixel; hkl() is forward's kernel
@@ -105,16 +105,13 @@ impl Projection {
     }
 }
 
-/// `f` of every pixel's vector, one plane per output coordinate.
-fn map<const N: usize>(planes: &Planes, f: impl Fn(Vector3<f64>) -> [f64; N]) -> Vec<Vec<f64>> {
-    let [x, y, z] = [planes.x(), planes.y(), planes.z()].map(Image::data);
-    let mut out: Vec<Vec<f64>> = (0..N).map(|_| Vec::with_capacity(x.len())).collect();
-    for ((&x, &y), &z) in x.iter().zip(y).zip(z) {
-        for (plane, v) in out.iter_mut().zip(f(Vector3::new(x, y, z))) {
-            plane.push(v);
-        }
-    }
-    out
+/// `f` of every pixel's vector, one plane per output coordinate, each over
+/// the planes' shape.
+fn map<const N: usize>(planes: &Planes, f: impl Fn(Vector3<f64>) -> [f64; N]) -> Vec<Image<f64>> {
+    let values = Image::from_fn(planes.shape(), |s, j| f(planes.get(s, j)));
+    (0..N)
+        .map(|k| Image::from_fn(values.shape(), |s, j| values.get(s, j)[k]))
+        .collect()
 }
 
 #[cfg(test)]
@@ -180,7 +177,9 @@ mod tests {
                 let px = i * fast + j;
                 let f = forward(&g, &s, &values, wavelength, &d.pixel(i, j).unwrap()).unwrap();
                 let sc = f.scattering;
-                let at = |k: usize| -> Vec<f64> { out[k].planes().iter().map(|p| p[px]).collect() };
+                let at = |k: usize| -> Vec<f64> {
+                    out[k].planes().iter().map(|p| p.get(i, j)).collect()
+                };
                 let close =
                     |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-12);
                 assert!(close(&at(0), sc.q_lab.as_slice()), "QLab {px}");
@@ -208,7 +207,7 @@ mod tests {
             let mut cube = Cube::default();
             let binnings = vec![Binning::new(1e-3, 0.0).unwrap(); p.names().len()];
             let one = Normalised::new(1.0, Weight::new(1.0, Masked::Opaque));
-            cube.add_growing(&binnings, &out, &vec![one; out.pixels()])
+            cube.add_growing(&binnings, &out, &Image::from_fn(out.shape(), |_, _| one))
                 .unwrap();
             let axes: Vec<&str> = cube.axes().iter().map(|a| a.name()).collect();
             assert_eq!(axes, p.names());
@@ -229,7 +228,7 @@ mod tests {
         let a = Projection::Angles
             .project(&g, &values, wavelength, &d)
             .unwrap();
-        let v: Vec<f64> = a.planes().iter().map(|p| p[0]).collect();
+        let v: Vec<f64> = a.planes().iter().map(|p| p.get(0, 0)).collect();
         for (x, y) in v.iter().zip([FRAC_PI_2, 0.0, FRAC_PI_2]) {
             assert!((x - y).abs() < 1e-12, "{v:?}");
         }

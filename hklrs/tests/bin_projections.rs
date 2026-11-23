@@ -94,7 +94,7 @@ impl Setup {
             )
             .unwrap();
         (0..out.pixels())
-            .map(|i| out.planes().iter().map(|plane| plane[i]).collect())
+            .map(|i| out.planes().iter().map(|plane| plane.data()[i]).collect())
             .collect()
     }
 }

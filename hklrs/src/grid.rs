@@ -10,9 +10,8 @@
 //! instead (hkl-binoculars.c:375, :842-844), bins centred on multiples of the
 //! resolution whose edges go to the even neighbour.
 
-use crate::Error;
-use crate::absorption::Masked;
-use crate::normalise::Normalised;
+use crate::normalise::{Normalised, NormalisedFrame};
+use crate::{Error, Image};
 
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
@@ -135,25 +134,25 @@ impl Axis {
 }
 
 /// One frame in projection coordinates: per dimension its name, which the
-/// projection gives, and one value per pixel in the detector's row-major
-/// order.
+/// projection gives, and its values over the shape of the pixels it was
+/// projected from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Projected {
     names: &'static [&'static str],
-    planes: Vec<Vec<f64>>,
+    planes: Vec<Image<f64>>,
 }
 
 impl Projected {
-    pub fn new(names: &'static [&'static str], planes: Vec<Vec<f64>>) -> Result<Self, Error> {
+    pub fn new(names: &'static [&'static str], planes: Vec<Image<f64>>) -> Result<Self, Error> {
         if names.is_empty() || planes.len() != names.len() {
             return Err(Error::Dimensions {
                 expected: names.len(),
                 got: planes.len(),
             });
         }
-        let pixels = planes[0].len();
+        let shape = planes[0].shape();
         for p in &planes {
-            check_len("projection plane", p.len(), pixels)?;
+            p.check("projection plane", shape)?;
         }
         Ok(Self { names, planes })
     }
@@ -162,18 +161,23 @@ impl Projected {
         self.names
     }
 
-    pub fn planes(&self) -> &[Vec<f64>] {
+    pub fn planes(&self) -> &[Image<f64>] {
         &self.planes
     }
 
+    /// The (slow, fast) shape of the pixels projected.
+    pub fn shape(&self) -> (usize, usize) {
+        self.planes[0].shape()
+    }
+
     pub fn pixels(&self) -> usize {
-        self.planes[0].len()
+        self.planes[0].data().len()
     }
 
     /// Global bins of pixel `i` into `out`.
     fn bins(&self, binnings: &[Binning], i: usize, out: &mut [i64]) -> Result<(), Error> {
         for ((k, b), plane) in out.iter_mut().zip(binnings).zip(&self.planes) {
-            *k = b.bin(plane[i])?;
+            *k = b.bin(plane.data()[i])?;
         }
         Ok(())
     }
@@ -190,26 +194,15 @@ impl Projected {
     }
 }
 
-fn check_len(what: &'static str, len: usize, expected: usize) -> Result<(), Error> {
-    if len == expected {
-        Ok(())
-    } else {
-        Err(Error::PixelCount {
-            what,
-            len,
-            expected,
-        })
-    }
-}
-
 /// The unmasked pixels of one frame with their positions. A masked pixel
 /// adds nothing.
 fn unmasked(
     points: &Projected,
-    pixels: &[Result<Normalised, Masked>],
+    pixels: &NormalisedFrame,
 ) -> Result<Vec<(usize, Normalised)>, Error> {
-    check_len("normalised frame", pixels.len(), points.pixels())?;
+    pixels.check("normalised frame", points.shape())?;
     Ok(pixels
+        .data()
         .iter()
         .enumerate()
         .filter_map(|(i, p)| p.as_ref().ok().map(|n| (i, *n)))
@@ -221,7 +214,7 @@ fn unmasked(
 fn binned(
     binnings: &[Binning],
     points: &Projected,
-    pixels: &[Result<Normalised, Masked>],
+    pixels: &NormalisedFrame,
 ) -> Result<(Vec<Normalised>, Vec<i64>), Error> {
     points.check_binnings(binnings)?;
     let taken = unmasked(points, pixels)?;
@@ -272,11 +265,7 @@ impl Bounds {
         }
     }
 
-    pub fn include(
-        &mut self,
-        points: &Projected,
-        pixels: &[Result<Normalised, Masked>],
-    ) -> Result<(), Error> {
+    pub fn include(&mut self, points: &Projected, pixels: &NormalisedFrame) -> Result<(), Error> {
         if let Some(seen) = &self.seen
             && seen.names != points.names
         {
@@ -446,11 +435,7 @@ impl Cube {
     /// `points`, to the bin it falls in. The axes stay as they are; returns
     /// how many unmasked pixels fell outside them and were not added. On
     /// error the cube is unchanged.
-    pub fn add(
-        &mut self,
-        points: &Projected,
-        pixels: &[Result<Normalised, Masked>],
-    ) -> Result<usize, Error> {
+    pub fn add(&mut self, points: &Projected, pixels: &NormalisedFrame) -> Result<usize, Error> {
         if self.is_empty() {
             return Ok(unmasked(points, pixels)?.len());
         }
@@ -468,7 +453,7 @@ impl Cube {
         &mut self,
         binnings: &[Binning],
         points: &Projected,
-        pixels: &[Result<Normalised, Masked>],
+        pixels: &NormalisedFrame,
     ) -> Result<(), Error> {
         if !self.is_empty() {
             self.check_grid(points.names, binnings)?;
@@ -569,7 +554,7 @@ fn union(a: &[Axis], b: &[Axis]) -> Result<Vec<Axis>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::absorption::Weight;
+    use crate::absorption::{Masked, Weight};
 
     const ONE: &[&str] = &["x"];
     const TWO: &[&str] = &["x", "y"];
@@ -578,11 +563,17 @@ mod tests {
         Binning::new(1.0, 0.0).unwrap()
     }
 
+    /// Points as one row of pixels, shape (1, n).
     fn points(names: &'static [&'static str], coords: &[&[f64]]) -> Projected {
         let planes = (0..names.len())
-            .map(|d| coords.iter().map(|c| c[d]).collect())
+            .map(|d| Image::from_fn((1, coords.len()), |_, i| coords[i][d]))
             .collect();
         Projected::new(names, planes).unwrap()
+    }
+
+    /// `pixels` as one row, the shape [`points`] gives.
+    fn row(pixels: &[Result<Normalised, Masked>]) -> NormalisedFrame {
+        Image::from_fn((1, pixels.len()), |_, i| pixels[i])
     }
 
     fn pixel(counts: f64, weight: f64) -> Result<Normalised, Masked> {
@@ -590,8 +581,8 @@ mod tests {
     }
 
     /// Pixels of `counts`, each of weight 1.
-    fn unweighted(counts: &[f64]) -> Vec<Result<Normalised, Masked>> {
-        counts.iter().map(|&c| pixel(c, 1.0)).collect()
+    fn unweighted(counts: &[f64]) -> NormalisedFrame {
+        Image::from_fn((1, counts.len()), |_, i| pixel(counts[i], 1.0))
     }
 
     /// A cube filled in one pass from points and normalised pixels.
@@ -601,13 +592,17 @@ mod tests {
         pixels: &[Result<Normalised, Masked>],
     ) -> Cube {
         let mut c = Cube::default();
-        c.add_growing(&vec![unit(); names.len()], &points(names, coords), pixels)
-            .unwrap();
+        c.add_growing(
+            &vec![unit(); names.len()],
+            &points(names, coords),
+            &row(pixels),
+        )
+        .unwrap();
         c
     }
 
     fn cube(names: &'static [&'static str], coords: &[&[f64]], counts: &[f64]) -> Cube {
-        filled(names, coords, &unweighted(counts))
+        filled(names, coords, unweighted(counts).data())
     }
 
     /// binoculars' rule (hkl-binoculars.c:375): rint, ties to even.
@@ -789,8 +784,8 @@ mod tests {
             points(TWO, &[&[9.0, -2.0], &[2.0, 1.0], &[0.1, 0.2]]),
         ];
         let pixels = [
-            [pixel(1.0, 0.5), Err(Masked::Unlit), pixel(3.0, 2.0)],
-            [pixel(0.1, 0.5), Err(Masked::Unlit), pixel(0.3, 2.0)],
+            row(&[pixel(1.0, 0.5), Err(Masked::Unlit), pixel(3.0, 2.0)]),
+            row(&[pixel(0.1, 0.5), Err(Masked::Unlit), pixel(0.3, 2.0)]),
         ];
         let binnings = vec![Binning::new(0.75, 0.1).unwrap(), unit()];
         let mut bounds = Bounds::new(binnings.clone());
@@ -830,7 +825,7 @@ mod tests {
     #[test]
     fn masked_pixels_contribute_nothing_and_do_not_widen_the_axes() {
         let p = points(ONE, &[&[0.0], &[100.0], &[1.0]]);
-        let px = [pixel(1.0, 0.5), Err(Masked::GrazingExit), pixel(2.0, 4.0)];
+        let px = row(&[pixel(1.0, 0.5), Err(Masked::GrazingExit), pixel(2.0, 4.0)]);
         let mut c = Cube::default();
         c.add_growing(&[unit()], &p, &px).unwrap();
         assert_eq!(c.axes()[0].size(), 2);
@@ -838,7 +833,7 @@ mod tests {
         assert_eq!(c.weight(), [0.5, 4.0]);
         assert_eq!(c.contributions(), [1, 1]);
         let mut b = Bounds::new(vec![unit()]);
-        b.include(&p, &[Err(Masked::Unlit); 3]).unwrap();
+        b.include(&p, &row(&[Err(Masked::Unlit); 3])).unwrap();
         assert_eq!(b.cube().unwrap(), Cube::default());
     }
 
@@ -846,9 +841,9 @@ mod tests {
     fn a_nan_count_is_masked_as_bad_count_and_adds_nothing() {
         let p = points(ONE, &[&[0.0], &[5.0]]);
         let nan = unweighted(&[1.0, f64::NAN]);
-        assert_eq!(nan[1], Err(Masked::BadCount));
+        assert_eq!(nan.data()[1], Err(Masked::BadCount));
         let want = cube(ONE, &[&[0.0]], &[1.0]);
-        assert_eq!(filled(ONE, &[&[0.0], &[5.0]], &nan), want);
+        assert_eq!(filled(ONE, &[&[0.0], &[5.0]], nan.data()), want);
         let mut b = Bounds::new(vec![unit()]);
         b.include(&p, &nan).unwrap();
         let mut c = b.cube().unwrap();
@@ -857,24 +852,36 @@ mod tests {
     }
 
     #[test]
-    fn length_and_dimension_mismatches_are_errors() {
+    fn shape_and_dimension_mismatches_are_errors() {
         let p = points(ONE, &[&[0.0], &[1.0]]);
         let mut c = Cube::default();
-        assert!(matches!(
+        assert_eq!(
             c.add_growing(&[unit()], &p, &unweighted(&[1.0])),
-            Err(Error::PixelCount {
+            Err(Error::ShapeMismatch {
                 what: "normalised frame",
-                ..
+                shape: (1, 1),
+                expected: (1, 2)
             })
-        ));
+        );
         assert!(matches!(
             c.add_growing(&[unit(), unit()], &p, &unweighted(&[1.0, 1.0])),
             Err(Error::Dimensions { .. })
         ));
-        assert!(matches!(
-            Projected::new(TWO, vec![vec![0.0], vec![]]),
-            Err(Error::PixelCount { .. })
-        ));
+        let column = |v: Vec<f64>| Image::new((v.len(), 1), v).unwrap();
+        assert_eq!(
+            Projected::new(
+                TWO,
+                vec![
+                    column(vec![0.0, 1.0]),
+                    points(ONE, &[&[0.0], &[1.0]]).planes()[0].clone()
+                ]
+            ),
+            Err(Error::ShapeMismatch {
+                what: "projection plane",
+                shape: (1, 2),
+                expected: (2, 1)
+            })
+        );
         assert_eq!(c, Cube::default());
         // a pixel with no bin after good ones leaves a filled cube as it was
         let mut c = cube(ONE, &[&[0.0]], &[1.0]);
@@ -887,6 +894,32 @@ mod tests {
             Err(Error::NoBin { .. })
         ));
         assert_eq!(c, before);
+    }
+
+    /// Points over a (2, 1) column and pixels over a (1, 2) row have the
+    /// same count; every way in refuses the pair and changes nothing.
+    #[test]
+    fn a_transposed_frame_is_refused() {
+        let column =
+            Projected::new(ONE, vec![Image::new((2, 1), vec![0.0, 1.0]).unwrap()]).unwrap();
+        let row = unweighted(&[1.0, 1.0]);
+        let refused = Err(Error::ShapeMismatch {
+            what: "normalised frame",
+            shape: (1, 2),
+            expected: (2, 1),
+        });
+        let mut empty = Cube::default();
+        assert_eq!(empty.add(&column, &row).map(drop), refused);
+        assert_eq!(empty.add_growing(&[unit()], &column, &row), refused);
+        assert_eq!(empty, Cube::default());
+        let mut c = cube(ONE, &[&[0.0], &[1.0]], &[1.0, 1.0]);
+        let before = c.clone();
+        assert_eq!(c.add(&column, &row).map(drop), refused);
+        assert_eq!(c.add_growing(&[unit()], &column, &row), refused);
+        assert_eq!(c, before);
+        let mut b = Bounds::new(vec![unit()]);
+        assert_eq!(b.include(&column, &row), refused);
+        assert_eq!(b, Bounds::new(vec![unit()]));
     }
 
     #[test]

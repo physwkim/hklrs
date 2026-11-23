@@ -4,9 +4,8 @@
 //! region's binned detector, which are added to a cube that grows to hold
 //! them.
 
-use crate::absorption::Masked;
 use crate::grid::{Binning, Cube, Projected};
-use crate::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, RawFrame, Region};
+use crate::normalise::{FrameScalars, NormalisedFrame, Normaliser, PixelFields, RawFrame, Region};
 use crate::projection::Projection;
 use crate::{Error, Geometry, PixelDetector, Wavelength};
 
@@ -23,12 +22,12 @@ pub struct FrameMap {
     binnings: Vec<Binning>,
 }
 
-/// One frame on the binned detector: pixel `i` of [`MappedFrame::pixels`]
-/// is at pixel `i` of [`MappedFrame::points`].
+/// One frame on the binned detector: each pixel of [`MappedFrame::pixels`]
+/// is at the same (slow, fast) pixel of [`MappedFrame::points`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct MappedFrame {
     points: Projected,
-    pixels: Vec<Result<Normalised, Masked>>,
+    pixels: NormalisedFrame,
 }
 
 impl MappedFrame {
@@ -36,7 +35,7 @@ impl MappedFrame {
         &self.points
     }
 
-    pub fn pixels(&self) -> &[Result<Normalised, Masked>] {
+    pub fn pixels(&self) -> &NormalisedFrame {
         &self.pixels
     }
 }
@@ -100,7 +99,7 @@ impl FrameMap {
         scalars: &FrameScalars,
     ) -> Result<MappedFrame, Error> {
         let values = self.geometry.values_from_degrees(readbacks)?;
-        let pixels = self.normaliser.normalise(raw, scalars, &[])?.into_data();
+        let pixels = self.normaliser.normalise(raw, scalars, &[])?;
         let points =
             self.projection
                 .project(&self.geometry, &values, wavelength, &self.detector)?;
@@ -202,7 +201,12 @@ mod tests {
         // fill none
         let block = |s: usize, f: usize| raw[s * 6 + f] + raw[s * 6 + f + 1];
         let sums = [block(1, 1) + block(2, 1), block(1, 3) + block(2, 3)];
-        let counts: Vec<f64> = frame.pixels().iter().map(|p| p.unwrap().counts()).collect();
+        let counts: Vec<f64> = frame
+            .pixels()
+            .data()
+            .iter()
+            .map(|p| p.unwrap().counts())
+            .collect();
         assert_eq!(counts, sums);
 
         let mut cube = Cube::default();
