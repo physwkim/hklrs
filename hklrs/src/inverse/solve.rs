@@ -1,6 +1,7 @@
 //! Deterministic search: Levenberg-Marquardt from the sector images
-//! {x, π−x, π+x, −x} (per written axis) of every regular solution admitted,
-//! starting from `current`'s images until the first one is.
+//! {x, π−x, π+x, −x} (per written axis) of every solution admitted,
+//! starting from `current`'s images until the first one is, and stopping
+//! at the first singular one.
 
 use std::collections::VecDeque;
 use std::f64::consts::PI;
@@ -16,12 +17,6 @@ const MAX_ITERATIONS: usize = 100;
 const TAU: f64 = 1e-3;
 /// Relative step length at which the iteration has stalled.
 const STEP: f64 = 1e-15;
-/// Smallest singular value of the Jacobian at a solution that is seeded
-/// from: such a solution is isolated and its angles are known to about
-/// 1e-16 / REGULAR rad, far inside the dedupe distance. Points of a
-/// solution continuum are admitted but not seeded from, or the search
-/// would walk the continuum.
-const REGULAR: f64 = 1e-6;
 /// Solutions seeded from, at most; bounds the search whatever the mode.
 const MAX_ROOTS: usize = 64;
 
@@ -32,20 +27,17 @@ struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
-    /// Solves from `seed` unless it was tried; returns the written values of
-    /// the solution reached when the set admits it and it is regular.
+    /// Solves from `seed` unless it was tried or the set is degenerate;
+    /// returns the written values of the solution reached when the set
+    /// admits it.
     fn seed(&mut self, seed: Vec<f64>) -> Option<Vec<f64>> {
-        if self.tried.iter().any(|t| same(t, &seed)) {
+        if self.set.is_degenerate() || self.tried.iter().any(|t| same(t, &seed)) {
             return None;
         }
         let x = levenberg_marquardt(self.system, &seed);
         self.tried.push(seed);
         let new = self.set.offer(&self.system.values(&x))?;
-        let regular = self
-            .system
-            .eval(new)
-            .is_some_and(|e| e.j.singular_values().min() >= REGULAR);
-        regular.then(|| self.system.written_values(new))
+        Some(self.system.written_values(new))
     }
 }
 
@@ -56,7 +48,7 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> SolutionSet<'a> {
         tried: Vec::new(),
     };
     // `current`'s images are only a deterministic multi-start, needed until
-    // a regular solution's own images take over.
+    // a solution's own images take over.
     let start = system.written_values(system.current());
     let mut roots: VecDeque<_> = images(&start)
         .find_map(|seed| s.seed(seed))

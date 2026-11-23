@@ -75,6 +75,11 @@ pub enum InverseError {
     PsiUndefined,
     #[error(transparent)]
     Geometry(#[from] Error),
+    #[error(
+        "the mode does not isolate the solutions: its Jacobian is singular at one \
+         (a continuum, or a multiple root)"
+    )]
+    Degenerate,
 }
 
 /// Residue of `a` modulo 2π in (−π, π].
@@ -93,7 +98,8 @@ fn finite(v: &[f64], what: &'static str) -> Result<(), InverseError> {
 
 impl InverseRequest<'_> {
     /// Every solution found, written axes wrapped to (−π, π], held axes
-    /// exactly `current`, sorted by distance to `current`.
+    /// exactly `current`, sorted by distance to `current`; `Degenerate`
+    /// when one is not isolated, as where the mode leaves a rotation free.
     pub fn solve(&self) -> Result<Vec<Vec<f64>>, InverseError> {
         Ok(self.search()?.solutions)
     }
@@ -127,9 +133,7 @@ impl InverseRequest<'_> {
             return Err(InverseError::Unreachable { q: q_norm, q_max });
         }
         let system = system::System::new(self.mode, self.ub / k, q / k, self.current);
-        solve::search(&system)
-            .into_sorted()
-            .ok_or(InverseError::NoSolution)
+        solve::search(&system).into_sorted()
     }
 }
 

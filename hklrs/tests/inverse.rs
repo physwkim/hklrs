@@ -296,16 +296,19 @@ fn bad_inputs_are_errors() {
     let mut bad = request(&mode, hkl, &current);
     bad.ub[(1, 2)] = f64::INFINITY;
     assert_eq!(bad.solve(), Err(InverseError::NonFinite { what: "UB" }));
-    // Q = 0 reflects only with tth = 0: bissector and the constant modes
-    // either find it or report no solution, never panic.
+    // Q = 0 reflects only with tth = 0, where every sample rotation does;
+    // ψ needs a scattering plane, which tth = 0 does not have.
     for mode in modes(&geo) {
-        match request(&mode, Vector3::zeros(), &current).solve() {
-            Ok(solutions) => {
-                for s in &solutions {
-                    assert_solution(&mode, &Vector3::zeros(), &current, s);
-                }
-            }
-            Err(e) => assert_eq!(e, InverseError::NoSolution, "{}", mode.name()),
-        }
+        let expected = if mode.name() == "psi_constant" {
+            InverseError::NoSolution
+        } else {
+            InverseError::Degenerate
+        };
+        assert_eq!(
+            request(&mode, Vector3::zeros(), &current).solve(),
+            Err(expected),
+            "{}",
+            mode.name()
+        );
     }
 }
