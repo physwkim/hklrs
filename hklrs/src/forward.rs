@@ -41,37 +41,48 @@ pub fn scattering(
     point: &Point3<f64>,
 ) -> Result<Scattering, Error> {
     let poses = geometry.poses(values)?;
-    Ok(scattering_at(geometry, &poses, wavelength, point)?.1)
+    scattering_at(
+        geometry,
+        &poses,
+        wavelength,
+        &detector_position(&poses, point),
+    )
 }
 
-/// The kernel behind [`scattering`] and the batch map: `poses` are those of
-/// one set of axis values, so a frame computes them once. Returns the
-/// detector point in the lab frame relative to the sample, metres, and its
-/// [`Scattering`].
+/// Detector point `point` (detector-arm frame) relative to the sample at
+/// `poses`: lab frame, metres.
+pub fn detector_position(poses: &Poses, point: &Point3<f64>) -> Vector3<f64> {
+    poses.detector * point - poses.sample_position()
+}
+
+/// k̂f, the direction of a [`detector_position`] `p`; a point at the sample
+/// has none.
+pub fn scattered_direction(p: &Vector3<f64>) -> Result<Unit<Vector3<f64>>, Error> {
+    Unit::try_new(*p, 0.0).ok_or(Error::DetectorAtSample)
+}
+
+/// The kernel behind [`scattering`] and the batch map, from the
+/// [`detector_position`] `p` at `poses`: a frame computes its poses once.
 pub fn scattering_at(
     geometry: &Geometry,
     poses: &Poses,
     wavelength: Wavelength,
-    point: &Point3<f64>,
-) -> Result<(Vector3<f64>, Scattering), Error> {
-    let p = poses.detector * point - poses.sample_position();
-    let kf = Unit::try_new(p, 0.0).ok_or(Error::DetectorAtSample)?;
+    p: &Vector3<f64>,
+) -> Result<Scattering, Error> {
+    let kf = scattered_direction(p)?;
     let ki = poses.source * geometry.beam_direction();
     let q_lab = wavelength.wavenumber() * (kf.into_inner() - ki.into_inner());
     let tth = angle_between(&ki, &kf);
-    Ok((
-        p,
-        Scattering {
-            kf,
-            ki,
-            q_lab,
-            q_sample: poses.sample.rotation.inverse() * q_lab,
-            tth,
-            // from 2θ, not |q_lab|: the difference of two unit vectors loses
-            // relative precision near the direct beam
-            q: 2.0 * wavelength.wavenumber() * (tth.0 / 2.0).sin(),
-        },
-    ))
+    Ok(Scattering {
+        kf,
+        ki,
+        q_lab,
+        q_sample: poses.sample.rotation.inverse() * q_lab,
+        tth,
+        // from 2θ, not |q_lab|: the difference of two unit vectors loses
+        // relative precision near the direct beam
+        q: 2.0 * wavelength.wavenumber() * (tth.0 / 2.0).sin(),
+    })
 }
 
 /// [`scattering`] plus the Miller indices of its Q for `sample`.

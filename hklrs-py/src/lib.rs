@@ -247,28 +247,21 @@ impl PyGeometry {
 
 /// Axis values (degrees / metres, geometry axis order), wavelength (Å) and
 /// detector point (detector-arm frame, metres; default 1 m along the beam).
-fn frame(geo: &hklrs::Geometry, axes: &[f64], wavelength: f64) -> PyResult<hklrs::Frame> {
-    Ok(hklrs::Frame {
-        values: geo.values_from_degrees(axes).map_err(err)?,
-        wavelength: hklrs::Wavelength::new(wavelength).map_err(err)?,
-    })
-}
-
 fn kernel_inputs(
     geo: &hklrs::Geometry,
     axes: &[f64],
     wavelength: f64,
     point: Option<[f64; 3]>,
 ) -> PyResult<(Vec<f64>, hklrs::Wavelength, Point3<f64>)> {
-    let hklrs::Frame {
-        values,
-        wavelength: wl,
-    } = frame(geo, axes, wavelength)?;
     let p = point.map_or_else(
         || Point3::from(geo.beam_direction().into_inner()),
         Point3::from,
     );
-    Ok((values, wl, p))
+    Ok((
+        geo.values_from_degrees(axes).map_err(err)?,
+        hklrs::Wavelength::new(wavelength).map_err(err)?,
+        p,
+    ))
 }
 
 #[pyclass(name = "Reflection", frozen)]
@@ -1093,25 +1086,28 @@ fn q_map<'py>(
     detector: &PyPixelDetector,
 ) -> PyResult<Planes<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
-    let q = py.detach(|| hklrs::q_map(geo, &frame, det)).map_err(err)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
+    let wl = hklrs::Wavelength::new(wavelength).map_err(err)?;
+    let q = py
+        .detach(|| hklrs::q_map(geo, &values, wl, det))
+        .map_err(err)?;
     planes(py, q)
 }
 
-/// Pixel positions relative to the sample in the lab frame (metres) at
-/// `axes`, arguments as for `q_map`: (x, y, z), each a (slow, fast) array.
+/// Pixel positions relative to the sample in the lab frame (metres) of
+/// every pixel of `detector` at `axes` (geometry axis order, degrees /
+/// metres): (x, y, z), each a (slow, fast) array.
 #[pyfunction]
 fn detector_positions<'py>(
     py: Python<'py>,
     geometry: &PyGeometry,
     axes: Vec<f64>,
-    wavelength: f64,
     detector: &PyPixelDetector,
 ) -> PyResult<Planes<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
     let p = py
-        .detach(|| hklrs::detector_positions(geo, &frame, det))
+        .detach(|| hklrs::detector_positions(geo, &values, det))
         .map_err(err)?;
     planes(py, p)
 }
@@ -1171,48 +1167,47 @@ fn weight_arrays(
     ))
 }
 
-/// Solid angle of every pixel (sr) at `axes`, arguments as for `q_map`:
-/// (values, reasons), each a (slow, fast) array. A pixel with no value has
-/// NaN and its `Masked` reason, `EdgeOn` here; the others have reason 0.
+/// Solid angle of every pixel (sr) at `axes`, arguments as for
+/// `detector_positions`: (values, reasons), each a (slow, fast) array. A
+/// pixel with no value has NaN and its `Masked` reason, `EdgeOn` here; the
+/// others have reason 0.
 #[pyfunction]
 fn solid_angle<'py>(
     py: Python<'py>,
     geometry: &PyGeometry,
     axes: Vec<f64>,
-    wavelength: f64,
     detector: &PyPixelDetector,
 ) -> PyResult<WeightArrays<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
     let w = py
-        .detach(|| hklrs::solid_angle(geo, &frame, det).map(split))
+        .detach(|| hklrs::solid_angle(geo, &values, det).map(split))
         .map_err(err)?;
     weight_arrays(py, w)
 }
 
-/// Polarisation factor of every pixel at `axes`, arguments as for `q_map`,
-/// for a beam whose electric field lies along `e` (lab frame, projected
-/// normal to the beam) with degree `factor` in [-1, 1]: 1 fully along `e`,
-/// 0 unpolarised. Values and reasons as for `solid_angle`, `Extinct` where
-/// the factor vanishes.
+/// Polarisation factor of every pixel at `axes`, arguments as for
+/// `detector_positions`, for a beam whose electric field lies along `e`
+/// (lab frame, projected normal to the beam) with degree `factor` in
+/// [-1, 1]: 1 fully along `e`, 0 unpolarised. Values and reasons as for
+/// `solid_angle`, `Extinct` where the factor vanishes.
 #[pyfunction]
 fn polarisation<'py>(
     py: Python<'py>,
     geometry: &PyGeometry,
     axes: Vec<f64>,
-    wavelength: f64,
     detector: &PyPixelDetector,
     e: [f64; 3],
     factor: f64,
 ) -> PyResult<WeightArrays<'py>> {
     let (geo, det) = (&geometry.0, &detector.0);
-    let frame = frame(geo, &axes, wavelength)?;
+    let values = geo.values_from_degrees(&axes).map_err(err)?;
     let pol = hklrs::Polarisation {
         e: Vector3::from(e),
         factor,
     };
     let w = py
-        .detach(|| hklrs::polarisation(geo, &frame, det, pol).map(split))
+        .detach(|| hklrs::polarisation(geo, &values, det, pol).map(split))
         .map_err(err)?;
     weight_arrays(py, w)
 }

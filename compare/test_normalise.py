@@ -231,7 +231,7 @@ def test_precedence_with_geometric_weights():
     det = detector((h, w)).with_mask(np.array([[True, False, False, False, False]]))
     binned, red = nm.Region((0, 1), (0, 5), (1, 1)).apply(det)
     geo = hklrs.Geometry.preset("E4CV")
-    sa, sr = hklrs.solid_angle(geo, [0.0] * 4, 1.0, detector((1, 5)))
+    sa, sr = hklrs.solid_angle(geo, [0.0] * 4, detector((1, 5)))
     sr = sr.copy()
     sr[0, [0, 1]] = hklrs.Masked.EdgeOn
     flat = np.array([[1.0, 1.0, 0.0, 1.0, 1.0]])

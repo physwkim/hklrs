@@ -20,8 +20,6 @@ BEAM, UP = [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]
 A1, A2 = np.array(UP), np.cross(UP, BEAM)
 GEOMETRY = "E4CV"
 AXES = [0.0] * 4
-# neither weight depends on it
-WAVELENGTH = 1.0
 SOLID_ANGLE_TOL = 1e-14
 
 
@@ -53,7 +51,7 @@ def test_solid_angle_matches_pyfai_solid_angle_array(case):
     pixel1 pixel2 dist/|p|^3, the same number once scaled by
     dist^2/(pixel1 pixel2)."""
     geo = hklrs.Geometry.preset(GEOMETRY)
-    values = weighed(hklrs.solid_angle(geo, AXES, WAVELENGTH, detector(case)))
+    values = weighed(hklrs.solid_angle(geo, AXES, detector(case)))
     scale = G["dist"] ** 2 / (G["pixel1"] * G["pixel2"])
     want = np.array(case["solid_angle"])
     np.testing.assert_allclose(values * scale, want, rtol=SOLID_ANGLE_TOL, atol=0)
@@ -67,7 +65,7 @@ def test_polarisation_matches_pyfai_polarization(case):
     for pol in case["polarization"]:
         d = pol["axis_offset"]
         e = (math.cos(d) * A2 - math.sin(d) * A1).tolist()
-        values = weighed(hklrs.polarisation(geo, AXES, WAVELENGTH, det, e, pol["factor"]))
+        values = weighed(hklrs.polarisation(geo, AXES, det, e, pol["factor"]))
         want = np.array(pol["values"])
         tol = want * np.finfo(np.float32).eps + 4 * np.finfo(np.float64).eps
         assert (np.abs(values - want) <= tol).all(), \
@@ -80,7 +78,7 @@ def test_a_pixel_along_a_fully_polarised_field_is_extinct():
         .detector(BEAM, UP)
     assert np.allclose(det.pixel(0, 0), [0.0, 0.1, 0.0], rtol=0, atol=1e-17)
     geo = hklrs.Geometry.preset(GEOMETRY)
-    values, reasons = hklrs.polarisation(geo, AXES, WAVELENGTH, det, A2.tolist(), 1.0)
+    values, reasons = hklrs.polarisation(geo, AXES, det, A2.tolist(), 1.0)
     assert reasons[0, 0] == hklrs.Masked.Extinct and math.isnan(values[0, 0])
     rest = np.ones(reasons.shape, bool)
     rest[0, 0] = False
@@ -98,10 +96,10 @@ def test_weights_refuse_what_has_none():
     geo = hklrs.Geometry.preset(GEOMETRY)
     det = detector(G["cases"][0])
     with pytest.raises(ValueError, match="polarisation factor"):
-        hklrs.polarisation(geo, AXES, WAVELENGTH, det, A2.tolist(), 1.5)
+        hklrs.polarisation(geo, AXES, det, A2.tolist(), 1.5)
     with pytest.raises(ValueError, match="normal to the beam"):
-        hklrs.polarisation(geo, AXES, WAVELENGTH, det, BEAM, 0.5)
+        hklrs.polarisation(geo, AXES, det, BEAM, 0.5)
     # an xu linear detector's rows have no height, so its pixels no area
     linear = hklrs.xu.Linear("z+", 4.0, 9, 1.0, 50e-6).detector(BEAM)
     with pytest.raises(ValueError, match="area"):
-        hklrs.solid_angle(geo, AXES, WAVELENGTH, linear)
+        hklrs.solid_angle(geo, AXES, linear)

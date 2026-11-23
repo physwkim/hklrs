@@ -1,20 +1,18 @@
 //! Batch forward: one frame's axis values over a whole detector.
 //!
-//! Every pixel goes through [`scattering_at`], the kernel [`crate::forward`]
-//! uses; the map only decides which part of its result to store.
+//! Every pixel's position comes from [`detector_position`] at the frame's
+//! poses, and what depends on the scattered beam from [`scattered_direction`]
+//! or [`scattering_at`], the kernels [`crate::forward`] uses. A map takes the
+//! wavelength only if its result depends on it.
 
 use nalgebra::Vector3;
 use rayon::prelude::*;
 
 use crate::absorption::{Absorber, Attenuation, Masked, SlabFrame, Weight};
-use crate::{Error, Geometry, PixelDetector, Poses, Scattering, Wavelength, scattering_at};
-
-/// Axis values (axis order, radians / metres) and wavelength of one frame.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Frame {
-    pub values: Vec<f64>,
-    pub wavelength: Wavelength,
-}
+use crate::{
+    Error, Geometry, PixelDetector, Poses, Wavelength, detector_position, scattered_direction,
+    scattering_at,
+};
 
 /// Three contiguous f64 planes (x, y, z), row-major (slow, fast).
 #[derive(Clone, Debug, PartialEq)]
@@ -50,18 +48,15 @@ struct At {
 }
 
 /// Fills `N` planes of `detector`'s shape, one rayon task per row. `f` sees
-/// the frame's poses, where the pixel is, the lab-frame sample-to-pixel
-/// vector and the kernel's [`Scattering`] for each pixel; as the modules
-/// tile the image, it overwrites `blank` at every pixel.
+/// where the pixel is and its [`detector_position`] at `poses`; as the
+/// modules tile the image, it overwrites `blank` at every pixel.
 fn fill<T: Copy + Send, const N: usize>(
-    geometry: &Geometry,
-    frame: &Frame,
+    poses: &Poses,
     detector: &PixelDetector,
     blank: T,
-    f: impl Fn(&Poses, At, &Vector3<f64>, &Scattering) -> [T; N] + Sync,
+    f: impl Fn(At, &Vector3<f64>) -> Result<[T; N], Error> + Sync,
 ) -> Result<[Vec<T>; N], Error> {
     let (slow, fast) = detector.shape();
-    let poses = geometry.poses(&frame.values)?;
     let mut planes: [Vec<T>; N] = std::array::from_fn(|_| vec![blank; slow * fast]);
     let mut chunks: Vec<_> = planes.iter_mut().map(|p| p.chunks_mut(fast)).collect();
     let rows: Vec<[&mut [T]; N]> = (0..slow)
@@ -80,9 +75,8 @@ fn fill<T: Copy + Send, const N: usize>(
                         module: k,
                         local: (i - a1, l),
                     };
-                    let point = m.pixel(i - a1, l);
-                    let (p, s) = scattering_at(geometry, &poses, frame.wavelength, &point)?;
-                    for (plane, v) in row.iter_mut().zip(f(&poses, at, &p, &s)) {
+                    let p = detector_position(poses, &m.pixel(i - a1, l));
+                    for (plane, v) in row.iter_mut().zip(f(at, &p)?) {
                         plane[a2 + l] = v;
                     }
                 }
@@ -96,22 +90,33 @@ fn planes3(shape: (usize, usize), [x, y, z]: [Vec<f64>; 3]) -> Planes {
     Planes { shape, x, y, z }
 }
 
-/// Q in the sample frame for every pixel.
-pub fn q_map(geometry: &Geometry, frame: &Frame, detector: &PixelDetector) -> Result<QMap, Error> {
-    let planes = fill(geometry, frame, detector, 0.0, |_, _, _, s| {
-        s.q_sample.into()
+/// Q in the sample frame for every pixel at axis `values` (axis order,
+/// radians / metres).
+pub fn q_map(
+    geometry: &Geometry,
+    values: &[f64],
+    wavelength: Wavelength,
+    detector: &PixelDetector,
+) -> Result<QMap, Error> {
+    let poses = geometry.poses(values)?;
+    let planes = fill(&poses, detector, 0.0, |_, p| {
+        Ok(scattering_at(geometry, &poses, wavelength, p)?
+            .q_sample
+            .into())
     })?;
     Ok(planes3(detector.shape(), planes))
 }
 
-/// Pixel positions relative to the sample, lab frame, metres: the `p` of
-/// the forward kernel.
+/// Pixel positions relative to the sample, lab frame, metres: the
+/// [`detector_position`] of every pixel. A pixel at the sample is the zero
+/// vector here; only what needs its k̂f fails on it.
 pub fn detector_positions(
     geometry: &Geometry,
-    frame: &Frame,
+    values: &[f64],
     detector: &PixelDetector,
 ) -> Result<Planes, Error> {
-    let planes = fill(geometry, frame, detector, 0.0, |_, _, p, _| (*p).into())?;
+    let poses = geometry.poses(values)?;
+    let planes = fill(&poses, detector, 0.0, |_, p| Ok((*p).into()))?;
     Ok(planes3(detector.shape(), planes))
 }
 
@@ -182,18 +187,20 @@ fn weights(shape: (usize, usize), [data]: [Vec<Result<Weight, Masked>>; 1]) -> W
 /// [`Error::NoPixelArea`]; a pixel seen edge-on is [`Masked::EdgeOn`].
 pub fn solid_angle(
     geometry: &Geometry,
-    frame: &Frame,
+    values: &[f64],
     detector: &PixelDetector,
 ) -> Result<Weights, Error> {
     let modules = detector.modules();
     if modules.iter().any(|m| m.normal().is_none()) {
         return Err(Error::NoPixelArea);
     }
-    let data = fill(geometry, frame, detector, BLANK, |poses, at, p, s| {
+    let poses = geometry.poses(values)?;
+    let data = fill(&poses, detector, BLANK, |at, p| {
+        let kf = scattered_direction(p)?;
         let (ls, lf) = at.local;
         let area = modules[at.module].area(ls, lf);
-        let omega = (poses.detector.rotation * area).dot(&s.kf).abs() / p.norm_squared();
-        [Weight::new(omega, Masked::EdgeOn)]
+        let omega = (poses.detector.rotation * area).dot(&kf).abs() / p.norm_squared();
+        Ok([Weight::new(omega, Masked::EdgeOn)])
     })?;
     Ok(weights(detector.shape(), data))
 }
@@ -213,7 +220,7 @@ pub struct Polarisation {
 
 pub fn polarisation(
     geometry: &Geometry,
-    frame: &Frame,
+    values: &[f64],
     detector: &PixelDetector,
     polarisation: Polarisation,
 ) -> Result<Weights, Error> {
@@ -222,7 +229,7 @@ pub fn polarisation(
         return Err(Error::PolarisationFactor { value: f });
     }
     // k̂i is the same for every pixel of the frame
-    let poses = geometry.poses(&frame.values)?;
+    let poses = geometry.poses(values)?;
     let ki = (poses.source * geometry.beam_direction()).into_inner();
     let e = polarisation.e - ki * polarisation.e.dot(&ki);
     let norm = e.norm();
@@ -233,18 +240,18 @@ pub fn polarisation(
     }
     let e = e / norm;
     let across = ki.cross(&e);
-    let data = fill(geometry, frame, detector, BLANK, |_, _, _, s| {
-        let kf = s.kf.into_inner();
+    let data = fill(&poses, detector, BLANK, |_, p| {
+        let kf = scattered_direction(p)?.into_inner();
         let p = 0.5 * (1.0 + f) * (1.0 - e.dot(&kf).powi(2))
             + 0.5 * (1.0 - f) * (1.0 - across.dot(&kf).powi(2));
-        [Weight::new(p, Masked::Extinct)]
+        Ok([Weight::new(p, Masked::Extinct)])
     })?;
     Ok(weights(detector.shape(), data))
 }
 
 /// Absorption weight per pixel (design §5.1): the sample slab's times the
-/// detector path's, at the kernel's k̂f and p. Every μ is taken at the frame
-/// energy and F computed once, before the pixel loop, which sees only the
+/// detector path's, at the pixel's k̂f and p. Every μ is taken at the energy
+/// of `wavelength` and F computed once, before the pixel loop, which sees only the
 /// resulting [`SlabFrame`] and each module's
 /// [`crate::absorption::OrientedPath`]: the detector layers lie along the
 /// module's normal, and a window or sensor on a module with none is
@@ -252,12 +259,13 @@ pub fn polarisation(
 /// sample's reason.
 pub fn absorption<A: Attenuation>(
     geometry: &Geometry,
-    frame: &Frame,
+    values: &[f64],
+    wavelength: Wavelength,
     detector: &PixelDetector,
     absorber: &Absorber<A>,
 ) -> Result<Weights, Error> {
-    let poses = geometry.poses(&frame.values)?;
-    let energy = frame.wavelength.energy();
+    let poses = geometry.poses(values)?;
+    let energy = wavelength.energy();
     let sample = SlabFrame::new(
         &absorber.slab,
         &absorber.beam,
@@ -271,10 +279,11 @@ pub fn absorption<A: Attenuation>(
         .iter()
         .map(|m| path.oriented(m.normal().map(|n| poses.detector.rotation * n)))
         .collect::<Result<Vec<_>, _>>()?;
-    let data = fill(geometry, frame, detector, BLANK, |_, at, p, s| {
-        [sample
-            .weight(&s.kf)
-            .and_then(|a| a.times(paths[at.module].weight(&s.kf, p.norm())?))]
+    let data = fill(&poses, detector, BLANK, |at, p| {
+        let kf = scattered_direction(p)?;
+        Ok([sample
+            .weight(&kf)
+            .and_then(|a| a.times(paths[at.module].weight(&kf, p.norm())?))])
     })?;
     Ok(weights(detector.shape(), data))
 }
@@ -302,11 +311,10 @@ mod tests {
             .unwrap()
     }
 
-    fn frame() -> Frame {
-        Frame {
-            values: vec![0.31, 0.002, 0.57, -0.23],
-            wavelength: Wavelength::new(1.54).unwrap(),
-        }
+    const VALUES: [f64; 4] = [0.31, 0.002, 0.57, -0.23];
+
+    fn wavelength() -> Wavelength {
+        Wavelength::new(1.54).unwrap()
     }
 
     fn detector() -> PixelDetector {
@@ -329,19 +337,12 @@ mod tests {
 
     #[test]
     fn batch_equals_per_pixel_forward_exactly() {
-        let (g, f, d) = (geometry(), frame(), detector());
-        let map = q_map(&g, &f, &d).unwrap();
+        let (g, d, wl) = (geometry(), detector(), wavelength());
+        let map = q_map(&g, &VALUES, wl, &d).unwrap();
         assert_eq!(map.shape(), (5, 7));
         for i in 0..5 {
             for j in 0..7 {
-                let one = forward(
-                    &g,
-                    &sample(),
-                    &f.values,
-                    f.wavelength,
-                    &d.pixel(i, j).unwrap(),
-                )
-                .unwrap();
+                let one = forward(&g, &sample(), &VALUES, wl, &d.pixel(i, j).unwrap()).unwrap();
                 let got = map.get(i, j);
                 assert!(got.iter().all(|v| v.is_finite()));
                 assert_eq!(got, one.scattering.q_sample, "pixel ({i}, {j})");
@@ -351,21 +352,15 @@ mod tests {
 
     #[test]
     fn position_direction_is_kf_and_p_is_the_kernels() {
-        let (g, f, d) = (geometry(), frame(), detector());
-        let pos = detector_positions(&g, &f, &d).unwrap();
-        let poses = g.poses(&f.values).unwrap();
+        let (g, d) = (geometry(), detector());
+        let pos = detector_positions(&g, &VALUES, &d).unwrap();
+        let poses = g.poses(&VALUES).unwrap();
         for i in 0..5 {
             for j in 0..7 {
-                let one = forward(
-                    &g,
-                    &sample(),
-                    &f.values,
-                    f.wavelength,
-                    &d.pixel(i, j).unwrap(),
-                )
-                .unwrap();
+                let pixel = d.pixel(i, j).unwrap();
+                let one = forward(&g, &sample(), &VALUES, wavelength(), &pixel).unwrap();
                 let p = pos.get(i, j);
-                let want = poses.detector * d.pixel(i, j).unwrap() - poses.sample_position();
+                let want = poses.detector * pixel - poses.sample_position();
                 assert_eq!(p, want);
                 let dir = Unit::new_normalize(p);
                 let diff = (dir.into_inner() - one.scattering.kf.into_inner()).norm();
@@ -379,11 +374,7 @@ mod tests {
     }
 
     fn one(g: &Geometry, d: &PixelDetector, pol: Polarisation) -> Result<f64, Masked> {
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
-        polarisation(g, &f, d, pol)
+        polarisation(g, &[0.0], d, pol)
             .unwrap()
             .get(0, 0)
             .map(Weight::get)
@@ -445,16 +436,12 @@ mod tests {
     #[test]
     fn polarisation_factor_outside_the_unit_interval_is_an_error() {
         let g = om_only();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
         let pol = Polarisation {
             e: Vector3::y(),
             factor: f64::NAN,
         };
         assert!(matches!(
-            polarisation(&g, &f, &point_at([0.0, 1.0, 0.0]), pol),
+            polarisation(&g, &[0.0], &point_at([0.0, 1.0, 0.0]), pol),
             Err(Error::PolarisationFactor { .. })
         ));
     }
@@ -462,13 +449,9 @@ mod tests {
     #[test]
     fn polarisation_vector_is_projected_normal_to_the_beam() {
         let g = om_only();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
         let d = point_at([0.3, 0.8, 0.5]);
         let pol = |e| Polarisation { e, factor: 0.7 };
-        let w = |e| polarisation(&g, &f, &d, pol(e)).map(|w| w.get(0, 0).unwrap().get());
+        let w = |e| polarisation(&g, &[0.0], &d, pol(e)).map(|w| w.get(0, 0).unwrap().get());
         // the beam-parallel part of e and its length do not matter
         let a = w(Vector3::y()).unwrap();
         let b = w(Vector3::new(5.0, 3.0, 0.0)).unwrap();
@@ -498,12 +481,8 @@ mod tests {
     #[test]
     fn solid_angle_at_normal_incidence_and_tilted() {
         let g = om_only();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
         let (d, a, b) = (0.4_f64, 1e-3, 2e-3);
-        let w = solid_angle(&g, &f, &flat(d, a, b)).unwrap();
+        let w = solid_angle(&g, &[0.0], &flat(d, a, b)).unwrap();
         let normal = a * b / (d * d);
         assert!((w.get(0, 0).unwrap().get() - normal).abs() < 1e-12 * normal);
         // pixel (3, 2) sits at (d, 2b, 3a): cos α = d / r
@@ -521,12 +500,8 @@ mod tests {
             .detector_rotation("tt", [0.0, 0.0, 1.0])
             .build()
             .unwrap();
-        let f = Frame {
-            values: vec![0.0, 0.9],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
         let (d, a, b) = (0.4_f64, 1e-3, 2e-3);
-        let w = solid_angle(&g, &f, &flat(d, a, b)).unwrap();
+        let w = solid_angle(&g, &[0.0, 0.9], &flat(d, a, b)).unwrap();
         let normal = a * b / (d * d);
         assert!((w.get(0, 0).unwrap().get() - normal).abs() < 1e-12 * normal);
     }
@@ -534,10 +509,6 @@ mod tests {
     #[test]
     fn solid_angle_of_a_linear_detector_uses_its_row_height() {
         let g = om_only();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
         let (d, h, b) = (0.4_f64, 5e-3, 2e-3);
         // one row along y, pixel height h along z
         let row = |e_slow| {
@@ -549,7 +520,7 @@ mod tests {
             )
             .unwrap()
         };
-        let w = solid_angle(&g, &f, &row(Vector3::new(0.0, 0.0, h))).unwrap();
+        let w = solid_angle(&g, &[0.0], &row(Vector3::new(0.0, 0.0, h))).unwrap();
         assert_eq!(w.shape(), (1, 4));
         let normal = h * b / (d * d);
         assert!((w.get(0, 0).unwrap().get() - normal).abs() < 1e-12 * normal);
@@ -558,7 +529,7 @@ mod tests {
         assert!((w.get(0, 3).unwrap().get() - tilted).abs() < 1e-12 * tilted);
         // built with a zero e_slow it has no height to give
         assert_eq!(
-            solid_angle(&g, &f, &row(Vector3::zeros())),
+            solid_angle(&g, &[0.0], &row(Vector3::zeros())),
             Err(Error::NoPixelArea)
         );
     }
@@ -566,12 +537,8 @@ mod tests {
     #[test]
     fn solid_angle_needs_a_pixel_area() {
         let g = om_only();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
         assert_eq!(
-            solid_angle(&g, &f, &point_at([1.0, 0.0, 0.0])),
+            solid_angle(&g, &[0.0], &point_at([1.0, 0.0, 0.0])),
             Err(Error::NoPixelArea)
         );
     }
@@ -580,10 +547,6 @@ mod tests {
     #[test]
     fn solid_angle_masks_a_pixel_seen_edge_on() {
         let g = om_only();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
         let d = PixelDetector::new(
             (2, 3),
             Vector3::new(0.0, 0.3, 0.0),
@@ -591,7 +554,7 @@ mod tests {
             Vector3::new(0.0, 2e-3, 0.0),
         )
         .unwrap();
-        let w = solid_angle(&g, &f, &d).unwrap();
+        let w = solid_angle(&g, &[0.0], &d).unwrap();
         assert!(w.data.iter().all(|w| *w == Err(Masked::EdgeOn)), "{w:?}");
     }
 
@@ -625,28 +588,28 @@ mod tests {
     // In `geometry()`'s frame, a sample face with normal +y faces the beam
     // and the detector, one with −x the beam only, one with −y neither.
 
-    /// Bit for bit SlabFrame's times DetectorPath's at the kernel's k̂f and
+    /// Bit for bit SlabFrame's times DetectorPath's at the kernels' k̂f and
     /// p, in reflection and in transmission.
     #[test]
     fn absorption_equals_slab_frame_and_detector_path_at_the_kernels_kf_and_p() {
-        let (g, f, d) = (geometry(), frame(), detector());
-        let poses = g.poses(&f.values).unwrap();
+        let (g, d) = (geometry(), detector());
+        let poses = g.poses(&VALUES).unwrap();
         let ki = poses.source * g.beam_direction();
         let normal = poses.detector.rotation * d.modules()[0].normal().unwrap();
         for (n, reflection) in [([0.0, 1.0, 0.0], true), ([-1.0, 0.0, 0.0], false)] {
             let a = absorber(Slab::new(face(n), 1e-4).unwrap());
-            let w = absorption(&g, &f, &d, &a).unwrap();
+            let w = absorption(&g, &VALUES, wavelength(), &d, &a).unwrap();
             let path = a.detector.oriented(Some(normal)).unwrap();
             let sample =
                 SlabFrame::new(&a.slab, &a.beam, a.sample, &ki, &poses.sample.rotation).unwrap();
             let n_lab = poses.sample.rotation * Vector3::from(n);
             for i in 0..5 {
                 for j in 0..7 {
-                    let point = d.pixel(i, j).unwrap();
-                    let (p, s) = scattering_at(&g, &poses, f.wavelength, &point).unwrap();
-                    assert_eq!(s.kf.dot(&n_lab) > 0.0, reflection, "{n:?} ({i}, {j})");
-                    let want = sample.weight(&s.kf).unwrap();
-                    let want = want.times(path.weight(&s.kf, p.norm()).unwrap());
+                    let p = detector_position(&poses, &d.pixel(i, j).unwrap());
+                    let kf = scattered_direction(&p).unwrap();
+                    assert_eq!(kf.dot(&n_lab) > 0.0, reflection, "{n:?} ({i}, {j})");
+                    let want = sample.weight(&kf).unwrap();
+                    let want = want.times(path.weight(&kf, p.norm()).unwrap());
                     assert_eq!(w.get(i, j), want, "{n:?} ({i}, {j})");
                     assert!(want.is_ok(), "{n:?} ({i}, {j})");
                 }
@@ -658,9 +621,9 @@ mod tests {
     /// reason wins.
     #[test]
     fn absorption_masks_carry_their_reason() {
-        let (g, f, d) = (geometry(), frame(), detector());
+        let (g, d) = (geometry(), detector());
         let every = |a: &Absorber<PerMetre>, want: Masked| {
-            let w = absorption(&g, &f, &d, a).unwrap();
+            let w = absorption(&g, &VALUES, wavelength(), &d, a).unwrap();
             assert!(w.data.iter().all(|r| *r == Err(want)), "{want:?}: {w:?}");
         };
         let lit = Slab::new(face([0.0, 1.0, 0.0]), 1e-4).unwrap();
@@ -695,7 +658,7 @@ mod tests {
     /// own module's.
     #[test]
     fn absorption_orients_each_module_along_its_own_normal() {
-        let (g, f) = (geometry(), frame());
+        let g = geometry();
         let axis = |v: [f64; 3], n: usize, pitch: f64| {
             PixelAxis::uniform(Unit::new_normalize(v.into()), n, pitch).unwrap()
         };
@@ -716,7 +679,7 @@ mod tests {
             .unwrap(),
         ];
         let d = PixelDetector::from_modules((4, 3), modules).unwrap();
-        let poses = g.poses(&f.values).unwrap();
+        let poses = g.poses(&VALUES).unwrap();
         let ki = poses.source * g.beam_direction();
         let a = absorber(Slab::new(face([0.0, 1.0, 0.0]), 1e-4).unwrap());
         let sample =
@@ -730,16 +693,16 @@ mod tests {
             })
             .collect();
         assert_ne!(paths[0], paths[1]);
-        let w = absorption(&g, &f, &d, &a).unwrap();
+        let w = absorption(&g, &VALUES, wavelength(), &d, &a).unwrap();
         for i in 0..4 {
             for j in 0..3 {
-                let (p, s) =
-                    scattering_at(&g, &poses, f.wavelength, &d.pixel(i, j).unwrap()).unwrap();
+                let p = detector_position(&poses, &d.pixel(i, j).unwrap());
+                let kf = scattered_direction(&p).unwrap();
                 let path = paths[i / 2];
                 let want = sample
-                    .weight(&s.kf)
+                    .weight(&kf)
                     .unwrap()
-                    .times(path.weight(&s.kf, p.norm()).unwrap());
+                    .times(path.weight(&kf, p.norm()).unwrap());
                 assert_eq!(w.get(i, j), want, "({i}, {j})");
                 assert!(want.is_ok(), "({i}, {j})");
             }
@@ -750,7 +713,7 @@ mod tests {
     /// row; a window or sensor there is an error.
     #[test]
     fn absorption_layers_need_a_module_normal() {
-        let (g, f) = (geometry(), frame());
+        let g = geometry();
         let row = Linear::new("z+".parse().unwrap(), 2.0, 5, 0.3, 1e-4)
             .detector(Vector3::x_axis())
             .unwrap();
@@ -763,7 +726,7 @@ mod tests {
         };
         for d in [point_at([1.0, -0.03, -0.07]), row] {
             assert!(d.modules().iter().all(|m| m.normal().is_none()));
-            let w = absorption(&g, &f, &d, &air).unwrap();
+            let w = absorption(&g, &VALUES, wavelength(), &d, &air).unwrap();
             assert!(w.data.iter().all(Result::is_ok), "{w:?}");
             for detector in [
                 DetectorPath {
@@ -776,7 +739,10 @@ mod tests {
                 },
             ] {
                 let a = Absorber { detector, ..air };
-                assert_eq!(absorption(&g, &f, &d, &a), Err(Error::NoPixelArea));
+                assert_eq!(
+                    absorption(&g, &VALUES, wavelength(), &d, &a),
+                    Err(Error::NoPixelArea)
+                );
             }
         }
     }
@@ -808,27 +774,19 @@ mod tests {
         };
         let mut want = Vec::new();
         for angstrom in [1.54, 1.0] {
-            let f = Frame {
-                wavelength: Wavelength::new(angstrom).unwrap(),
-                ..frame()
-            };
-            let w = absorption(&g, &f, &d, &a).unwrap();
+            let wl = Wavelength::new(angstrom).unwrap();
+            let w = absorption(&g, &VALUES, wl, &d, &a).unwrap();
             assert!(w.data.iter().all(Result::is_ok), "{w:?}");
-            want.extend([f.wavelength.energy().kev(); 4]);
+            want.extend([wl.energy().kev(); 4]);
         }
         assert_eq!(*r.0.borrow(), want);
     }
 
+    /// Pixel (0, 0) sits at the sample: it has a position, the zero
+    /// vector, but no k̂f, so every map that needs one fails.
     #[test]
-    fn a_pixel_on_the_sample_is_an_error() {
-        let g = Geometry::builder("t")
-            .sample_rotation("om", [0.0, 0.0, 1.0])
-            .build()
-            .unwrap();
-        let f = Frame {
-            values: vec![0.0],
-            wavelength: Wavelength::new(1.0).unwrap(),
-        };
+    fn a_pixel_on_the_sample_has_a_position_but_no_kf() {
+        let g = om_only();
         let d = PixelDetector::new(
             (2, 2),
             Vector3::zeros(),
@@ -836,6 +794,19 @@ mod tests {
             Vector3::new(0.0, 1.0, 0.0),
         )
         .unwrap();
-        assert_eq!(q_map(&g, &f, &d), Err(Error::DetectorAtSample));
+        let pos = detector_positions(&g, &[0.0], &d).unwrap();
+        assert_eq!(pos.get(0, 0), Vector3::zeros());
+        assert_eq!(pos.get(1, 1), Vector3::new(0.0, 1.0, 1.0));
+        let at_sample = Some(Error::DetectorAtSample);
+        let wl = Wavelength::new(1.0).unwrap();
+        assert_eq!(q_map(&g, &[0.0], wl, &d).err(), at_sample);
+        assert_eq!(solid_angle(&g, &[0.0], &d).err(), at_sample);
+        let pol = Polarisation {
+            e: Vector3::y(),
+            factor: 0.0,
+        };
+        assert_eq!(polarisation(&g, &[0.0], &d, pol).err(), at_sample);
+        let a = absorber(Slab::new(face([-1.0, 0.0, 0.0]), 1e-4).unwrap());
+        assert_eq!(absorption(&g, &[0.0], wl, &d, &a).err(), at_sample);
     }
 }
