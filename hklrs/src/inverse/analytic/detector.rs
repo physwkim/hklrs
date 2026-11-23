@@ -114,7 +114,7 @@ fn plane(
             let n = (sample * surface).normalize();
             Some((n, qper / system.k() + ki.dot(&n)))
         }
-        _ => Some((*ki, system.cos_two_theta(Some(e))?)),
+        _ => Some((*ki, system.cos_two_theta(e)?)),
     }
 }
 
