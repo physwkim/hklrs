@@ -1,4 +1,5 @@
-//! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH and E6C.
+//! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C and
+//! ESRF BM28 PSIC.
 //!
 //! Per case: the mode writes hkl's axes; every hkl solution is in the hklrs
 //! set within MATCH rad, directly or after one Newton step on the
@@ -12,7 +13,7 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::{e4c, e6c};
+use hklrs::inverse::{e4c, e6c, esrf_bm28_psic};
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength};
@@ -58,6 +59,9 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         "psi_constant_vertical" => e6c::psi_constant_vertical(geo, hkl2(), psi()),
         "psi_constant_horizontal" => e6c::psi_constant_horizontal(geo, hkl2(), psi()),
         "constant_mu_horizontal" => e6c::constant_mu_horizontal(geo),
+        "constant_nu_coplanar" => esrf_bm28_psic::constant_nu_coplanar(geo),
+        "constant_delta_coplanar" => esrf_bm28_psic::constant_delta_coplanar(geo),
+        "constant_eta_noncoplanar" => esrf_bm28_psic::constant_eta_noncoplanar(geo),
         m => panic!("mode {m}"),
     }
     .unwrap()
@@ -301,4 +305,7 @@ golden! {
     e6c_psi_constant_vertical: "E6C" "psi_constant_vertical",
     e6c_psi_constant_horizontal: "E6C" "psi_constant_horizontal",
     e6c_constant_mu_horizontal: "E6C" "constant_mu_horizontal",
+    bm28_constant_nu_coplanar: "ESRF BM28 PSIC" "constant_nu_coplanar",
+    bm28_constant_delta_coplanar: "ESRF BM28 PSIC" "constant_delta_coplanar",
+    bm28_constant_eta_noncoplanar: "ESRF BM28 PSIC" "constant_eta_noncoplanar",
 }
