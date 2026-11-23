@@ -3,10 +3,10 @@
 //! Every pixel goes through [`scattering_at`], the kernel [`crate::forward`]
 //! uses; the map only decides which part of its result to store.
 
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Point3, Unit, Vector3};
 use rayon::prelude::*;
 
-use crate::absorption::{Masked, Weight};
+use crate::absorption::{Absorber, Attenuation, Masked, SlabFrame, Weight};
 use crate::{Error, Geometry, PixelDetector, Poses, Scattering, Wavelength, scattering_at};
 
 /// Axis values (axis order, radians / metres) and wavelength of one frame.
@@ -189,12 +189,45 @@ pub fn polarisation(
     Ok(weights(detector.shape(), data))
 }
 
+/// Absorption weight per pixel (design §5.1): the sample slab's times the
+/// detector path's, at the kernel's k̂f and p. Every μ is taken at the frame
+/// energy and F computed once, before the pixel loop, which sees only the
+/// resulting [`SlabFrame`] and [`crate::absorption::DetectorPath`].
+/// `normal` is the sensor's, detector arm frame. Where both sides mask, the
+/// pixel carries the sample's reason.
+pub fn absorption<A: Attenuation>(
+    geometry: &Geometry,
+    frame: &Frame,
+    detector: &PixelDetector,
+    absorber: &Absorber<A>,
+    normal: Unit<Vector3<f64>>,
+) -> Result<Weights, Error> {
+    let poses = geometry.poses(&frame.values)?;
+    let energy = frame.wavelength.energy();
+    let sample = SlabFrame::new(
+        &absorber.slab,
+        &absorber.beam,
+        absorber.sample.mu(energy),
+        &(poses.source * geometry.beam_direction()),
+        &poses.sample.rotation,
+    )?;
+    let path = absorber.detector.at(energy);
+    let normal = poses.detector.rotation * normal;
+    let data = fill(geometry, frame, detector, BLANK, |_, p, s| {
+        [sample
+            .weight(&s.kf)
+            .and_then(|a| a.times(path.weight(&s.kf, p.norm(), &normal)?))]
+    })?;
+    Ok(weights(detector.shape(), data))
+}
+
 #[cfg(test)]
 mod tests {
-    use nalgebra::Unit;
+    use std::cell::RefCell;
 
     use super::*;
-    use crate::{Lattice, Orientation, Sample, forward};
+    use crate::absorption::{Beam, DetectorPath, Face, Layer, Slab};
+    use crate::{Energy, Lattice, Orientation, PerMetre, Sample, forward};
 
     /// Sample ω about z, detector 2θ about z and ν about y, a detector
     /// translation along x: every pose component enters p.
@@ -499,6 +532,139 @@ mod tests {
         .unwrap();
         let w = solid_angle(&g, &f, &d).unwrap();
         assert!(w.data.iter().all(|w| *w == Err(Masked::EdgeOn)), "{w:?}");
+    }
+
+    fn per_metre(v: f64) -> PerMetre {
+        PerMetre::new(v).unwrap()
+    }
+
+    /// 5 mm square, `normal` in the sample frame.
+    fn face(normal: [f64; 3]) -> Face {
+        Face::new(normal.into(), Vector3::z(), 5e-3, 5e-3).unwrap()
+    }
+
+    /// Far smaller than the face.
+    fn beam() -> Beam {
+        Beam::top_hat(Vector3::z(), [1e-4, 2e-4]).unwrap()
+    }
+
+    fn absorber(slab: Slab) -> Absorber<PerMetre> {
+        Absorber {
+            slab,
+            beam: beam(),
+            sample: per_metre(1e4),
+            detector: DetectorPath {
+                air: Some(per_metre(1.0)),
+                window: Some(Layer::new(per_metre(1e3), 25e-6).unwrap()),
+                sensor: Some(Layer::new(per_metre(3e4), 450e-6).unwrap()),
+            },
+        }
+    }
+
+    // In `geometry()`'s frame, a sample face with normal +y faces the beam
+    // and the detector, one with −x the beam only, one with −y neither.
+
+    /// Bit for bit SlabFrame's times DetectorPath's at the kernel's k̂f and
+    /// p, in reflection and in transmission.
+    #[test]
+    fn absorption_equals_slab_frame_and_detector_path_at_the_kernels_kf_and_p() {
+        let (g, f, d) = (geometry(), frame(), detector());
+        let poses = g.poses(&f.values).unwrap();
+        let ki = poses.source * g.beam_direction();
+        let normal = poses.detector.rotation * Vector3::x_axis();
+        for (n, reflection) in [([0.0, 1.0, 0.0], true), ([-1.0, 0.0, 0.0], false)] {
+            let a = absorber(Slab::new(face(n), 1e-4).unwrap());
+            let w = absorption(&g, &f, &d, &a, Vector3::x_axis()).unwrap();
+            let sample =
+                SlabFrame::new(&a.slab, &a.beam, a.sample, &ki, &poses.sample.rotation).unwrap();
+            let n_lab = poses.sample.rotation * Vector3::from(n);
+            for i in 0..5 {
+                for j in 0..7 {
+                    let point = d.pixel(i, j).unwrap();
+                    let (p, s) = scattering_at(&g, &poses, f.wavelength, &point).unwrap();
+                    assert_eq!(s.kf.dot(&n_lab) > 0.0, reflection, "{n:?} ({i}, {j})");
+                    let want = sample.weight(&s.kf).unwrap();
+                    let want = want.times(a.detector.weight(&s.kf, p.norm(), &normal).unwrap());
+                    assert_eq!(w.get(i, j), want, "{n:?} ({i}, {j})");
+                    assert!(want.is_ok(), "{n:?} ({i}, {j})");
+                }
+            }
+        }
+    }
+
+    /// Each side's mask reaches the pixel; where both mask, the sample's
+    /// reason wins.
+    #[test]
+    fn absorption_masks_carry_their_reason() {
+        let (g, f, d) = (geometry(), frame(), detector());
+        let every = |a: &Absorber<PerMetre>, want: Masked| {
+            let w = absorption(&g, &f, &d, a, Vector3::x_axis()).unwrap();
+            assert!(w.data.iter().all(|r| *r == Err(want)), "{want:?}: {w:?}");
+        };
+        let lit = Slab::new(face([0.0, 1.0, 0.0]), 1e-4).unwrap();
+        let unlit = Slab::new(face([0.0, -1.0, 0.0]), 1e-4).unwrap();
+        // optical depth 1e4 at normal incidence: transmits 0 in f64
+        let opaque = DetectorPath {
+            window: Some(Layer::new(per_metre(1e7), 1e-3).unwrap()),
+            ..Default::default()
+        };
+        every(&absorber(unlit), Masked::Unlit);
+        every(
+            &absorber(Slab::bulk(face([-1.0, 0.0, 0.0]))),
+            Masked::ThroughBulk,
+        );
+        every(
+            &Absorber {
+                detector: opaque,
+                ..absorber(lit)
+            },
+            Masked::Opaque,
+        );
+        every(
+            &Absorber {
+                detector: opaque,
+                ..absorber(unlit)
+            },
+            Masked::Unlit,
+        );
+    }
+
+    /// Records the energy of every call. The RefCell makes it !Sync, so the
+    /// pixel loop, which `fill` requires to be Sync, cannot reach it.
+    struct Recording(RefCell<Vec<f64>>);
+
+    impl Attenuation for Recording {
+        fn mu(&self, energy: Energy) -> PerMetre {
+            self.0.borrow_mut().push(energy.kev());
+            per_metre(1e3)
+        }
+    }
+
+    #[test]
+    fn absorption_takes_each_mu_once_per_frame_at_its_energy() {
+        let (g, d) = (geometry(), detector());
+        let r = Recording(RefCell::new(Vec::new()));
+        let a = Absorber {
+            slab: Slab::new(face([0.0, 1.0, 0.0]), 1e-4).unwrap(),
+            beam: beam(),
+            sample: &r,
+            detector: DetectorPath {
+                air: Some(&r),
+                window: Some(Layer::new(&r, 25e-6).unwrap()),
+                sensor: Some(Layer::new(&r, 450e-6).unwrap()),
+            },
+        };
+        let mut want = Vec::new();
+        for angstrom in [1.54, 1.0] {
+            let f = Frame {
+                wavelength: Wavelength::new(angstrom).unwrap(),
+                ..frame()
+            };
+            let w = absorption(&g, &f, &d, &a, Vector3::x_axis()).unwrap();
+            assert!(w.data.iter().all(Result::is_ok), "{w:?}");
+            want.extend([f.wavelength.energy().kev(); 4]);
+        }
+        assert_eq!(*r.0.borrow(), want);
     }
 
     #[test]

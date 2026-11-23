@@ -18,6 +18,12 @@ impl Attenuation for PerMetre {
     }
 }
 
+impl<A: Attenuation + ?Sized> Attenuation for &A {
+    fn mu(&self, energy: Energy) -> PerMetre {
+        (**self).mu(energy)
+    }
+}
+
 /// Why a pixel has no weight. `s_i = −k̂i·n̂`, `s_f = k̂f·n̂`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Masked {
@@ -350,37 +356,71 @@ impl SlabFrame {
     }
 }
 
-/// A flat layer on the detector, crossed by the scattered beam.
+/// A flat layer on the detector, crossed by the scattered beam. `A` gives
+/// its μ; [`Layer::at`] fixes it at one energy.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Layer {
-    mu: PerMetre,
+pub struct Layer<A = PerMetre> {
+    mu: A,
     thickness: f64,
 }
 
-impl Layer {
+impl<A> Layer<A> {
     /// `thickness` along the detector normal, metres.
-    pub fn new(mu: PerMetre, thickness: f64) -> Result<Self, Error> {
+    pub fn new(mu: A, thickness: f64) -> Result<Self, Error> {
         Ok(Self {
             mu,
             thickness: positive("layer thickness", thickness)?,
         })
     }
+}
 
+impl<A: Attenuation> Layer<A> {
+    pub fn at(&self, energy: Energy) -> Layer {
+        Layer {
+            mu: self.mu.mu(energy),
+            thickness: self.thickness,
+        }
+    }
+}
+
+impl Layer {
     /// Optical depth along a ray at `cos θ` to the normal.
     fn depth(&self, cos: f64) -> f64 {
         self.mu.per_metre() * self.thickness / cos
     }
 }
 
-/// Detector-side terms at one energy; an absent term weighs 1.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct DetectorPath {
+/// Detector-side terms; an absent term weighs 1. `A` gives each μ;
+/// [`DetectorPath::at`] fixes them at one energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DetectorPath<A = PerMetre> {
     /// Air or He between the sample and the pixel.
-    pub air: Option<PerMetre>,
+    pub air: Option<A>,
     /// Window or filter, transmitted.
-    pub window: Option<Layer>,
+    pub window: Option<Layer<A>>,
     /// Sensor, absorbed.
-    pub sensor: Option<Layer>,
+    pub sensor: Option<Layer<A>>,
+}
+
+impl<A> Default for DetectorPath<A> {
+    fn default() -> Self {
+        Self {
+            air: None,
+            window: None,
+            sensor: None,
+        }
+    }
+}
+
+impl<A: Attenuation> DetectorPath<A> {
+    /// The path at `energy`, each μ evaluated once.
+    pub fn at(&self, energy: Energy) -> DetectorPath {
+        DetectorPath {
+            air: self.air.as_ref().map(|air| air.mu(energy)),
+            window: self.window.as_ref().map(|w| w.at(energy)),
+            sensor: self.sensor.as_ref().map(|s| s.at(energy)),
+        }
+    }
 }
 
 impl DetectorPath {
@@ -400,6 +440,17 @@ impl DetectorPath {
         let sensor = self.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1());
         Weight::new(air * window * sensor, Masked::Opaque)
     }
+}
+
+/// What absorbs, at any energy: the sample slab lit by `beam`, and the path
+/// to the detector. `A` gives each μ, for example `&dyn Attenuation` for
+/// mixed materials.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Absorber<A> {
+    pub slab: Slab,
+    pub beam: Beam,
+    pub sample: A,
+    pub detector: DetectorPath<A>,
 }
 
 /// φ(x) = expm1(x)/x with φ(0) = 1, so t φ(−at) = ∫₀ᵗ e^(−az) dz holds at
