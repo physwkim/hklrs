@@ -6,6 +6,9 @@ use nalgebra::{Unit, UnitQuaternion, Vector3};
 use crate::units::positive;
 use crate::{Energy, Error, PerMetre};
 
+#[cfg(feature = "xrt")]
+pub mod xrt;
+
 /// Linear attenuation of a material at a photon energy. The core holds no
 /// material tables; a constant μ implements it directly. A tabulated
 /// material has no μ outside its table.
