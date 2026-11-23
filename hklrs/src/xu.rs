@@ -1,6 +1,12 @@
 //! Detectors set up by xrayutilities' `QConversion.init_area` and
 //! `init_linear`, as pixel detectors in the detector-arm frame. The beam is
 //! xrayutilities' `r_i`: the centre channel lies along it at all axes zero.
+//!
+//! Tilts keep the sense xrayutilities actually applies: its `rotation_arb`
+//! turns left-handed (XU-3) and the importer reproduces that turn, so `tilt`
+//! and `tiltazimuth` values fitted in xrayutilities import unchanged. A
+//! positive tilt turns a linear row toward the beam and an area chip's
+//! `tiltazimuth` direction toward `dir1 × dir2`.
 
 use std::str::FromStr;
 
