@@ -5,8 +5,10 @@
 
 mod diffractometer;
 mod error;
+mod pseudo;
 mod samples;
 
 pub use diffractometer::{Diffractometer, RealAxis, WavelengthSource};
 pub use error::DiffError;
+pub use pseudo::PseudoAxis;
 pub use samples::Measured;

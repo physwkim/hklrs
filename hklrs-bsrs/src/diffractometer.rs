@@ -5,14 +5,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_trait::async_trait;
-use bsrs::core::msg::{ConfigurableObj, LocatableObj, NamedObj, ReadableObj};
+use bsrs::core::msg::{ConfigurableObj, DynLocation, LocatableObj, NamedObj, ReadableObj};
+use bsrs::core::status::Status;
 use bsrs::core::{BsrsError, ConfigureArgs, DataKey, Dtype, ReadingValue};
 use bsrs::event_model::compose::now;
 use bsrs::event_model::{SignalMetadata, make_datakey};
-use futures::future::try_join_all;
+use futures::future::{join_all, try_join_all};
+use futures::try_join;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::{
-    AxisKind, Deg, Geometry, Lattice, Orientation, Reflection, Sample, Wavelength, forward,
+    AxisKind, Deg, Geometry, InverseRequest, Lattice, Mode, ModeSpec, Orientation, Picker,
+    Reflection, Sample, Target, Wavelength, forward,
 };
 use serde_json::{Value, json};
 
@@ -61,6 +64,10 @@ impl WavelengthSource {
 struct State {
     wavelength: WavelengthSource,
     samples: Samples,
+    /// None only for a geometry no [`ModeSpec`] builds on.
+    mode: Option<ModeSpec>,
+    /// The last h, k, l the pseudo axes were sent to; their setpoint.
+    target: Option<[f64; 3]>,
 }
 
 impl State {
@@ -78,7 +85,7 @@ impl State {
 }
 
 /// Configuration fields: key suffix, dtype, shape, units.
-const CONFIG: [(&str, Dtype, &[u64], Option<&str>); 6] = [
+const CONFIG: [(&str, Dtype, &[u64], Option<&str>); 7] = [
     ("geometry", Dtype::String, &[], None),
     ("sample", Dtype::String, &[], None),
     // a, b, c in Å; alpha, beta, gamma in degrees
@@ -86,9 +93,11 @@ const CONFIG: [(&str, Dtype, &[u64], Option<&str>); 6] = [
     ("U", Dtype::Array, &[3, 3], None),
     ("UB", Dtype::Array, &[3, 3], Some("1/angstrom")),
     ("wavelength", Dtype::Number, &[], Some("angstrom")),
+    // null for a geometry without modes
+    ("mode", Dtype::String, &[], None),
 ];
 
-const SETTABLE: [&str; 2] = ["sample", "wavelength"];
+const SETTABLE: [&str; 3] = ["sample", "wavelength", "mode"];
 
 pub struct Diffractometer {
     name: String,
@@ -96,6 +105,9 @@ pub struct Diffractometer {
     /// `reals[i]` drives `geometry.axes()[i]`.
     reals: Vec<Arc<dyn RealAxis>>,
     state: RwLock<State>,
+    /// Held by a pseudo-axis move from its setpoint through its last real's
+    /// set, so concurrent moves reach the reals in setpoint order.
+    moving: futures::lock::Mutex<()>,
 }
 
 impl Diffractometer {
@@ -126,6 +138,10 @@ impl Diffractometer {
                 })
             })
             .collect::<Result<_, _>>()?;
+        // hkl's default: the engine's first mode
+        let mode = ModeSpec::names()
+            .map(ModeSpec::new)
+            .find(|m| m.build(&geometry).is_ok());
         Ok(Self {
             name: name.to_owned(),
             geometry,
@@ -133,7 +149,10 @@ impl Diffractometer {
             state: RwLock::new(State {
                 wavelength,
                 samples: Samples::new(sample),
+                mode,
+                target: None,
             }),
+            moving: futures::lock::Mutex::new(()),
         })
     }
 
@@ -216,6 +235,31 @@ impl Diffractometer {
         self.state_mut().set_wavelength(wavelength)
     }
 
+    /// The hkl mode the pseudo axes solve in; at construction the first of
+    /// [`ModeSpec::names`] this geometry builds.
+    pub fn mode(&self) -> Option<ModeSpec> {
+        self.state().mode.clone()
+    }
+
+    pub fn set_mode(&self, mode: ModeSpec) -> Result<(), DiffError> {
+        self.build_mode(&mode)?;
+        self.state_mut().mode = Some(mode);
+        Ok(())
+    }
+
+    fn build_mode<'g>(&'g self, mode: &ModeSpec) -> Result<Mode<'g>, DiffError> {
+        mode.build(&self.geometry)
+            .map_err(|source| DiffError::Mode {
+                mode: mode.name.clone(),
+                source,
+            })
+    }
+
+    /// The last h, k, l the pseudo axes were sent to.
+    pub fn target(&self) -> Option<[f64; 3]> {
+        self.state().target
+    }
+
     /// Records reflection `name` of the current sample.
     pub fn add_reflection(&self, name: &str, measured: Measured) -> Result<(), DiffError> {
         self.reflection(&measured)?;
@@ -286,6 +330,76 @@ impl Diffractometer {
         Ok(forward(&self.geometry, sample, &values, wavelength, &self.point())?.hkl)
     }
 
+    /// Axis values that reach `hkl` with the current sample and mode, the
+    /// solution closest to `current`, which also gives the held axes. Both
+    /// in geometry axis order, degrees for rotations and metres for
+    /// translations.
+    pub fn inverse(
+        &self,
+        hkl: [f64; 3],
+        current: &[f64],
+        wavelength: Wavelength,
+    ) -> Result<Vec<f64>, DiffError> {
+        let current = self.geometry.values_from_degrees(current)?;
+        let (mode, ub) = {
+            let state = self.state();
+            (state.mode.clone(), state.samples.current().sample.ub())
+        };
+        let mode = mode.ok_or_else(|| DiffError::NoMode {
+            geometry: self.geometry.name().to_owned(),
+        })?;
+        let mode = self.build_mode(&mode)?;
+        let request = InverseRequest {
+            mode: &mode,
+            ub,
+            wavelength,
+            target: Target::Hkl(Vector3::from(hkl)),
+            current: &current,
+        };
+        let values = request
+            .pick(Picker::Closest)
+            .map_err(|source| DiffError::Solve { hkl, source })?;
+        Ok(self.geometry.values_to_degrees(&values)?)
+    }
+
+    /// Replaces component `index` of the pseudo setpoint (the readback h, k,
+    /// l before the first move), solves closest to the readbacks and sets
+    /// every real; the setpoint is kept only when the solve succeeds.
+    pub(crate) async fn set_component(
+        &self,
+        index: usize,
+        value: f64,
+    ) -> Result<Status, BsrsError> {
+        let _gate = self.moving.lock().await;
+        let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
+        let saved = self.target();
+        let mut target = match saved {
+            Some(t) => t,
+            None => self.hkl(&current, wavelength)?.into(),
+        };
+        target[index] = value;
+        let values = self.inverse(target, &current, wavelength)?;
+        self.state_mut().target = Some(target);
+        let sets = self.reals.iter().zip(values).map(|(r, v)| r.set_dyn(v));
+        let statuses = join_all(sets).await;
+        Ok(statuses.iter().fold(Status::done(), |all, s| all.and(s)))
+    }
+
+    /// Component `index` of the pseudo setpoint and of the h, k, l at the
+    /// readbacks.
+    pub(crate) async fn locate_component(&self, index: usize) -> Result<DynLocation, BsrsError> {
+        let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
+        let readback = self.hkl(&current, wavelength)?[index];
+        let setpoint = self.target().map_or(readback, |t| t[index]);
+        Ok(DynLocation { setpoint, readback })
+    }
+
+    /// Delivers a pause's stop to every real.
+    pub(crate) async fn stop_reals(&self, success: bool) -> Result<(), BsrsError> {
+        try_join_all(self.reals.iter().map(|r| r.stop_on_pause(success))).await?;
+        Ok(())
+    }
+
     /// Sets configuration by key, all or none: `{name}_sample` selects a
     /// sample, `{name}_wavelength` sets a fixed wavelength in Å.
     pub fn configure(&self, values: &HashMap<String, Value>) -> Result<(), DiffError> {
@@ -308,6 +422,11 @@ impl Diffractometer {
                     let angstrom = value.as_f64().ok_or_else(|| bad("number"))?;
                     next.set_wavelength(Wavelength::new(angstrom)?)?;
                 }
+                Some("mode") => {
+                    let mode = ModeSpec::new(value.as_str().ok_or_else(|| bad("string"))?);
+                    self.build_mode(&mode)?;
+                    next.mode = Some(mode);
+                }
                 _ => {
                     return Err(DiffError::ConfigKey {
                         key: key.clone(),
@@ -321,7 +440,7 @@ impl Diffractometer {
     }
 }
 
-fn datakey(key: &str, dtype: Dtype, shape: &[u64], units: Option<&str>) -> DataKey {
+pub(crate) fn datakey(key: &str, dtype: Dtype, shape: &[u64], units: Option<&str>) -> DataKey {
     let numpy = if dtype == Dtype::String {
         "|S40"
     } else {
@@ -422,6 +541,7 @@ impl ConfigurableObj for Diffractometer {
                 rows(&sample.u().to_rotation_matrix().into_inner()),
                 rows(&sample.ub()),
                 json!(wavelength.angstrom()),
+                json!(state.mode.as_ref().map(|m| &m.name)),
             ]
         };
         let t = now();

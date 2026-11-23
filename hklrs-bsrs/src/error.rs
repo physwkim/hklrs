@@ -36,6 +36,18 @@ pub enum DiffError {
         value: Value,
         expected: &'static str,
     },
+    #[error("mode {mode:?}: {source}")]
+    Mode {
+        mode: String,
+        source: hklrs::InverseError,
+    },
+    #[error("geometry {geometry:?} has no hkl mode")]
+    NoMode { geometry: String },
+    #[error("hkl {hkl:?}: {source}")]
+    Solve {
+        hkl: [f64; 3],
+        source: hklrs::InverseError,
+    },
     #[error(transparent)]
     Core(#[from] hklrs::Error),
 }

@@ -266,6 +266,7 @@ async fn configuration_reaches_the_descriptor() {
     assert_eq!(config.data["e4cv_geometry"], json!("E4CV"));
     assert_eq!(config.data["e4cv_sample"], json!("sample"));
     assert_eq!(config.data["e4cv_wavelength"], json!(LAMBDA));
+    assert_eq!(config.data["e4cv_mode"], json!("bissector"));
     let mut keys: Vec<&String> = config.data_keys.keys().collect();
     keys.sort();
     assert_eq!(
@@ -275,6 +276,7 @@ async fn configuration_reaches_the_descriptor() {
             "e4cv_UB",
             "e4cv_geometry",
             "e4cv_lattice",
+            "e4cv_mode",
             "e4cv_sample",
             "e4cv_wavelength"
         ]
