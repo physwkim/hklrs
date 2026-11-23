@@ -1,16 +1,17 @@
 //! Deterministic search: Levenberg-Marquardt from the sector images
 //! {x, π−x, π+x, −x} (per written axis) of every solution admitted,
-//! starting from the images of `current` and then of its Bragg starts until
-//! the first one is, and stopping at the first singular one. A kappa mode
-//! offers the kappa twin of every solution reached as well; the validator
-//! rejects it when it moves a held axis.
+//! starting from the images of `current` and then of the sector midpoints,
+//! every axis at π/4, until the first one is, and stopping at the first
+//! singular one. Only a [`Start`], where every equation is defined, is
+//! solved from. A kappa mode offers the kappa twin of every solution
+//! reached as well; the validator rejects it when it moves a held axis.
 
 use std::collections::VecDeque;
-use std::f64::consts::{FRAC_PI_2, PI};
+use std::f64::consts::{FRAC_PI_4, PI};
 
 use nalgebra::{DMatrix, DVector};
 
-use super::system::System;
+use super::system::{Eval, System};
 use super::validate::{SolutionSet, same};
 use super::wrap;
 
@@ -22,6 +23,20 @@ const STEP: f64 = 1e-15;
 /// Solutions seeded from, at most; bounds the search whatever the mode.
 const MAX_ROOTS: usize = 64;
 
+/// Written values where every equation of the system is defined, with the
+/// residual and Jacobian there: the only point a solve starts from.
+struct Start {
+    x: Vec<f64>,
+    eval: Eval,
+}
+
+impl Start {
+    fn at(system: &System, x: Vec<f64>) -> Option<Self> {
+        let eval = system.eval(&system.values(&x))?;
+        Some(Self { x, eval })
+    }
+}
+
 struct Search<'a> {
     system: &'a System<'a>,
     set: SolutionSet<'a>,
@@ -29,15 +44,19 @@ struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
-    /// Solves from `seed` unless it was tried or the set is degenerate;
+    /// Solves from `seed` unless it was tried, the set is degenerate or an
+    /// equation is undefined there;
     /// returns the written values of the solution reached and of its kappa
     /// twin, those the set admits at one of their slit roots.
     fn seed(&mut self, seed: Vec<f64>) -> Vec<Vec<f64>> {
         if self.set.is_degenerate() || self.tried.iter().any(|t| same(t, &seed)) {
             return Vec::new();
         }
-        let x = levenberg_marquardt(self.system, &seed);
-        self.tried.push(seed);
+        self.tried.push(seed.clone());
+        let Some(start) = Start::at(self.system, seed) else {
+            return Vec::new();
+        };
+        let x = levenberg_marquardt(self.system, start);
         let reached = self.system.values(&x);
         let twin = self.system.kappa().map(|k| k.twin(&reached));
         [Some(reached), twin]
@@ -66,11 +85,13 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> SolutionSet<'a> {
         tried: Vec::new(),
     };
     // The starts' images are only a deterministic multi-start, needed until
-    // a solution's own images take over.
+    // a solution's own images take over. The images of a `current` on a set
+    // where an equation is undefined (k̂f = ±k̂i, a normal along k̂i) all stay
+    // on it; the midpoints' images put no axis at a multiple of π/2.
     let start = system.written_values(system.current());
-    let starts = bragg(system, &start);
-    let mut roots: VecDeque<_> = std::iter::once(start)
-        .chain(starts)
+    let midpoints = vec![FRAC_PI_4; start.len()];
+    let mut roots: VecDeque<_> = [start, midpoints]
+        .into_iter()
         .flat_map(images)
         .map(|seed| s.seed(seed))
         .find(|found| !found.is_empty())
@@ -87,50 +108,6 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> SolutionSet<'a> {
         }
     }
     s.set
-}
-
-/// The written values `start` with one axis at a time turned so that k̂f
-/// makes the 2θ with k̂i that the goal, or else an extra equation, fixes, at
-/// both roots, for every axis that turns k̂f·k̂i; none where nothing fixes
-/// 2θ.
-/// Where `start` holds k̂f = ±k̂i, the direction of Q, and with it qaz, ψ
-/// and the scattering plane, is undefined at every sector image of it.
-fn bragg(system: &System, start: &[f64]) -> Vec<Vec<f64>> {
-    let Some(cos_2theta) = std::iter::once(None)
-        .chain(system.extra().iter().map(Some))
-        .find_map(|e| system.cos_two_theta(e))
-    else {
-        return Vec::new();
-    };
-    let geometry = system.geometry();
-    let beam = geometry.beam_direction().into_inner();
-    let mut out = Vec::new();
-    for i in 0..start.len() {
-        let at = |v: f64| {
-            let mut x = start.to_vec();
-            x[i] = wrap(v);
-            x
-        };
-        let f = |v: f64| {
-            geometry
-                .poses(&system.values(&at(v)))
-                .map_or(f64::NAN, |p| {
-                    (p.detector.rotation * beam).dot(&(p.source * beam))
-                })
-        };
-        // k̂f·k̂i = a + p·cos v + q·sin v over one rotation axis.
-        let (f0, f1, f2) = (f(0.0), f(FRAC_PI_2), f(PI));
-        let (a, p) = ((f0 + f2) / 2.0, (f0 - f2) / 2.0);
-        let q = f1 - a;
-        // NaN where 2θ is out of this axis's reach or k̂f·k̂i does not turn.
-        let d = ((cos_2theta - a) / p.hypot(q)).acos();
-        if d.is_nan() {
-            continue;
-        }
-        let phi = q.atan2(p);
-        out.extend([at(phi + d), at(phi - d)]);
-    }
-    out
 }
 
 /// The 4ⁿ sector images of `x`, `x` itself first.
@@ -156,12 +133,10 @@ fn sector(x: &[f64], image: usize) -> Vec<f64> {
 }
 
 /// Damped Gauss-Newton (Madsen, Nielsen & Tingleff 2004, alg. 3.16) on the
-/// written axes from `seed`; returns where it stopped, converged or not.
-fn levenberg_marquardt(system: &System, seed: &[f64]) -> Vec<f64> {
-    let mut x = DVector::from_column_slice(seed);
-    let Some(mut e) = system.eval(&system.values(seed)) else {
-        return seed.to_vec();
-    };
+/// written axes from `start`; returns where it stopped, converged or not.
+fn levenberg_marquardt(system: &System, start: Start) -> Vec<f64> {
+    let mut x = DVector::from_vec(start.x);
+    let mut e = start.eval;
     let n = x.len();
     let mut cost = e.f.norm_squared();
     let mut a = e.j.tr_mul(&e.j);

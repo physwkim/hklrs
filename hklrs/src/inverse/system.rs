@@ -448,14 +448,13 @@ impl<'a> System<'a> {
         2.0 * (q / (2.0 * self.k)).clamp(-1.0, 1.0).asin()
     }
 
-    /// cos 2θ, k̂f·k̂i, that the goal or the extra equation `e` fixes: a
-    /// qpar with the qper of its surface; `None` for any other equation.
-    pub fn cos_two_theta(&self, e: Option<&Equation>) -> Option<f64> {
-        let q = match (&self.goal, e) {
-            (Goal::Q(q), None) => return Some(1.0 - q.norm_squared() / 2.0),
-            (_, Some(Equation::Tth { tth })) => return Some(tth.cos()),
-            (_, Some(Equation::QNorm { q } | Equation::QSigned { q })) => *q,
-            (_, Some(Equation::Qpar { surface, qpar })) => {
+    /// cos 2θ, k̂f·k̂i, that the extra equation `e` fixes: a qpar with the
+    /// qper of its surface; `None` for any other equation.
+    pub fn cos_two_theta(&self, e: &Equation) -> Option<f64> {
+        let q = match e {
+            Equation::Tth { tth } => return Some(tth.cos()),
+            Equation::QNorm { q } | Equation::QSigned { q } => *q,
+            Equation::Qpar { surface, qpar } => {
                 let qper = self.extra.iter().find_map(|e| match e {
                     Equation::Qper { surface: s, qper } if s == surface => Some(*qper),
                     _ => None,

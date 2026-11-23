@@ -9,8 +9,8 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use hklrs::inverse::kappa::Branch;
 use hklrs::inverse::{
-    self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, petra3_p09_eh2,
-    soleil_sixs_med, zaxis,
+    self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, k4c, k6c, petra3_p09_eh2,
+    petra3_p23_4c, soleil_sixs_med, zaxis,
 };
 use hklrs::nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
 use hklrs::presets::{KAPPA_ALPHA_DEG, kappa_axis, preset};
@@ -1139,4 +1139,106 @@ fn held_axis_is_not_wrapped_to_its_cut_point() {
         solve(&geo),
         Err(InverseError::NoSolutionInLimits(solutions))
     );
+}
+
+type Verdict = Result<Vec<Vec<f64>>, InverseError>;
+
+/// `mode` solved for `hkl` from all zero, where Q is zero or along the beam
+/// at every sector image of it, and from every written axis turned.
+fn from_zero_and_turned(mode: &Mode, hkl: [f64; 3]) -> [Verdict; 2] {
+    let zero = vec![0.0; mode.geometry().axes().len()];
+    let mut turned = zero.clone();
+    for (j, &w) in mode.written().iter().enumerate() {
+        turned[w] = 0.3 - 0.37 * j as f64;
+    }
+    [zero, turned].map(|current| request(mode, Vector3::from(hkl), &current).solve())
+}
+
+/// The same set up to 2π per axis, or the same error.
+fn same_verdict(a: &Verdict, b: &Verdict) -> bool {
+    let within = |x: &[Vec<f64>], y: &[Vec<f64>]| {
+        x.iter().all(|x| {
+            y.iter()
+                .any(|y| x.iter().zip(y).all(|(u, v)| wrap(u - v).abs() < 1e-6))
+        })
+    };
+    match (a, b) {
+        (Ok(a), Ok(b)) => a.len() == b.len() && within(a, b) && within(b, a),
+        (a, b) => a == b,
+    }
+}
+
+type Psi = for<'a> fn(&'a Geometry, Vector3<f64>, f64) -> Result<Mode<'a>, InverseError>;
+
+/// The ψ modes of every preset reach the same set from all zero, where ψ is
+/// undefined, as from a turned current.
+#[test]
+fn psi_modes_reach_the_same_set_from_zero() {
+    let modes: [(&str, Psi); 21] = [
+        ("E4CV", e4c::psi_constant),
+        ("E4CV", e4c::psi),
+        ("E4CH", e4c::psi_constant),
+        ("E4CH", e4c::psi),
+        ("SOLEIL MARS", e4c::psi_constant),
+        ("SOLEIL MARS", e4c::psi),
+        ("K4CV", k4c::psi_constant),
+        ("K4CV", k4c::psi),
+        ("E6C", e6c::psi_constant_vertical),
+        ("E6C", e6c::psi_vertical),
+        ("E6C", e6c::psi_constant_horizontal),
+        ("PETRA3 P23 6C", e6c::psi_constant_vertical),
+        ("PETRA3 P23 6C", e6c::psi_vertical),
+        ("PETRA3 P23 6C", e6c::psi_constant_horizontal),
+        ("K6C", k6c::psi_constant_vertical),
+        ("K6C", k6c::psi_vertical),
+        ("SOLEIL SIRIUS KAPPA", k6c::psi_vertical_soleil_sirius_kappa),
+        ("APS POLAR", aps_04id_polar::psi_constant_horizontal),
+        ("APS POLAR", aps_04id_polar::psi_constant_vertical),
+        ("APS POLAR", aps_04id_polar::psi_vertical),
+        ("PETRA3 P23 4C", petra3_p23_4c::psi_constant),
+    ];
+    let mut failed = Vec::new();
+    let mut solved = 0;
+    for (name, build) in modes {
+        let geo = preset(name).unwrap();
+        for reference in [Vector3::z(), Vector3::new(1.0, 1.0, 0.0)] {
+            for psi in [-2.5, 0.4] {
+                let mode = build(&geo, reference, psi).unwrap();
+                for hkl in TARGETS {
+                    let [zero, turned] = from_zero_and_turned(&mode, hkl);
+                    if !same_verdict(&zero, &turned) {
+                        failed.push(format!(
+                            "{name} {} {reference:?} {psi} {hkl:?}:\nzero {zero:?}\nturned {turned:?}",
+                            mode.name()
+                        ));
+                    }
+                    solved += usize::from(zero.is_ok());
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    assert!(solved > 0);
+}
+
+/// A surface normal along the beam has no azimuth about it at any sector
+/// image of all zero; K6C constant_incidence reaches the same set from there
+/// as from a turned current.
+#[test]
+fn incidence_along_the_beam_reaches_the_same_set_from_zero() {
+    let geo = preset("K6C").unwrap();
+    let normal = geo.beam_direction().into_inner();
+    let mut solved = 0;
+    for (incidence, azimuth) in [(0.2, 0.5), (-0.3, 2.0), (0.05, -1.0)] {
+        let mode = k6c::constant_incidence(&geo, normal, incidence, azimuth).unwrap();
+        for hkl in TARGETS {
+            let [zero, turned] = from_zero_and_turned(&mode, hkl);
+            assert!(
+                same_verdict(&zero, &turned),
+                "{incidence} {azimuth} {hkl:?}:\nzero {zero:?}\nturned {turned:?}"
+            );
+            solved += usize::from(zero.is_ok());
+        }
+    }
+    assert!(solved > 0);
 }
