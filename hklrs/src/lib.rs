@@ -5,6 +5,7 @@
 
 pub mod absorption;
 pub mod calib;
+pub mod cut;
 mod detector;
 mod detector_table;
 mod error;
