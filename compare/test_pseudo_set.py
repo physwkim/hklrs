@@ -17,6 +17,7 @@ HKL-19, HKL-38: libhkl fails at chi, psi or alpha outside (-180, 180]; hklrs
 gives the set of the equivalent target inside.
 HKL-39: psi set before initialized_set leaves libhkl's hkl0 unwritten, so
 none of its solutions is at the hkl0 of the start; hklrs solves there.
+One Rust error raises one Python type from solve and from pseudo_solve.
 """
 import ctypes
 import functools
@@ -444,3 +445,57 @@ def test_hkl39_psi_before_initialisation(preset):
     assert c.at_hkl0 == 0, f"libhkl solved at hkl0: {c.theirs}"
     assert not c.problems, "\n".join(c.problems)
     assert c.solved, c.ours
+
+
+@pytest.mark.parametrize("error", ["Unreachable", "Degenerate", "NonFinite",
+                                   "NoSolutionInLimits", "GeometryError"])
+def test_solve_and_pseudo_solve_raise_one_type_per_error(error):
+    """One Rust error, one Python type: solve and pick on an hkl mode and
+    pseudo_solve and pseudo_pick on a pseudo engine raise the InverseError
+    subclass named after the variant."""
+    g = hklrs.Geometry.preset("E4CV")
+    sample = hklrs.Sample("errors", hklrs.Lattice(*LATTICE))
+    current = [30.0, 10.0, 20.0, 60.0]
+    hkl, engine, values, hkl0 = [1.0, 1.0, 1.0], "q", [2.0], None
+    if error == "Unreachable":
+        hkl, values = [10.0, 10.0, 10.0], [100.0]
+    elif error == "Degenerate":
+        hkl, engine, values, hkl0 = [0.0, 0.0, 0.0], "psi", [10.0], [0.0, 0.0, 0.0]
+    elif error == "NonFinite":
+        hkl, engine, values, hkl0 = [math.nan, 0.0, 1.0], "psi", [10.0], [math.nan, 0.0, 1.0]
+    elif error == "NoSolutionInLimits":
+        for a in g.axis_names:
+            g.set_limits(a, 170.0, 171.0)
+    elif error == "GeometryError":
+        current = current[:3]
+    mode = hklrs.Mode(g, "bissector")
+    pseudo = hklrs.PseudoMode(g, engine, values,
+                              reference=[1.0, 0.0, 0.0] if engine == "psi" else None)
+    raised = []
+    for f in (hklrs.solve, hklrs.pick):
+        with pytest.raises(hklrs.InverseError) as e:
+            f(mode, sample, hkl, WL, current)
+        raised.append(type(e.value))
+    for f in (hklrs.pseudo_solve, hklrs.pseudo_pick):
+        with pytest.raises(hklrs.InverseError) as e:
+            f(pseudo, WL, current, sample, hkl0)
+        raised.append(type(e.value))
+    assert raised == [getattr(hklrs, error)] * 4
+
+
+@pytest.mark.parametrize("error", ["GeometryError", "ZeroReference"])
+def test_mode_and_pseudo_mode_raise_one_type_per_error(error):
+    """As above for the errors a mode raises when it is made."""
+    g = hklrs.Geometry.preset("E4CV")
+    if error == "GeometryError":
+        made = (lambda: hklrs.Mode(g, "bissector_vertical"),
+                lambda: hklrs.PseudoMode(g, "eulerians", [0.0, 0.0, 0.0]))
+    else:
+        made = (lambda: hklrs.Mode(g, "psi_constant", reference=[0.0] * 3, psi=10.0),
+                lambda: hklrs.PseudoMode(g, "psi", [10.0], reference=[0.0] * 3))
+    raised = []
+    for f in made:
+        with pytest.raises(hklrs.InverseError) as e:
+            f()
+        raised.append(type(e.value))
+    assert raised == [getattr(hklrs, error)] * 2

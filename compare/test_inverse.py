@@ -232,18 +232,17 @@ def test_psi_against_libhkl(preset):
 
 @pytest.mark.parametrize("preset", PRESETS)
 def test_psi_reference_parallel_to_q(preset):
-    """hklrs raises InverseError (not Unreachable/NoSolution). libhkl reports
-    the failure only as el.get() == False (hkl-pseudoaxis.c:775 ANDs every
-    engine's get, each called with a NULL GError): the error is dropped and
-    the stale value stays readable (0 when there is none)."""
+    """hklrs raises PsiUndefined. libhkl reports the failure only as
+    el.get() == False (hkl-pseudoaxis.c:775 ANDs every engine's get, each
+    called with a NULL GError): the error is dropped and the stale value
+    stays readable (0 when there is none)."""
     rig = Rig(preset, "psi-par")
     rng = random.Random(f"psi-par-{preset}")
     _, _, start, _ = case_inputs(rig, "bissector", rng)
     h = forward_hkl(rig, start)
     for ref in (h, 2 * h, -h):
-        with pytest.raises(hklrs.InverseError) as e:
+        with pytest.raises(hklrs.PsiUndefined):
             hklrs.psi(rig.g, rig.sample, list(ref), start)
-        assert not isinstance(e.value, (hklrs.Unreachable, hklrs.NoSolution))
     first, ok = libhkl_psi(rig, start, h)
     assert first == 0.0 and not ok
     previous, ok = libhkl_psi(rig, start, [1.0, 2.0, -1.0])
