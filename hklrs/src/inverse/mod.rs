@@ -38,7 +38,7 @@ use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use crate::{Error, Geometry, Wavelength};
 
 pub use mode::{Equation, Eulerian, Mode, Slits};
-pub use spec::ModeSpec;
+pub use spec::{ModeParameters, ModeSpec};
 
 /// Relative excess of |Q| over 2k still solved, pulled onto 2k: UB·h alone
 /// rounds by ~1e-15, so a strict test would turn exact backscatter targets
