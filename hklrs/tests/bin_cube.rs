@@ -11,8 +11,10 @@
 pub mod common;
 use common::{f, load};
 
+use hklrs::absorption::{Masked, Weight};
 use hklrs::grid::{Binning, Bounds, Cube, Projected};
 use hklrs::nalgebra::Vector3;
+use hklrs::normalise::Normalised;
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
 use hklrs::{PixelDetector, Wavelength};
@@ -39,7 +41,7 @@ struct Scan {
     /// Every pixel of each frame, masked or not.
     points: Vec<Projected>,
     /// Each frame's unmasked pixels and their weighted counts.
-    frames: Vec<(Projected, Vec<f64>)>,
+    frames: Vec<(Projected, Vec<Result<Normalised, Masked>>)>,
 }
 
 fn scan() -> Scan {
@@ -89,9 +91,15 @@ fn scan() -> Scan {
             .iter()
             .map(|plane| lit.iter().map(|&i| plane[i]).collect())
             .collect();
+        let one = Weight::new(1.0, Masked::Opaque).unwrap();
         let counts = lit
             .iter()
-            .map(|&i| image(frame, i) * weight(frame))
+            .map(|&i| {
+                Ok(Normalised {
+                    counts: image(frame, i) * weight(frame),
+                    weight: one,
+                })
+            })
             .collect();
         frames.push((Projected::new(p.names(), planes).unwrap(), counts));
         points.push(p);
@@ -106,10 +114,10 @@ fn scan() -> Scan {
 
 impl Scan {
     /// One-pass filling of `frames`, as binoculars' cube_add_space.
-    fn grown(&self, frames: &[(Projected, Vec<f64>)]) -> Cube {
+    fn grown(&self, frames: &[(Projected, Vec<Result<Normalised, Masked>>)]) -> Cube {
         let mut cube = Cube::default();
         for (p, counts) in frames {
-            cube.add_growing(&self.binnings, p, counts, None).unwrap();
+            cube.add_growing(&self.binnings, p, counts).unwrap();
         }
         cube
     }
@@ -178,12 +186,12 @@ fn add_growing_matches_cube_add_space() {
 fn bounds_then_add_match_cube_new() {
     let s = scan();
     let mut bounds = Bounds::new(s.binnings.clone());
-    for (p, _) in &s.frames {
-        bounds.include(p, None).unwrap();
+    for (p, counts) in &s.frames {
+        bounds.include(p, counts).unwrap();
     }
     let mut cube = bounds.cube().unwrap();
     for (p, counts) in &s.frames {
-        assert_eq!(cube.add(p, counts, None).unwrap(), 0);
+        assert_eq!(cube.add(p, counts).unwrap(), 0);
     }
     s.check(&cube, "two_pass");
 }

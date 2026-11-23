@@ -168,6 +168,8 @@ pub fn read(path: impl AsRef<Path>) -> Result<(Cube, String), Error> {
     let contributions = bins("contributions")?
         .read_numeric_as::<u64>()
         .map_err(h5)?;
+    // binoculars' meaning: photons/contributions, each contribution of weight 1
+    let weight = contributions.iter().map(|&c| c as f64).collect();
 
     let config = file
         .dataset(&format!("{ROOT}/config"))
@@ -179,6 +181,7 @@ pub fn read(path: impl AsRef<Path>) -> Result<(Cube, String), Error> {
         Cube {
             axes,
             photons,
+            weight,
             contributions,
         },
         config,
@@ -230,6 +233,7 @@ mod tests {
             *p = 0.1 * i as f64;
             *n = (1 << 40) + i as u64;
         }
+        c.weight = c.contributions.iter().map(|&n| n as f64).collect();
         c
     }
 
@@ -344,6 +348,7 @@ mod tests {
                 spanning("qy", 0.5, -0.25, (-1, 0)),
             ],
             photons: vec![1.5; 6],
+            weight: vec![3.0; 6],
             contributions: vec![3; 6],
         };
         assert_eq!(read(&p).unwrap(), (want, "cfg".to_owned()));
