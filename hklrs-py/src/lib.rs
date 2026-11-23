@@ -1,9 +1,11 @@
 //! Python bindings: conversions only. Angles are degrees at this boundary,
 //! translations metres, wavelength Å.
 
-use hklrs::nalgebra::{Matrix3, Point3, Vector3};
+use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
+use hklrs::xu;
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -489,6 +491,231 @@ fn pseudo(
     Ok(out)
 }
 
+/// Pixels in the detector-arm frame (all axes zero), metres. Built by the
+/// xu importers; opaque apart from its shape, mask and pixel positions.
+#[pyclass(name = "PixelDetector", frozen)]
+struct PyPixelDetector(hklrs::PixelDetector);
+
+#[pymethods]
+impl PyPixelDetector {
+    /// (slow, fast) pixel counts.
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        self.0.shape()
+    }
+
+    /// Bool array of the detector shape, True where a pixel is masked; None
+    /// when no pixel is.
+    #[getter]
+    fn mask<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyArray2<bool>>>> {
+        self.0
+            .mask()
+            .map(|m| PyArray1::from_slice(py, m).reshape(self.0.shape()))
+            .transpose()
+    }
+
+    /// The detector with `mask` (bool array of its shape, True excludes the
+    /// pixel) in place of any earlier mask.
+    fn with_mask(&self, mask: PyReadonlyArray2<'_, bool>) -> PyResult<Self> {
+        let (slow, fast) = self.0.shape();
+        if mask.shape() != [slow, fast] {
+            return Err(PyValueError::new_err(format!(
+                "mask shape {:?} does not match the detector shape ({slow}, {fast})",
+                mask.shape()
+            )));
+        }
+        let masked = mask.as_array().iter().copied().collect();
+        self.0.clone().with_mask(masked).map(Self).map_err(err)
+    }
+
+    /// Centre of pixel (slow, fast) in the detector-arm frame.
+    fn pixel(&self, slow: usize, fast: usize) -> PyResult<[f64; 3]> {
+        self.0.pixel(slow, fast).map(|p| v3(&p.coords)).map_err(err)
+    }
+
+    /// Pixels `slow` x `fast`, each a half-open (start, end), as a detector of
+    /// their own whose pixel (0, 0) is this one's (slow start, fast start).
+    fn roi(&self, slow: (usize, usize), fast: (usize, usize)) -> PyResult<Self> {
+        self.0
+            .roi(slow.0..slow.1, fast.0..fast.1)
+            .map(Self)
+            .map_err(err)
+    }
+
+    /// Blocks of `slow` x `fast` pixels as one pixel each, at the block
+    /// centre. Trailing pixels that fill no block are dropped; a block is
+    /// masked when any of its pixels is.
+    fn bin(&self, slow: usize, fast: usize) -> PyResult<Self> {
+        self.0.bin(slow, fast).map(Self).map_err(err)
+    }
+}
+
+fn xu_direction(text: &str) -> PyResult<xu::Direction> {
+    text.parse().map_err(err)
+}
+
+/// `r_i` of the frame the direction strings are given in.
+fn xu_beam(beam: [f64; 3]) -> PyResult<Unit<Vector3<f64>>> {
+    let v = Vector3::from(beam);
+    v.iter()
+        .all(|x| x.is_finite())
+        .then(|| Unit::try_new(v, 0.0))
+        .flatten()
+        .ok_or_else(|| {
+            err(hklrs::Error::ZeroVector {
+                what: "xu beam".to_owned(),
+            })
+        })
+}
+
+/// Each keyword of `options` as (name, value); a name `apply` does not take
+/// is a TypeError, as for any unexpected keyword.
+fn xu_options(
+    options: Option<&Bound<'_, PyDict>>,
+    mut apply: impl FnMut(&str, &Bound<'_, PyAny>) -> PyResult<bool>,
+) -> PyResult<()> {
+    for (key, value) in options.iter().flat_map(|d| d.iter()) {
+        let key: String = key.extract()?;
+        if !apply(&key, &value)? {
+            return Err(PyTypeError::new_err(format!(
+                "unexpected keyword argument {key:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// xrayutilities `init_area`, lengths in metres. Keyword options: `tilt`,
+/// `tiltazimuth`, `detrot` (degrees), `nav` = (nav1, nav2) and `roi` =
+/// (start1, end1, start2, end2), half-open. Each nav must divide its roi
+/// length, and the roi must lie on the chip.
+#[pyclass(name = "Area", module = "hklrs.xu", frozen)]
+struct PyXuArea(xu::Area);
+
+impl PyXuArea {
+    fn with(mut area: xu::Area, options: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        xu_options(options, |key, value| {
+            match key {
+                "tilt" => area.tilt = hklrs::Deg(value.extract()?),
+                "tiltazimuth" => area.tiltazimuth = hklrs::Deg(value.extract()?),
+                "detrot" => area.detrot = hklrs::Deg(value.extract()?),
+                "nav" => area.nav = value.extract()?,
+                "roi" => area.roi = value.extract()?,
+                _ => return Ok(false),
+            }
+            Ok(true)
+        })?;
+        Ok(Self(area))
+    }
+}
+
+#[pymethods]
+impl PyXuArea {
+    #[new]
+    #[pyo3(signature = (dir1, dir2, cch, nch, distance, pwidth, **options))]
+    fn new(
+        dir1: &str,
+        dir2: &str,
+        cch: [f64; 2],
+        nch: [usize; 2],
+        distance: f64,
+        pwidth: [f64; 2],
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let (d1, d2) = (xu_direction(dir1)?, xu_direction(dir2)?);
+        Self::with(xu::Area::new(d1, d2, cch, nch, distance, pwidth), options)
+    }
+
+    /// `init_area` with `chpdeg` = (chpdeg1, chpdeg2) channels per degree
+    /// instead of a distance and pixel widths.
+    #[staticmethod]
+    #[pyo3(signature = (dir1, dir2, cch, nch, chpdeg, **options))]
+    fn from_chpdeg(
+        dir1: &str,
+        dir2: &str,
+        cch: [f64; 2],
+        nch: [usize; 2],
+        chpdeg: [f64; 2],
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let (d1, d2) = (xu_direction(dir1)?, xu_direction(dir2)?);
+        let area = xu::Area::from_chpdeg(d1, d2, cch, nch, chpdeg).map_err(err)?;
+        Self::with(area, options)
+    }
+
+    /// The detector for xu's `r_i` = `beam`, in the frame the direction
+    /// strings are given in.
+    fn detector(&self, beam: [f64; 3]) -> PyResult<PyPixelDetector> {
+        self.0
+            .detector(xu_beam(beam)?)
+            .map(PyPixelDetector)
+            .map_err(err)
+    }
+}
+
+/// xrayutilities `init_linear` as a detector of one row, lengths in metres.
+/// Keyword options: `tilt` (degrees), `nav` and `roi` = (start, end),
+/// half-open. nav must divide the roi length, and the roi must lie on the
+/// row.
+#[pyclass(name = "Linear", module = "hklrs.xu", frozen)]
+struct PyXuLinear(xu::Linear);
+
+impl PyXuLinear {
+    fn with(mut linear: xu::Linear, options: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        xu_options(options, |key, value| {
+            match key {
+                "tilt" => linear.tilt = hklrs::Deg(value.extract()?),
+                "nav" => linear.nav = value.extract()?,
+                "roi" => linear.roi = value.extract()?,
+                _ => return Ok(false),
+            }
+            Ok(true)
+        })?;
+        Ok(Self(linear))
+    }
+}
+
+#[pymethods]
+impl PyXuLinear {
+    #[new]
+    #[pyo3(signature = (dir, cch, nch, distance, pwidth, **options))]
+    fn new(
+        dir: &str,
+        cch: f64,
+        nch: usize,
+        distance: f64,
+        pwidth: f64,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let linear = xu::Linear::new(xu_direction(dir)?, cch, nch, distance, pwidth);
+        Self::with(linear, options)
+    }
+
+    /// `init_linear` with `chpdeg` channels per degree instead of a distance
+    /// and pixel width.
+    #[staticmethod]
+    #[pyo3(signature = (dir, cch, nch, chpdeg, **options))]
+    fn from_chpdeg(
+        dir: &str,
+        cch: f64,
+        nch: usize,
+        chpdeg: f64,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let linear = xu::Linear::from_chpdeg(xu_direction(dir)?, cch, nch, chpdeg).map_err(err)?;
+        Self::with(linear, options)
+    }
+
+    /// The detector for xu's `r_i` = `beam`, in the frame the direction
+    /// string is given in.
+    fn detector(&self, beam: [f64; 3]) -> PyResult<PyPixelDetector> {
+        self.0
+            .detector(xu_beam(beam)?)
+            .map(PyPixelDetector)
+            .map_err(err)
+    }
+}
+
 #[pyfunction]
 fn presets() -> Vec<&'static str> {
     hklrs::presets::PRESETS.to_vec()
@@ -502,6 +729,16 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReflection>()?;
     m.add_class::<PySample>()?;
     m.add_class::<PyMode>()?;
+    m.add_class::<PyPixelDetector>()?;
+    let xu = PyModule::new(m.py(), "xu")?;
+    xu.add_class::<PyXuArea>()?;
+    xu.add_class::<PyXuLinear>()?;
+    m.add_submodule(&xu)?;
+    // lets `import hklrs.xu` find the submodule of an extension module
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("hklrs.xu", &xu)?;
     m.add("InverseError", m.py().get_type::<InverseError>())?;
     m.add("Unreachable", m.py().get_type::<Unreachable>())?;
     m.add("NoSolution", m.py().get_type::<NoSolution>())?;
