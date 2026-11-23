@@ -301,6 +301,38 @@ fn bad_inputs_are_errors() {
     assert_eq!(bad.solve(), Err(InverseError::NonFinite { what: "UB" }));
 }
 
+/// HKL-25: the solve's thresholds are dimensionless, so one problem in
+/// units of k (UB scaled with k) gives the same solutions at λ = 0.1 Å and
+/// 50 Å.
+#[test]
+fn solutions_depend_on_q_in_units_of_k_only() {
+    let geo = preset("E4CV").unwrap();
+    let current = current(&geo);
+    let mut solved = 0;
+    for mode in modes(&geo) {
+        let [a, b] = [0.1, 50.0].map(|lambda| {
+            let wavelength = Wavelength::new(lambda).unwrap();
+            InverseRequest {
+                wavelength,
+                ub: ub() * (wavelength.wavenumber() / self::wavelength().wavenumber()),
+                ..request(&mode, Vector3::new(1.0, 2.0, 1.0), &current)
+            }
+            .solve()
+        });
+        let (Ok(a), Ok(b)) = (&a, &b) else {
+            assert_eq!(a, b, "{}", mode.name());
+            continue;
+        };
+        solved += 1;
+        assert_eq!(a.len(), b.len(), "{}", mode.name());
+        for (x, y) in a.iter().zip(b) {
+            let d = inverse_check::largest(x.iter().zip(y).map(|(x, y)| (x - y).abs()));
+            assert!(d <= 1e-12, "{}: {x:?} vs {y:?}", mode.name());
+        }
+    }
+    assert!(solved >= 4, "{solved}");
+}
+
 #[test]
 fn zero_q_is_degenerate_in_every_mode() {
     let degenerate = |mode: &Mode, current: &[f64]| {

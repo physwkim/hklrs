@@ -6,8 +6,9 @@ use super::jet::{Scalar, Vec3};
 use super::{Equation, Mode, wrap};
 use crate::{Axis, AxisKind, Error, Geometry};
 
-/// Length (in units of k, or relative to the reference) below which a
-/// direction ψ is built from is taken as null.
+/// Sine below which an angle ψ is built from (θ, π − 2θ, Q to the
+/// reference) is taken as null; each test divides out its operands' own
+/// scale, so none depends on λ or on the units of k̂f and k̂i (HKL-25).
 const NULL: f64 = 1e-10;
 
 pub(super) struct System<'a> {
@@ -83,10 +84,12 @@ impl Frames {
 /// hkl's ψ (`hkl_psi_write`) of the lab vector `reference`; `None` where it
 /// is undefined.
 fn psi(kf: &Vec3, ki: &Vec3, reference: &Vec3) -> Option<Scalar> {
-    let qn = kf.sub(ki).normalized(NULL)?;
+    let (f, i) = (kf.v.norm(), ki.v.norm());
+    // |kf − ki| = (f + i)·sin θ and |n| = f·i·sin 2θ for f = i.
+    let qn = kf.sub(ki).normalized(NULL * (f + i))?;
     let n = kf.cross(ki).cross(&qn);
     let p = reference.sub(&qn.scaled(&reference.dot(&qn)));
-    if n.v.norm() <= NULL || p.v.norm() <= NULL * reference.v.norm() {
+    if n.v.norm() <= NULL * f * i || p.v.norm() <= NULL * reference.v.norm() {
         return None;
     }
     Some(Scalar::atan2(&qn.dot(&n.cross(&p)), &n.dot(&p)))
@@ -217,6 +220,51 @@ mod tests {
                 e6c::double_diffraction_horizontal(geo, hkl2).unwrap(),
                 e6c::psi_constant_horizontal(geo, reference, 0.4).unwrap(),
             ]
+        }
+    }
+
+    /// ψ of `reference` with k̂f at 2θ from k̂i about z, k̂f and k̂i scaled
+    /// by k and `reference` by 1/k, at λ = 0.1 Å and 50 Å.
+    fn psi_at_two_wavelengths(kf: Vector3<f64>, reference: Vector3<f64>) -> [Option<f64>; 2] {
+        let constant = |v| Vec3 { v, d: vec![] };
+        [0.1, 50.0].map(|lambda: f64| {
+            let k = std::f64::consts::TAU / lambda;
+            let ki = constant(Vector3::x() * k);
+            psi(&constant(kf * k), &ki, &constant(reference / k)).map(|s| s.v)
+        })
+    }
+
+    /// The same answer at both wavelengths, `None` when `defined` is false;
+    /// ψ is conditioned as 1/sin of the near-null angle, ~1e-7 rad at
+    /// 10·NULL.
+    fn same_at_two_wavelengths(kf: Vector3<f64>, reference: Vector3<f64>, defined: bool) {
+        let [a, b] = psi_at_two_wavelengths(kf, reference);
+        assert_eq!(a.is_some(), defined, "{kf:?} {reference:?}: {a:?}");
+        assert_eq!(b.is_some(), defined, "{kf:?} {reference:?}: {b:?}");
+        if let (Some(a), Some(b)) = (a, b) {
+            assert!((a - b).abs() <= 1e-6, "{a} vs {b}");
+        }
+    }
+
+    /// HKL-25: each null test of ψ at one side of its boundary, the same
+    /// at λ = 0.1 Å and 50 Å.
+    #[test]
+    fn psi_null_tests_are_scale_free() {
+        let reference = Vector3::new(0.3, 0.2, 1.0);
+        for (s, defined) in [(0.1 * NULL, false), (10.0 * NULL, true)] {
+            // θ → 0: Q has no direction.
+            let two_theta = 2.0 * s;
+            same_at_two_wavelengths(
+                Vector3::new(two_theta.cos(), two_theta.sin(), 0.0),
+                reference,
+                defined,
+            );
+            // 2θ → π: no scattering plane.
+            same_at_two_wavelengths(Vector3::new(-s.cos(), s.sin(), 0.0), reference, defined);
+            // The reference along Q.
+            let kf = Vector3::new(1.0_f64.cos(), 1.0_f64.sin(), 0.0);
+            let q = (kf - Vector3::x()).normalize();
+            same_at_two_wavelengths(kf, q * s.cos() + Vector3::z() * s.sin(), defined);
         }
     }
 
