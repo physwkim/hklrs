@@ -64,6 +64,7 @@ pub fn residuals(
             wrap(psi_frame(geo, ub, reference, values) - psi)
         }
         Equation::ZeroModPi { axis } => values[*axis].sin(),
+        Equation::Equal { a, b } => wrap(values[*a] - values[*b]),
     }));
     Ok(r)
 }

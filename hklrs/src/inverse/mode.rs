@@ -15,6 +15,8 @@ pub enum Equation {
     PsiConstant { reference: Vector3<f64>, psi: f64 },
     /// axis ≡ 0 (mod π), axis index: parked at 0 or π.
     ZeroModPi { axis: usize },
+    /// a ≡ b (mod 2π), axis indices.
+    Equal { a: usize, b: usize },
 }
 
 /// Which axes the inverse writes and the equations that fix them, checked
@@ -82,6 +84,10 @@ impl Equation {
                 finite(&[*psi], "psi")
             }
             Self::ZeroModPi { axis } => rotation(geometry, *axis).map(|_| ()),
+            Self::Equal { a, b } => {
+                rotation(geometry, *a)?;
+                rotation(geometry, *b).map(|_| ())
+            }
         }
     }
 }

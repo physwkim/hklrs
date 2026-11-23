@@ -7,7 +7,7 @@ mod inverse_check;
 
 use std::f64::consts::{PI, TAU};
 
-use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic};
+use hklrs::inverse::{self, e4c, e6c, esrf_bm28_psic, zaxis};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use hklrs::presets::preset;
 use hklrs::{
@@ -390,6 +390,11 @@ fn zero_q_is_degenerate_in_every_mode() {
         esrf_bm28_psic::constant_delta_coplanar(&geo),
         esrf_bm28_psic::constant_eta_noncoplanar(&geo),
     ] {
+        degenerate(&mode.unwrap(), &current);
+    }
+    let geo = preset("ZAXIS").unwrap();
+    let current = geo.values_from_degrees(&[5.0, 10.0, 20.0, 30.0]).unwrap();
+    for mode in [zaxis::zaxis(&geo), zaxis::reflectivity(&geo)] {
         degenerate(&mode.unwrap(), &current);
     }
 }

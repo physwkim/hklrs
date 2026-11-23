@@ -15,6 +15,7 @@ mod mode;
 mod solve;
 mod system;
 mod validate;
+pub mod zaxis;
 
 use std::f64::consts::{PI, TAU};
 

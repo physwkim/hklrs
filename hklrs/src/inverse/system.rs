@@ -154,16 +154,7 @@ impl<'a> System<'a> {
         for e in self.extra {
             rows.push(match e {
                 Equation::Bisector { sample, detector } => {
-                    let mut d = vec![0.0; self.written.len()];
-                    for (axis, coefficient) in [(detector, 1.0), (sample, -2.0)] {
-                        if let Some(c) = self.written.iter().position(|w| w == axis) {
-                            d[c] += coefficient;
-                        }
-                    }
-                    Scalar {
-                        v: wrap(values[*detector] - 2.0 * values[*sample]),
-                        d,
-                    }
+                    self.wrapped_sum(values, &[(*detector, 1.0), (*sample, -2.0)])
                 }
                 Equation::DoubleDiffraction { hkl2 } => {
                     let kf2 = fr.sample(&(self.ub * hkl2)).add(&fr.ki);
@@ -183,6 +174,7 @@ impl<'a> System<'a> {
                     v: wrap(2.0 * values[*axis]) / 2.0,
                     d: self.written.iter().map(|w| f64::from(w == axis)).collect(),
                 },
+                Equation::Equal { a, b } => self.wrapped_sum(values, &[(*a, 1.0), (*b, -1.0)]),
             });
         }
         Some(Eval {
@@ -190,28 +182,38 @@ impl<'a> System<'a> {
             j: DMatrix::from_fn(rows.len(), self.written.len(), |r, c| rows[r].d[c]),
         })
     }
+
+    /// wrap(Σ c·values[axis]) over `terms` (axis, c), differentiated over the
+    /// written axes.
+    fn wrapped_sum(&self, values: &[f64], terms: &[(usize, f64)]) -> Scalar {
+        let mut d = vec![0.0; self.written.len()];
+        for &(axis, c) in terms {
+            if let Some(i) = self.written.iter().position(|&w| w == axis) {
+                d[i] += c;
+            }
+        }
+        Scalar {
+            v: wrap(terms.iter().map(|&(axis, c)| c * values[axis]).sum()),
+            d,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inverse::{e4c, e6c};
+    use crate::inverse::{e4c, e6c, zaxis};
     use crate::presets::preset;
 
-    fn modes(geo: &Geometry) -> Vec<Mode<'_>> {
+    fn modes<'g>(name: &str, geo: &'g Geometry) -> Vec<Mode<'g>> {
         let hkl2 = Vector3::new(1.0, -1.0, 0.5);
         let reference = Vector3::new(0.2, 0.0, 1.0);
-        if geo.axes().len() == 4 {
-            vec![
-                e4c::bissector(geo).unwrap(),
-                e4c::constant_omega(geo).unwrap(),
-                e4c::constant_chi(geo).unwrap(),
-                e4c::constant_phi(geo).unwrap(),
-                e4c::double_diffraction(geo, hkl2).unwrap(),
-                e4c::psi_constant(geo, reference, 0.4).unwrap(),
-            ]
-        } else {
-            vec![
+        match name {
+            "ZAXIS" => vec![
+                zaxis::zaxis(geo).unwrap(),
+                zaxis::reflectivity(geo).unwrap(),
+            ],
+            "E6C" => vec![
                 e6c::bissector_vertical(geo).unwrap(),
                 e6c::lifting_detector_phi(geo).unwrap(),
                 e6c::lifting_detector_mu(geo).unwrap(),
@@ -219,7 +221,15 @@ mod tests {
                 e6c::bissector_horizontal(geo).unwrap(),
                 e6c::double_diffraction_horizontal(geo, hkl2).unwrap(),
                 e6c::psi_constant_horizontal(geo, reference, 0.4).unwrap(),
-            ]
+            ],
+            _ => vec![
+                e4c::bissector(geo).unwrap(),
+                e4c::constant_omega(geo).unwrap(),
+                e4c::constant_chi(geo).unwrap(),
+                e4c::constant_phi(geo).unwrap(),
+                e4c::double_diffraction(geo, hkl2).unwrap(),
+                e4c::psi_constant(geo, reference, 0.4).unwrap(),
+            ],
         }
     }
 
@@ -269,8 +279,8 @@ mod tests {
     }
 
     /// Analytic Jacobian against a central difference of the residual, for
-    /// every E4C mode and every kind of E6C mode, at points away from the
-    /// wrap cut of the angular rows.
+    /// every E4C mode, every kind of E6C mode and both ZAXIS modes (mu in
+    /// both stacks), at points away from the wrap cut of the angular rows.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
@@ -281,12 +291,12 @@ mod tests {
             [-2.0, 1.1, -0.7, -1.4, 0.8, -1.3],
             [1.0, 2.5, 3.0, 2.2, 2.9, 0.7],
         ];
-        for name in ["E4CV", "E4CH", "E6C"] {
+        for name in ["E4CV", "E4CH", "E6C", "ZAXIS"] {
             let geo = preset(name).unwrap();
             let n = geo.axes().len();
             for point in &points {
                 let values = &point[..n];
-                for mode in &modes(&geo) {
+                for mode in &modes(name, &geo) {
                     let s = System::new(mode, ub, q, values);
                     let x = s.written_values(values);
                     let j = s.eval(values).unwrap().j;
