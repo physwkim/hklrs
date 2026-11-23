@@ -41,6 +41,9 @@ fn geometry(doc: &Value) -> Geometry {
 }
 
 fn area(p: &Value) -> Area {
+    let (dir1, dir2) = (direction(&p["dir1"]), direction(&p["dir2"]));
+    let cch = [f(&p["cch1"]), f(&p["cch2"])];
+    let nch = [u(&p["nch1"]), u(&p["nch2"])];
     Area {
         tilt: Deg(f(&p["tilt"])),
         tiltazimuth: Deg(f(&p["tiltazimuth"])),
@@ -49,29 +52,32 @@ fn area(p: &Value) -> Area {
         roi: p["roi"]
             .as_array()
             .map(|r| [u(&r[0]), u(&r[1]), u(&r[2]), u(&r[3])]),
-        ..Area::new(
-            direction(&p["dir1"]),
-            direction(&p["dir2"]),
-            [f(&p["cch1"]), f(&p["cch2"])],
-            [u(&p["nch1"]), u(&p["nch2"])],
-            f(&p["distance"]),
-            [f(&p["pwidth1"]), f(&p["pwidth2"])],
-        )
+        ..if p["chpdeg1"].is_null() {
+            Area::new(
+                dir1,
+                dir2,
+                cch,
+                nch,
+                f(&p["distance"]),
+                [f(&p["pwidth1"]), f(&p["pwidth2"])],
+            )
+        } else {
+            Area::from_chpdeg(dir1, dir2, cch, nch, [f(&p["chpdeg1"]), f(&p["chpdeg2"])]).unwrap()
+        }
     }
 }
 
 fn linear(p: &Value) -> Linear {
+    let (dir, cch, nch) = (direction(&p["dir"]), f(&p["cch"]), u(&p["nch"]));
     Linear {
         tilt: Deg(f(&p["tilt"])),
         nav: u(&p["nav"]),
         roi: p["roi"].as_array().map(|r| [u(&r[0]), u(&r[1])]),
-        ..Linear::new(
-            direction(&p["dir"]),
-            f(&p["cch"]),
-            u(&p["nch"]),
-            f(&p["distance"]),
-            f(&p["pwidth"]),
-        )
+        ..if p["chpdeg"].is_null() {
+            Linear::new(dir, cch, nch, f(&p["distance"]), f(&p["pwidth"]))
+        } else {
+            Linear::from_chpdeg(dir, cch, nch, f(&p["chpdeg"])).unwrap()
+        }
     }
 }
 
@@ -173,6 +179,11 @@ fn area_combined() {
 }
 
 #[test]
+fn area_chpdeg() {
+    check_area("chpdeg");
+}
+
+#[test]
 fn linear_plain() {
     check_linear("plain");
 }
@@ -200,6 +211,11 @@ fn linear_nav_roi() {
 #[test]
 fn linear_combined() {
     check_linear("combined");
+}
+
+#[test]
+fn linear_chpdeg() {
+    check_linear("chpdeg");
 }
 
 /// XU-13: xu's own Nav output sits on the first raw pixel of a block

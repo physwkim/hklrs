@@ -2,7 +2,8 @@
 
 Modelled on xrayutilities tests/test_qconversion_area.py and _linear.py, on a bare QConversion
 (UB = I, so Q is in the sample frame): sample x+, detector z- then x+ (outermost first), r_i along +y.
-Per case: the init_area / init_linear parameters, the pixel positions at zero detector angles
+Per case: the init_area / init_linear parameters (distance and pixel widths, or chpdeg), the pixel
+positions at zero detector angles
 (getDetectorPos, metres) and Q (1/angstrom, with 2 pi) at each angle set.
 
 xu places a Nav-binned pixel on the first raw pixel of a block aligned to pixel 0, not on the centre of
@@ -25,7 +26,7 @@ ANGLES = [[10.0, 25.0, 0.0], [-3.5, 40.0, 7.5]]
 
 AREA_BASE = dict(dir1="z+", dir2="x+", cch1=4.0, cch2=6.0, nch1=9, nch2=13, distance=0.5,
                  pwidth1=50e-6, pwidth2=50e-6, tilt=0.0, tiltazimuth=0.0, detrot=0.0,
-                 nav=[1, 1], roi=None)
+                 chpdeg1=None, chpdeg2=None, nav=[1, 1], roi=None)
 AREA = [
     ("plain", {}),
     ("tilt", dict(tilt=10.0)),
@@ -36,8 +37,11 @@ AREA = [
     ("nav_roi", dict(nav=[2, 3], roi=[1, 9, 2, 11])),
     ("combined", dict(dir1="x-", dir2="z+", cch1=4.3, cch2=6.7, pwidth1=172e-6, pwidth2=150e-6,
                       tilt=-6.0, tiltazimuth=120.0, detrot=-3.0, nav=[3, 2], roi=[2, 8, 1, 11])),
+    ("chpdeg", dict(distance=None, pwidth1=None, pwidth2=None, chpdeg1=120.0, chpdeg2=-95.5, tilt=5.0,
+                    tiltazimuth=40.0, detrot=1.5, roi=[1, 8, 2, 12])),
 ]
-LINEAR_BASE = dict(dir="z+", cch=4.0, nch=9, distance=1.0, pwidth=50e-6, tilt=0.0, nav=1, roi=None)
+LINEAR_BASE = dict(dir="z+", cch=4.0, nch=9, distance=1.0, pwidth=50e-6, chpdeg=None, tilt=0.0, nav=1,
+                   roi=None)
 LINEAR = [
     ("plain", {}),
     ("tilt", dict(tilt=10.0)),
@@ -45,6 +49,7 @@ LINEAR = [
     ("nav", dict(nav=3)),
     ("nav_roi", dict(nav=2, roi=[1, 9])),
     ("combined", dict(dir="x-", cch=3.6, pwidth=172e-6, tilt=-7.0, nav=2, roi=[1, 7])),
+    ("chpdeg", dict(distance=None, pwidth=None, chpdeg=-80.0, tilt=4.0, roi=[2, 8])),
 ]
 # XU-14: a tilted row along r_i has no tilt axis; xu scales its pitch by cos(tilt), hklrs rejects it.
 LINEAR_ALONG_R_I = dict(LINEAR_BASE, dir="y+", tilt=60.0)
@@ -64,7 +69,8 @@ def area_detector(p):
     if p["roi"] is not None:
         kw["roi"] = p["roi"]
     qc.init_area(p["dir1"], p["dir2"], p["cch1"], p["cch2"], p["nch1"], p["nch2"], p["distance"],
-                 p["pwidth1"], p["pwidth2"], detrot=p["detrot"], tiltazimuth=p["tiltazimuth"],
+                 p["pwidth1"], p["pwidth2"], chpdeg1=p["chpdeg1"], chpdeg2=p["chpdeg2"],
+                 detrot=p["detrot"], tiltazimuth=p["tiltazimuth"],
                  tilt=p["tilt"], **kw)
     pos = stack(qc.getDetectorPos(0.0, 0.0, dim=2))
     q = [stack(qc.area(*a, wl=WL)) for a in ANGLES]
@@ -76,7 +82,8 @@ def linear_detector(p):
     kw = {"Nav": p["nav"]}
     if p["roi"] is not None:
         kw["roi"] = p["roi"]
-    qc.init_linear(p["dir"], p["cch"], p["nch"], p["distance"], p["pwidth"], tilt=p["tilt"], **kw)
+    qc.init_linear(p["dir"], p["cch"], p["nch"], p["distance"], p["pwidth"], chpdeg=p["chpdeg"],
+                   tilt=p["tilt"], **kw)
     pos = stack(qc.getDetectorPos(0.0, 0.0, dim=1))
     q = [stack(qc.linear(*a, wl=WL)) for a in ANGLES]
     return pos, q

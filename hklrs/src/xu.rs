@@ -71,6 +71,17 @@ fn finite(what: &'static str, value: f64) -> Result<(), Error> {
     }
 }
 
+/// The distance xu puts a detector given in channels per degree at.
+const CHPDEG_DISTANCE: f64 = 1.0;
+
+/// xu's pixel width for `chpdeg` channels per degree, in its order of
+/// operations (experiment.py:746, :1045): `|chpdeg|` channels subtend one
+/// degree about the centre channel; the direction string carries the sign.
+fn chpdeg_pwidth(what: &'static str, chpdeg: f64) -> Result<f64, Error> {
+    positive(what, chpdeg.abs())?;
+    Ok(2.0 * CHPDEG_DISTANCE / chpdeg.abs() * 0.5f64.to_radians().tan())
+}
+
 /// xu averages Nav-pixel blocks from the roi start and keeps a trailing
 /// partial block, which no regular pixel grid holds; requiring whole blocks
 /// gives the detector the shape of xu's averaged data. Nav 0 is left to
@@ -134,6 +145,23 @@ impl Area {
             nav: [1, 1],
             roi: None,
         }
+    }
+
+    /// `init_area` with `chpdeg1`, `chpdeg2` instead of a distance and pixel
+    /// widths: as in xu, the chip is put at distance 1 (m) with the pixel
+    /// widths that give `|chpdeg|` channels per degree there.
+    pub fn from_chpdeg(
+        dir1: Direction,
+        dir2: Direction,
+        cch: [f64; 2],
+        nch: [usize; 2],
+        chpdeg: [f64; 2],
+    ) -> Result<Self, Error> {
+        let pwidth = [
+            chpdeg_pwidth("xu |chpdeg1|", chpdeg[0])?,
+            chpdeg_pwidth("xu |chpdeg2|", chpdeg[1])?,
+        ];
+        Ok(Self::new(dir1, dir2, cch, nch, CHPDEG_DISTANCE, pwidth))
     }
 
     pub fn detector(&self, beam: Unit<Vector3<f64>>) -> Result<PixelDetector, Error> {
@@ -207,6 +235,14 @@ impl Linear {
             nav: 1,
             roi: None,
         }
+    }
+
+    /// `init_linear` with `chpdeg` instead of a distance and pixel width: as
+    /// in xu, the row is put at distance 1 (m) with the pixel width that
+    /// gives `|chpdeg|` channels per degree there.
+    pub fn from_chpdeg(dir: Direction, cch: f64, nch: usize, chpdeg: f64) -> Result<Self, Error> {
+        let pwidth = chpdeg_pwidth("xu |chpdeg|", chpdeg)?;
+        Ok(Self::new(dir, cch, nch, CHPDEG_DISTANCE, pwidth))
     }
 
     pub fn detector(&self, beam: Unit<Vector3<f64>>) -> Result<PixelDetector, Error> {
@@ -498,6 +534,42 @@ mod tests {
             ..linear
         };
         assert!(matches!(outside.detector(y()), Err(Error::Roi { .. })));
+    }
+
+    #[test]
+    fn chpdeg_channels_subtend_one_degree_about_the_centre() {
+        let area =
+            Area::from_chpdeg(dir("z+"), dir("x+"), [4.0, 6.0], [9, 13], [100.0, -40.0]).unwrap();
+        assert_eq!(area.distance, 1.0);
+        let det = area.detector(y()).unwrap();
+        let centre = det.pixel(4, 6).unwrap().coords;
+        for (step, chpdeg) in [(det.e_slow(), 100.0), (det.e_fast(), 40.0)] {
+            let half = step * (chpdeg / 2.0);
+            let (a, b) = (centre - half, centre + half);
+            let angle = a.cross(&b).norm().atan2(a.dot(&b));
+            assert!((angle - 1f64.to_radians()).abs() <= 1e-15, "{angle}");
+        }
+
+        let linear = Linear::from_chpdeg(dir("z+"), 4.0, 9, -80.0).unwrap();
+        assert_eq!(
+            linear,
+            Linear::from_chpdeg(dir("z+"), 4.0, 9, 80.0).unwrap()
+        );
+        assert_eq!(linear.distance, 1.0);
+
+        for bad in [0.0, -0.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                Area::from_chpdeg(dir("z+"), dir("x+"), [4.0, 6.0], [9, 13], [100.0, bad]),
+                Err(Error::NotPositive {
+                    what: "xu |chpdeg2|",
+                    ..
+                })
+            ));
+            assert!(matches!(
+                Linear::from_chpdeg(dir("z+"), 4.0, 9, bad),
+                Err(Error::NotPositive { .. })
+            ));
+        }
     }
 
     /// splitmix64, so the property cases are fixed without a dependency.
