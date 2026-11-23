@@ -219,7 +219,14 @@ mod linear {
         }
     }
 
-    fn frames(m: &LinearModel) -> Vec<CalFrame> {
+    /// xu's `Rz(azimuth)·Ry(tilt)` misorientation of the sample.
+    fn misorientation(tilt: f64, azimuth: f64) -> hklrs::nalgebra::Matrix3<f64> {
+        let (sp, cp) = azimuth.to_radians().sin_cos();
+        let (sc, cc) = tilt.to_radians().sin_cos();
+        hklrs::nalgebra::Matrix3::new(cp * cc, -sp, cp * sc, sp * cc, cp, sp * sc, -sc, 0.0, cc)
+    }
+
+    fn frames(m: &LinearModel, tilt: f64, azimuth: f64) -> Vec<CalFrame> {
         let truth = Linear::new(dir("z+"), 300.3, 1000, 1.0, 2.0e-4);
         let detector = truth.detector(m.geometry.beam_direction()).unwrap();
         let channel = |angles: [f64; 2], hkl: Option<Vector3<f64>>| {
@@ -229,7 +236,9 @@ mod linear {
             let dir = match hkl {
                 None => ki.into_inner(),
                 Some(h) => {
-                    (TAU / LAMBDA) * ki.into_inner() + poses.sample.rotation * (sample().ub() * h)
+                    (TAU / LAMBDA) * ki.into_inner()
+                        + poses.sample.rotation
+                            * (misorientation(tilt, azimuth) * sample().ub() * h)
                 }
             };
             let to_arm = poses.detector.inverse();
@@ -284,14 +293,14 @@ mod linear {
             sample_tilt: Param::fixed(0.0),
             sample_azimuth: Param::fixed(0.0),
         };
-        let fit = calibrate_linear_hkl(&m, &frames(&m), &[s]).unwrap();
+        let fit = calibrate_linear_hkl(&m, &frames(&m, 0.0, 0.0), &[s]).unwrap();
         let h = fit.value();
         assert!((h.line.cch - 300.3).abs() < 1e-5, "{}", h.line.cch);
         assert!((h.line.pwidth - 2e-4).abs() < 1e-9, "{}", h.line.pwidth);
         assert!((h.wavelength - LAMBDA).abs() < 1e-7, "{}", h.wavelength);
         assert_eq!(h.sample_tilt, Deg(0.0));
         // a linear fit needs both kinds of frame too
-        let only_primary: Vec<_> = frames(&m)
+        let only_primary: Vec<_> = frames(&m, 0.0, 0.0)
             .into_iter()
             .filter(|f| f.kind() == FrameKind::PrimaryBeam)
             .collect();
@@ -299,5 +308,57 @@ mod linear {
             calibrate_linear_hkl(&m, &only_primary, &[s]),
             Err(CalibError::BadProblem)
         ));
+    }
+
+    fn free_tilt(azimuth: Param) -> LinearHklStart {
+        LinearHklStart {
+            line: LinearStart {
+                cch: Param::free(290.0),
+                pwidth: Param::free(2.1e-4),
+                distance: Param::fixed(1.0),
+                tilt: Param::fixed(0.0),
+                angle_offset: Param::fixed(0.0),
+                wavelength: Param::free(1.5),
+            },
+            sample_tilt: Param::free(0.2),
+            sample_azimuth: azimuth,
+        }
+    }
+
+    // On a linear detector behind one detector circle, (0 0 L) reflections
+    // see the sample misorientation (tilt 0.3°, azimuth 30° here) only through
+    // its in-plane part tilt·sin(azimuth) = 0.15°: the out-of-plane part
+    // cos(azimuth)·tilt moves the scattered ray along the strip's width,
+    // which the channel does not measure. The two cannot be separated.
+    #[test]
+    fn tilt_and_azimuth_together_are_unidentifiable_from_one_circle() {
+        let m = model();
+        let fs = frames(&m, 0.3, 30.0);
+        let err = calibrate_linear_hkl(&m, &fs, &[free_tilt(Param::free(20.0))]).unwrap_err();
+        assert!(
+            matches!(&err, CalibError::Unidentifiable { params } if params == &[ParamId::SampleAzimuth]),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn with_the_azimuth_known_the_tilt_is_recovered() {
+        let m = model();
+        let fs = frames(&m, 0.3, 30.0);
+        let fit = calibrate_linear_hkl(&m, &fs, &[free_tilt(Param::fixed(30.0))]).unwrap();
+        let h = fit.value();
+        let s = fit.sigma(ParamId::SampleTilt).unwrap();
+        assert!(
+            (h.sample_tilt.0 - 0.3).abs() <= 5.0 * s.max(1e-9),
+            "{:?} ± {s}",
+            h.sample_tilt
+        );
+        assert!((h.sample_tilt.0 - 0.3).abs() < 1e-6, "{:?}", h.sample_tilt);
+        assert!((h.wavelength - LAMBDA).abs() < 1e-7, "{}", h.wavelength);
+        assert!((h.line.cch - 300.3).abs() < 1e-5, "{}", h.line.cch);
+        // the identifiable combination survives a wrong azimuth: tilt·sin(az)
+        let wrong = calibrate_linear_hkl(&m, &fs, &[free_tilt(Param::fixed(90.0))]).unwrap();
+        let t = wrong.value().sample_tilt.0;
+        assert!((t - 0.3 * 30f64.to_radians().sin()).abs() < 1e-3, "{t}");
     }
 }
