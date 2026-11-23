@@ -106,7 +106,7 @@ impl InverseRequest<'_> {
     /// Every solution found, written axes wrapped to their cut points and
     /// within their limits, held axes exactly `current` (limits or not),
     /// sorted by distance to `current`; `Degenerate` when one is not
-    /// isolated, as where the mode leaves a rotation free;
+    /// isolated, as where the mode leaves a rotation free, and for Q = 0;
     /// `NoSolutionInLimits` when every one is outside the limits.
     pub fn solve(&self) -> Result<Vec<Vec<f64>>, InverseError> {
         Ok(self.search()?.solutions)
@@ -139,6 +139,10 @@ impl InverseRequest<'_> {
         let (q_norm, q_max) = (q.norm(), 2.0 * k);
         if q_norm > q_max {
             return Err(InverseError::Unreachable { q: q_norm, q_max });
+        }
+        // k̂f = k̂i then, which leaves the sample rotation free in any mode.
+        if q_norm == 0.0 {
+            return Err(InverseError::Degenerate);
         }
         let system = system::System::new(self.mode, self.ub / k, q / k, self.current);
         solve::search(&system).into_sorted()

@@ -7,7 +7,7 @@ mod inverse_check;
 
 use std::f64::consts::{PI, TAU};
 
-use hklrs::inverse::{self, e4c};
+use hklrs::inverse::{self, e4c, e6c};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use hklrs::presets::preset;
 use hklrs::{
@@ -299,20 +299,55 @@ fn bad_inputs_are_errors() {
     let mut bad = request(&mode, hkl, &current);
     bad.ub[(1, 2)] = f64::INFINITY;
     assert_eq!(bad.solve(), Err(InverseError::NonFinite { what: "UB" }));
-    // Q = 0 reflects only with tth = 0, where every sample rotation does;
-    // ψ needs a scattering plane, which tth = 0 does not have.
-    for mode in modes(&geo) {
-        let expected = if mode.name() == "psi_constant" {
-            InverseError::NoSolution
-        } else {
-            InverseError::Degenerate
-        };
-        assert_eq!(
-            request(&mode, Vector3::zeros(), &current).solve(),
-            Err(expected),
-            "{}",
-            mode.name()
-        );
+}
+
+#[test]
+fn zero_q_is_degenerate_in_every_mode() {
+    let degenerate = |mode: &Mode, current: &[f64]| {
+        for target in [
+            Target::Hkl(Vector3::zeros()),
+            Target::QSample(Vector3::zeros()),
+        ] {
+            let req = InverseRequest {
+                target,
+                ..request(mode, Vector3::zeros(), current)
+            };
+            assert_eq!(
+                req.solve(),
+                Err(InverseError::Degenerate),
+                "{}",
+                mode.name()
+            );
+        }
+    };
+    for name in ["E4CV", "E4CH"] {
+        let geo = preset(name).unwrap();
+        let current = current(&geo);
+        for mode in modes(&geo) {
+            degenerate(&mode, &current);
+        }
+    }
+    let geo = preset("E6C").unwrap();
+    let current = geo
+        .values_from_degrees(&[5.0, 10.0, 20.0, 30.0, 15.0, 40.0])
+        .unwrap();
+    let (hkl2, reference) = (Vector3::new(1.0, 1.0, 0.0), Vector3::new(0.0, 0.0, 1.0));
+    for mode in [
+        e6c::bissector_vertical(&geo),
+        e6c::constant_omega_vertical(&geo),
+        e6c::constant_chi_vertical(&geo),
+        e6c::constant_phi_vertical(&geo),
+        e6c::lifting_detector_phi(&geo),
+        e6c::lifting_detector_omega(&geo),
+        e6c::lifting_detector_mu(&geo),
+        e6c::double_diffraction_vertical(&geo, hkl2),
+        e6c::bissector_horizontal(&geo),
+        e6c::double_diffraction_horizontal(&geo, hkl2),
+        e6c::psi_constant_vertical(&geo, reference, 0.4),
+        e6c::psi_constant_horizontal(&geo, reference, 0.4),
+        e6c::constant_mu_horizontal(&geo),
+    ] {
+        degenerate(&mode.unwrap(), &current);
     }
 }
 
