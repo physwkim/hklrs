@@ -11,6 +11,9 @@
 use crate::Error;
 use crate::absorption::{Masked, Weight};
 
+#[cfg(feature = "hdf5")]
+pub mod hdf5;
+
 /// Per-pixel weights as [`crate::Weights::data`] holds them: the intensity
 /// is divided by the weight, and a masked pixel contributes nothing.
 pub type PixelWeights<'a> = &'a [Result<Weight, Masked>];
