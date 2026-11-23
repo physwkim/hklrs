@@ -95,6 +95,33 @@ pub fn residuals(
             let kf = poses.detector.rotation * geo.beam_direction().into_inner();
             wrap(FRAC_PI_2 - n.cross(&kf).norm().atan2(n.dot(&kf)) - emergence)
         }
+        // Read off a frame about k̂i, not the solver's cross product.
+        Equation::Qaz { qaz } => {
+            let poses = geo.poses(values).unwrap();
+            let beam = geo.beam_direction().into_inner();
+            let (kf, ki) = (poses.detector.rotation * beam, poses.source * beam);
+            wrap(beam_azimuth(&(kf - ki), &ki) - qaz)
+        }
+        Equation::Naz { normal, naz } => {
+            let (n, ki) = surface(geo, normal, values);
+            wrap(beam_azimuth(&n, &ki) - naz)
+        }
+        Equation::IncidenceEqualsEmergence { normal } => {
+            let (n, ki) = surface(geo, normal, values);
+            let kf = geo.poses(values).unwrap().detector.rotation * geo.beam_direction();
+            n.angle(&ki) + n.angle(&kf) - PI
+        }
+        Equation::InScatteringPlane { axis } => {
+            let (a, ki, kf) = axis_and_beams(geo, *axis, values);
+            a.dot(&ki.cross(&kf).normalize())
+        }
+        Equation::VirtualOmega { axis, omega } => {
+            let (a, ki, kf) = axis_and_beams(geo, *axis, values);
+            let q = kf - ki;
+            let e2 = (q - ki * q.dot(&ki)).normalize();
+            let theta = (q.norm() / 2.0).asin();
+            wrap(a.dot(&e2).atan2(a.dot(&ki)) - theta - omega)
+        }
     }));
     if let Some(slits) = mode.slits() {
         let poses = geo.poses(values).unwrap();
@@ -154,6 +181,33 @@ fn surface(geo: &Geometry, normal: &Vector3<f64>, values: &[f64]) -> (Vector3<f6
     let poses = geo.poses(values).unwrap();
     let beam = geo.beam_direction().into_inner();
     (poses.sample.rotation * normal, poses.source * beam)
+}
+
+/// The lab direction of sample axis `axis`, k̂i and k̂f at `values`; the
+/// axis is that of the sample rotation from `values` to `axis` turned by 1
+/// rad, not the solver's walk down the stack.
+fn axis_and_beams(
+    geo: &Geometry,
+    axis: usize,
+    values: &[f64],
+) -> (Vector3<f64>, Vector3<f64>, Vector3<f64>) {
+    let poses = geo.poses(values).unwrap();
+    let mut turned = values.to_vec();
+    turned[axis] += 1.0;
+    let turn = geo.poses(&turned).unwrap().sample.rotation * poses.sample.rotation.inverse();
+    let beam = geo.beam_direction().into_inner();
+    (
+        turn.axis().unwrap().into_inner(),
+        poses.source * beam,
+        poses.detector.rotation * beam,
+    )
+}
+
+/// The azimuth of `v` about the unit `ki` in the frame (e₁, k̂i × e₁), e₁
+/// lab y projected normal to k̂i.
+fn beam_azimuth(v: &Vector3<f64>, ki: &Vector3<f64>) -> f64 {
+    let e1 = (Vector3::y() - ki * ki.dot(&Vector3::y())).normalize();
+    v.dot(&ki.cross(&e1)).atan2(v.dot(&e1))
 }
 
 /// NaN is a miss.

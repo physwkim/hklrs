@@ -6,6 +6,7 @@ use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
 
 use super::jet::{Scalar, Vec3};
 use super::kappa::{Branch, KappaAxes, restrict};
+use super::mode::rotation;
 use super::validate::ACCEPT;
 use super::{Equation, Eulerian, Mode, Slits, wrap};
 use crate::{Axis, AxisKind, Error, Geometry};
@@ -101,6 +102,18 @@ fn psi(kf: &Vec3, ki: &Vec3, reference: &Vec3) -> Option<Scalar> {
     Some(Scalar::atan2(&qn.dot(&n.cross(&p)), &n.dot(&p)))
 }
 
+/// The angle of `v` about k̂i from lab y, both projected normal to k̂i,
+/// right-handed about k̂i; `None` where either lies along k̂i.
+fn beam_azimuth(v: &Vec3, ki: &Vec3) -> Option<Scalar> {
+    let p = v.sub(&ki.scaled(&v.dot(ki)));
+    let y = Vec3::constant(Vector3::y(), ki.d.len());
+    let r = y.sub(&ki.scaled(&y.dot(ki)));
+    if p.v.norm() <= NULL * v.v.norm() || r.v.norm() <= NULL {
+        return None;
+    }
+    Some(Scalar::atan2(&ki.dot(&r.cross(&p)), &r.dot(&p)))
+}
+
 /// ψ of the sample-frame vector `reference` at `values`.
 pub(super) fn psi_at(
     geometry: &Geometry,
@@ -129,6 +142,24 @@ impl<'a> System<'a> {
 
     pub fn current(&self) -> &[f64] {
         self.current
+    }
+
+    pub fn geometry(&self) -> &'a Geometry {
+        self.geometry
+    }
+
+    pub fn extra(&self) -> &'a [Equation] {
+        self.extra
+    }
+
+    /// UB in units of k.
+    pub fn ub(&self) -> &Matrix3<f64> {
+        &self.ub
+    }
+
+    /// Target Q in the sample frame, units of k.
+    pub fn q(&self) -> &Vector3<f64> {
+        &self.q
     }
 
     pub fn kappa(&self) -> Option<&'a KappaAxes> {
@@ -276,12 +307,67 @@ impl<'a> System<'a> {
                         d: c.d,
                     }
                 }
+                Equation::Qaz { qaz } => {
+                    let a = beam_azimuth(&fr.kf.sub(&fr.ki), &fr.ki)?;
+                    Scalar {
+                        v: wrap(a.v - qaz),
+                        d: a.d,
+                    }
+                }
+                Equation::Naz { normal, naz } => {
+                    let a = beam_azimuth(&fr.sample(normal), &fr.ki)?;
+                    Scalar {
+                        v: wrap(a.v - naz),
+                        d: a.d,
+                    }
+                }
+                // sin(emergence) − sin(incidence)
+                Equation::IncidenceEqualsEmergence { normal } => {
+                    fr.sample(&normal.normalize()).dot(&fr.ki.add(&fr.kf))
+                }
+                // sin of the axis's angle out of the plane
+                Equation::InScatteringPlane { axis } => {
+                    let plane = fr.ki.cross(&fr.kf).normalized(NULL)?;
+                    self.sample_axis(*axis, values)?.dot(&plane)
+                }
+                Equation::VirtualOmega { axis, omega } => {
+                    let q = fr.kf.sub(&fr.ki);
+                    let toward = q.sub(&fr.ki.scaled(&q.dot(&fr.ki))).normalized(NULL)?;
+                    let a = self.sample_axis(*axis, values)?;
+                    let (y, x) = (a.dot(&toward), a.dot(&fr.ki));
+                    if y.v.hypot(x.v) <= NULL {
+                        return None;
+                    }
+                    // |k̂f − k̂i| = 2 sin θ, |k̂f + k̂i| = 2 cos θ.
+                    let theta = Scalar::atan2(&q.norm(), &fr.kf.add(&fr.ki).norm());
+                    let r = Scalar::atan2(&y, &x).sub(&theta);
+                    Scalar {
+                        v: wrap(r.v - omega),
+                        d: r.d,
+                    }
+                }
             });
         }
         Some(Eval {
             f: DVector::from_iterator(rows.len(), rows.iter().map(|r| r.v)),
             j: DMatrix::from_fn(rows.len(), self.written.len(), |r, c| rows[r].d[c]),
         })
+    }
+
+    /// The lab direction of sample axis `axis` at `values`: its own
+    /// direction turned by the axes outside it.
+    fn sample_axis(&self, axis: usize, values: &[f64]) -> Option<Vec3> {
+        let stack = self.geometry.sample_stack();
+        let outer = &stack[..stack.iter().position(|&i| i == axis)?];
+        let (_, direction) = rotation(self.geometry, axis).ok()?;
+        let turn = outer.iter().fold(UnitQuaternion::identity(), |r, &i| {
+            r * self.axis(i).transform(values[i]).rotation
+        });
+        Some(Vec3::rotated(
+            &turn,
+            &lab_axes(self.geometry, self.written, outer, values),
+            &direction,
+        ))
     }
 
     /// wrap(Σ c·values[axis]) over `terms` (axis, c), differentiated over the
@@ -396,6 +482,40 @@ mod tests {
                     }]
                 })
                 .unwrap(),
+                Mode::named(
+                    geo,
+                    "qaz naz",
+                    &["mu", "omega", "chi", "phi", "gamma"],
+                    |_| {
+                        vec![
+                            Equation::Qaz { qaz: 0.4 },
+                            Equation::Naz {
+                                normal: reference,
+                                naz: -2.1,
+                            },
+                        ]
+                    },
+                )
+                .unwrap(),
+                Mode::named(geo, "a=b", &["omega", "chi", "phi", "gamma"], |_| {
+                    vec![Equation::IncidenceEqualsEmergence { normal: reference }]
+                })
+                .unwrap(),
+                Mode::named(
+                    geo,
+                    "bisect omega",
+                    &["mu", "omega", "chi", "phi", "gamma"],
+                    |w| {
+                        vec![
+                            Equation::InScatteringPlane { axis: w[2] },
+                            Equation::VirtualOmega {
+                                axis: w[2],
+                                omega: 0.3,
+                            },
+                        ]
+                    },
+                )
+                .unwrap(),
             ],
             "K4CV" => [
                 Eulerian::Omega(0.2),
@@ -493,7 +613,9 @@ mod tests {
     }
 
     /// Analytic Jacobian against a central difference of the residual, for
-    /// every E4C mode, every kind of E6C mode and an emergence one, both
+    /// every E4C mode, every kind of E6C mode, an emergence one and one per
+    /// You constraint (qaz with naz, incidence = emergence, bisect with
+    /// virtual omega), both
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
     /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
     /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa
