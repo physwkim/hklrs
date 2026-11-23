@@ -41,6 +41,7 @@ WL = 1.54
 N_TARGETS = 40
 N_UNREACH = 4
 TOL = 1e-6
+HKL_EPSILON = 1e-6  # hkl.h:49
 GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
               "ESRF ID01 PSIC", "SOLEIL SIXS MED2+2", "SOLEIL SIXS MED1+2",
               "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS",
@@ -101,8 +102,6 @@ class Ctx:
         if self.list_params:
             self.el.parameters_values_set(self.list_params, USER)
         self.eng = self.el.engine_get_by_name("hkl")
-        engines = [e.name_get() for e in self.el.engines_get()]
-        self.psi_eng = self.el.engine_get_by_name("psi") if "psi" in engines else None
         self.ub = np.array(mat(self.smp.UB_get()))
         self.ranges = {n: [v / UNIT[u][1] for v in self.geo.axis_get(n).min_max_get(USER)]
                        for n, u in zip(self.names, self.units)}
@@ -188,16 +187,21 @@ def kappa_derived(a):
 
 
 def psi_of(ctx, h2, geo):
-    """psi from hkl's read-only "psi" engine, whose reference is h2k2l2, for geometry geo."""
-    if ctx.psi_eng is None:
+    """psi (deg) of h2k2l2 as hkl_psi_write computes it (common.c:143), None where Q or the projection
+    of h2k2l2 normal to Q is null: the angle about Q from n = (kf x ki) x Q to that projection."""
+    rs, rd = rs_rd(geo, ctx.smp, ctx.det)
+    ki = np.array([2 * math.pi / WL, 0, 0])
+    kf = rd @ ki
+    q = kf - ki
+    if np.linalg.norm(q) <= HKL_EPSILON:
         return None
-    ctx.geo.axis_values_set(list(geo.axis_values_get(USER)), USER)
-    ctx.el.get()
-    cur = ctx.psi_eng.current_mode_get()
-    if ctx.psi_eng.parameters_names_get():
-        ctx.psi_eng.parameters_values_set([float(x) for x in h2], USER)
-    ctx.el.get()
-    return float(ctx.psi_eng.pseudo_axis_values_get(USER)[0])
+    q /= np.linalg.norm(q)
+    n = np.cross(np.cross(kf, ki), q)
+    h = rs @ ctx.ub @ np.array(h2, float)
+    h -= (h @ q) * q
+    if np.linalg.norm(h) <= HKL_EPSILON:
+        return None
+    return math.degrees(math.atan2(np.cross(n, h) @ q, n @ h))
 
 
 def incidence_of(ctx, geo, n, init_geo):
