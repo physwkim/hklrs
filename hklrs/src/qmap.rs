@@ -135,23 +135,15 @@ pub fn solid_angle(
     Ok(weights(shape, data))
 }
 
-/// Which way the incident beam's electric vector points, perpendicular to
-/// k̂i, lab z being up.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PolarisationPlane {
-    /// Along z × k̂i (the usual synchrotron case).
-    Horizontal,
-    /// Along k̂i × (z × k̂i).
-    Vertical,
-}
-
-/// Polarisation factor of the scattered intensity for a beam polarised in
-/// `plane` with degree `factor` (1 fully in the plane, 0 unpolarised, −1
-/// fully across): `P = ½(1+f)(1−(ê·k̂f)²) + ½(1−f)(1−(ê⊥·k̂f)²)`, which is
-/// pyFAI's `½(1 + cos²2θ − f cos 2χ sin²2θ)` for a horizontal beam.
+/// Polarisation factor of the scattered intensity for a beam whose electric
+/// field lies along `e` (a lab-frame vector, projected normal to k̂i) with
+/// degree `factor` (1 fully along `e`, 0 unpolarised, −1 fully across):
+/// `P = ½(1+f)(1−(ê·k̂f)²) + ½(1−f)(1−(ê⊥·k̂f)²)`, ê⊥ = k̂i × ê. With
+/// `e` the horizontal direction this is pyFAI's
+/// `½(1 + cos²2θ − f cos 2χ sin²2θ)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Polarisation {
-    pub plane: PolarisationPlane,
+    pub e: Vector3<f64>,
     pub factor: f64,
 }
 
@@ -167,18 +159,16 @@ pub fn polarisation(
     }
     // k̂i is the same for every pixel of the frame
     let poses = geometry.poses(&frame.values)?;
-    let ki = poses.source * geometry.beam_direction();
-    let horizontal = Vector3::z()
-        .cross(&ki)
-        .try_normalize(0.0)
-        .ok_or(Error::ZeroVector {
-            what: "horizontal polarisation direction (beam along lab z)".to_owned(),
-        })?;
-    let vertical = ki.cross(&horizontal);
-    let (e, across) = match polarisation.plane {
-        PolarisationPlane::Horizontal => (horizontal, vertical),
-        PolarisationPlane::Vertical => (vertical, horizontal),
-    };
+    let ki = (poses.source * geometry.beam_direction()).into_inner();
+    let e = polarisation.e - ki * polarisation.e.dot(&ki);
+    let norm = e.norm();
+    if !(norm.is_finite() && norm > 0.0) {
+        return Err(Error::ZeroVector {
+            what: "polarisation vector normal to the beam".to_owned(),
+        });
+    }
+    let e = e / norm;
+    let across = ki.cross(&e);
     let data = fill(geometry, frame, detector, |_, _, s| {
         let kf = s.kf.into_inner();
         [0.5 * (1.0 + f) * (1.0 - e.dot(&kf).powi(2))
@@ -300,12 +290,13 @@ mod tests {
     #[test]
     fn polarisation_at_90_degrees_in_and_out_of_the_plane() {
         let g = om_only();
+        // beam along x: the field along y is horizontal, along z vertical
         let h = |factor| Polarisation {
-            plane: PolarisationPlane::Horizontal,
+            e: Vector3::y(),
             factor,
         };
         let v = |factor| Polarisation {
-            plane: PolarisationPlane::Vertical,
+            e: Vector3::z(),
             factor,
         };
         // beam along x, in the plane means kf along y
@@ -331,7 +322,7 @@ mod tests {
                 &g,
                 &d,
                 Polarisation {
-                    plane: PolarisationPlane::Horizontal,
+                    e: Vector3::y(),
                     factor: f,
                 },
             );
@@ -347,13 +338,37 @@ mod tests {
             wavelength: Wavelength::new(1.0).unwrap(),
         };
         let pol = Polarisation {
-            plane: PolarisationPlane::Horizontal,
+            e: Vector3::y(),
             factor: f64::NAN,
         };
         assert!(matches!(
             polarisation(&g, &f, &point_at([0.0, 1.0, 0.0]), pol),
             Err(Error::PolarisationFactor { .. })
         ));
+    }
+
+    #[test]
+    fn polarisation_vector_is_projected_normal_to_the_beam() {
+        let g = om_only();
+        let f = Frame {
+            values: vec![0.0],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        let d = point_at([0.3, 0.8, 0.5]);
+        let pol = |e| Polarisation { e, factor: 0.7 };
+        let w = |e| polarisation(&g, &f, &d, pol(e)).map(|w| w.get(0, 0));
+        // the beam-parallel part of e and its length do not matter
+        let a = w(Vector3::y()).unwrap();
+        let b = w(Vector3::new(5.0, 3.0, 0.0)).unwrap();
+        assert!((a - b).abs() < 1e-15);
+        // along the beam, or not finite, there is no direction
+        for e in [
+            Vector3::x(),
+            Vector3::zeros(),
+            Vector3::new(f64::NAN, 0.0, 0.0),
+        ] {
+            assert!(matches!(w(e), Err(Error::ZeroVector { .. })), "{e:?}");
+        }
     }
 
     /// Detector at `d` along x, steps (a along z, b along y); pixel (0, 0)

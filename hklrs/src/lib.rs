@@ -23,8 +23,8 @@ pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
 pub use inverse::{Equation, Eulerian, InverseError, InverseRequest, Mode, Picker, Slits, Target};
 pub use lattice::Lattice;
 pub use qmap::{
-    Frame, Planes, Polarisation, PolarisationPlane, QMap, Weights, detector_positions,
-    polarisation, q_map, solid_angle,
+    Frame, Planes, Polarisation, QMap, Weights, detector_positions, polarisation, q_map,
+    solid_angle,
 };
 pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
 pub use units::{Deg, Energy, HC_KEV_ANGSTROM, Rad, Wavelength};
