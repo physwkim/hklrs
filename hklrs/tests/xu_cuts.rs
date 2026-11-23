@@ -233,7 +233,7 @@ fn xu_18_empty_window_is_not_an_error() {
     assert!(seen > 0);
 }
 
-/// `get_qx_scan` with omega or 2theta raises ValueError for any array input
+/// XU-25: `get_qx_scan` with omega or 2theta raises ValueError for any array input
 /// (`line_cuts.py:334,:341` pass `[array, scalar, scalar]` to `Q2Ang`); the golden holds the
 /// coordinates xu's own `Q2Ang` gives for the intended broadcast cut.
 #[test]
