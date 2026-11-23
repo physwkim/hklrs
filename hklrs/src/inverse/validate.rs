@@ -7,7 +7,8 @@
 //! one makes the set degenerate. Regularity is that of the solved axes: the
 //! slits move no other equation, and where they are free the generator holds
 //! them. Axis limits filter the admitted set once the search is over, so a
-//! solution outside them still seeds it.
+//! solution outside them still seeds it. They bind every axis, a held one at
+//! its unwrapped value: a held motor is never asked to turn a full circle.
 
 use std::cmp::Ordering;
 
@@ -89,8 +90,8 @@ impl<'a> SolutionSet<'a> {
         self.admitted.last().map(Vec::as_slice)
     }
 
-    /// The admitted solutions whose written axes are all within their
-    /// limits, sorted; when there is none, the others, sorted, as
+    /// The admitted solutions whose axes are all within their limits,
+    /// sorted; when there is none, the others, sorted, as
     /// `NoSolutionInLimits`.
     pub fn into_sorted(self) -> Result<Found, InverseError> {
         if self.degenerate {
@@ -100,7 +101,7 @@ impl<'a> SolutionSet<'a> {
         let (inside, outside): (Vec<_>, Vec<_>) = self.admitted.into_iter().partition(|s| {
             s.iter()
                 .enumerate()
-                .all(|(i, &v)| !system.is_written(i) || system.axis(i).within_limits(v))
+                .all(|(i, &v)| system.axis(i).within_limits(v))
         });
         match sorted(system.current(), inside) {
             (solutions, Some(first)) => Ok(Found { solutions, first }),
