@@ -133,31 +133,25 @@ impl FrameScalars {
     }
 }
 
-/// The detector's per-pixel fields, on the whole raw frame, before any
-/// roi or binning.
-#[derive(Clone, Debug, PartialEq)]
+/// The detector's per-pixel fields, each over the whole raw frame, before
+/// any roi or binning. They have no shape of their own beside the images':
+/// [`Normaliser::new`] refuses one of another shape than the raw frame.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PixelFields {
-    shape: (usize, usize),
-    dark_rate: Option<Vec<f64>>,
+    dark_rate: Option<Image<f64>>,
     /// The flat field over its mean, `None` where it has no usable value.
-    flat: Option<Vec<Option<f64>>>,
+    flat: Option<Image<Option<f64>>>,
 }
 
 impl PixelFields {
     /// No dark and no flat field.
-    pub fn new(shape: (usize, usize)) -> Self {
-        Self {
-            shape,
-            dark_rate: None,
-            flat: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Dark counts per second over the raw shape.
     pub fn dark_rate(self, rate: Image<f64>) -> Result<Self, Error> {
-        rate.check("dark field", self.shape)?;
-        let rate = rate.into_data();
-        if let Some(index) = rate.iter().position(|r| !r.is_finite()) {
+        if let Some(index) = rate.data().iter().position(|r| !r.is_finite()) {
             return Err(Error::NonFinite { index });
         }
         Ok(Self {
@@ -169,10 +163,9 @@ impl PixelFields {
     /// Relative gain over the raw shape. The mean is taken over the usable
     /// pixels (finite and above [`FLAT_MIN`]); the others are masked.
     pub fn flat(self, gain: Image<f64>) -> Result<Self, Error> {
-        gain.check("flat field", self.shape)?;
-        let gain = gain.into_data();
         let usable = |g: f64| g.is_finite() && g > FLAT_MIN;
         let (sum, n) = gain
+            .data()
             .iter()
             .filter(|&&g| usable(g))
             .fold((0.0, 0usize), |(s, n), &g| (s + g, n + 1));
@@ -184,11 +177,10 @@ impl PixelFields {
         }
         let mean = sum / n as f64;
         Ok(Self {
-            flat: Some(
-                gain.iter()
-                    .map(|&g| usable(g).then_some(g / mean))
-                    .collect(),
-            ),
+            flat: Some(Image::from_fn(gain.shape(), |s, f| {
+                let g = gain.get(s, f);
+                usable(g).then_some(g / mean)
+            })),
             ..self
         })
     }
@@ -218,12 +210,15 @@ impl Region {
         let binned = detector
             .roi(self.slow.clone(), self.fast.clone())?
             .bin(self.bin.0, self.bin.1)?;
+        let mask = match binned.mask() {
+            Some(m) => Image::new(binned.shape(), m.to_vec())?,
+            None => Image::from_fn(binned.shape(), |_, _| false),
+        };
         let reducer = Reducer {
             raw_shape: detector.shape(),
             start: (self.slow.start, self.fast.start),
             bin: self.bin,
-            shape: binned.shape(),
-            mask: binned.mask().map(<[bool]>::to_vec),
+            mask,
         };
         Ok((binned, reducer))
     }
@@ -235,14 +230,14 @@ pub struct Reducer {
     raw_shape: (usize, usize),
     start: (usize, usize),
     bin: (usize, usize),
-    shape: (usize, usize),
-    mask: Option<Vec<bool>>,
+    /// The binned detector's mask, all false where it has none.
+    mask: Image<bool>,
 }
 
 impl Reducer {
     /// The binned detector's shape.
     pub fn shape(&self) -> (usize, usize) {
-        self.shape
+        self.mask.shape()
     }
 
     /// The raw pixels of binned pixel `(i, j)`, as flat indices into the
@@ -305,19 +300,18 @@ impl Normaliser {
     /// two meet here and only here, so fields of another raw shape than the
     /// reducer's detector are refused before any frame.
     pub fn new(fields: PixelFields, reducer: Reducer) -> Result<Self, Error> {
-        if fields.shape != reducer.raw_shape {
-            return Err(Error::ShapeMismatch {
-                what: "pixel fields",
-                shape: fields.shape,
-                expected: reducer.raw_shape,
-            });
+        if let Some(d) = &fields.dark_rate {
+            d.check("dark field", reducer.raw_shape)?;
+        }
+        if let Some(f) = &fields.flat {
+            f.check("flat field", reducer.raw_shape)?;
         }
         Ok(Self { fields, reducer })
     }
 
     /// The raw frame's (slow, fast) shape.
     pub fn raw_shape(&self) -> (usize, usize) {
-        self.fields.shape
+        self.reducer.raw_shape
     }
 
     /// One frame. `raw` is the whole raw frame, of the raw shape; `weights`
@@ -333,20 +327,19 @@ impl Normaliser {
         weights: &[&Weights],
     ) -> Result<NormalisedFrame, Error> {
         let (f, reducer) = (&self.fields, &self.reducer);
-        raw.check("raw frame", f.shape)?;
+        raw.check("raw frame", reducer.raw_shape)?;
         let raw = raw.data();
         if f.dark_rate.is_some() && scalars.count_time.is_none() {
             return Err(Error::DarkNeedsTime);
         }
         for w in weights {
-            w.check("weights", reducer.shape)?;
+            w.check("weights", reducer.shape())?;
         }
         let n = (reducer.bin.0 * reducer.bin.1) as f64;
         let time = scalars.count_time.unwrap_or(0.0);
         // The one place a pixel is masked, in precedence order.
-        Ok(Image::from_fn(reducer.shape, |i, j| {
-            let at = i * reducer.shape.1 + j;
-            if reducer.mask.as_ref().is_some_and(|m| m[at]) {
+        Ok(Image::from_fn(reducer.shape(), |i, j| {
+            if reducer.mask.get(i, j) {
                 return Err(Masked::Detector);
             }
             let mut geometric = scalars.factor();
@@ -356,14 +349,14 @@ impl Normaliser {
             let mut gain = 0.0;
             for p in reducer.block(i, j) {
                 gain += match &f.flat {
-                    Some(flat) => flat[p].ok_or(Masked::BadFlat)?,
+                    Some(flat) => flat.data()[p].ok_or(Masked::BadFlat)?,
                     None => 1.0,
                 };
             }
             // a NaN or infinite raw count makes the sum non-finite
             let mut counts = 0.0;
             for p in reducer.block(i, j) {
-                counts += raw[p] - f.dark_rate.as_ref().map_or(0.0, |d| d[p] * time);
+                counts += raw[p] - f.dark_rate.as_ref().map_or(0.0, |d| d.data()[p] * time);
             }
             Normalised::new(counts, Weight::new(geometric * gain / n, Masked::Opaque))
         }))
@@ -424,7 +417,7 @@ mod tests {
             (0..7, 0..11, (1, 1)),
         ] {
             let (binned, r) = Region::new(slow, fast, bin).apply(&raw_det).unwrap();
-            let n = Normaliser::new(PixelFields::new((7, 11)), r).unwrap();
+            let n = Normaliser::new(PixelFields::new(), r).unwrap();
             let out = n.normalise(&frame, &FrameScalars::new(), &[]).unwrap();
             assert_eq!(out.shape(), binned.shape());
             let size = (bin.0 * bin.1) as f64;
@@ -452,7 +445,7 @@ mod tests {
         let mean = flat.iter().sum::<f64>() / 24.0;
         let dark: Vec<f64> = (0..24).map(|i| 0.1 * i as f64).collect();
         let raw: Vec<f64> = (0..24).map(|i| 500.0 + 7.0 * i as f64).collect();
-        let fields = PixelFields::new((4, 6))
+        let fields = PixelFields::new()
             .dark_rate(image((4, 6), &dark))
             .unwrap()
             .flat(image((4, 6), &flat))
@@ -489,7 +482,7 @@ mod tests {
     fn counts_are_not_clamped_at_zero() {
         let det = detector((1, 3));
         let (_, r) = Region::new(0..1, 0..3, (1, 1)).apply(&det).unwrap();
-        let fields = PixelFields::new((1, 3))
+        let fields = PixelFields::new()
             .dark_rate(image((1, 3), &[10.0, 10.0, 10.0]))
             .unwrap();
         let s = FrameScalars::new().count_time(2.0).unwrap();
@@ -531,7 +524,7 @@ mod tests {
         w: &Weights,
         r: &Reducer,
     ) -> Vec<Result<Normalised, Masked>> {
-        let fields = PixelFields::new((1, 5)).flat(image((1, 5), flat)).unwrap();
+        let fields = PixelFields::new().flat(image((1, 5), flat)).unwrap();
         Normaliser::new(fields, r.clone())
             .unwrap()
             .normalise(&image((1, 5), raw), scalars, &[w])
@@ -623,7 +616,7 @@ mod tests {
             ))
             .unwrap();
         let (_, r) = Region::new(0..2, 0..4, (2, 2)).apply(&det).unwrap();
-        let fields = PixelFields::new((2, 4))
+        let fields = PixelFields::new()
             .flat(image((2, 4), &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0]))
             .unwrap();
         let ones = image((2, 4), &[1.0; 8]);
@@ -637,7 +630,7 @@ mod tests {
         let n = Normaliser::new(fields, r.clone()).unwrap();
         let out = n.normalise(&ones, &FrameScalars::new(), &[]).unwrap();
         assert_eq!(out.data()[1], Err(Masked::BadFlat));
-        let n = Normaliser::new(PixelFields::new((2, 4)), r).unwrap();
+        let n = Normaliser::new(PixelFields::new(), r).unwrap();
         let raw = image((2, 4), &[1.0, 1.0, 1.0, f64::NAN, 1.0, 1.0, 1.0, 1.0]);
         let out = n.normalise(&raw, &FrameScalars::new(), &[]).unwrap();
         assert!(out.data()[0].is_ok());
@@ -661,7 +654,7 @@ mod tests {
     fn a_dark_field_needs_a_count_time_and_shapes_must_agree() {
         let det = detector((1, 3));
         let (_, r) = Region::new(0..1, 0..3, (1, 1)).apply(&det).unwrap();
-        let fields = PixelFields::new((1, 3))
+        let fields = PixelFields::new()
             .dark_rate(image((1, 3), &[0.0; 3]))
             .unwrap();
         let dark = Normaliser::new(fields, r.clone()).unwrap();
@@ -671,16 +664,12 @@ mod tests {
             Err(Error::DarkNeedsTime)
         );
         assert!(
-            PixelFields::new((1, 3))
+            PixelFields::new()
                 .dark_rate(image((1, 3), &[f64::NAN; 3]))
                 .is_err()
         );
-        assert!(
-            PixelFields::new((1, 3))
-                .flat(image((1, 3), &[0.0; 3]))
-                .is_err()
-        );
-        let n = Normaliser::new(PixelFields::new((1, 3)), r).unwrap();
+        assert!(PixelFields::new().flat(image((1, 3), &[0.0; 3])).is_err());
+        let n = Normaliser::new(PixelFields::new(), r).unwrap();
         let (g, f) = geometry_frame();
         let other = solid_angle(&g, &f, &detector((1, 2))).unwrap();
         let transposed =
@@ -698,9 +687,9 @@ mod tests {
     }
 
     /// A raw image is its data and the shape it states, checked once when
-    /// it is made; a frame, dark field or flat field of another shape than
-    /// the raw shape is refused, the transposed shape of the same pixel
-    /// count as much as another count.
+    /// it is made; a frame of another shape than the raw shape is refused,
+    /// the transposed shape of the same pixel count as much as another
+    /// count.
     #[test]
     fn a_raw_image_of_another_shape_is_refused() {
         assert_eq!(
@@ -714,7 +703,7 @@ mod tests {
         let (_, r) = Region::new(0..2, 0..3, (1, 1))
             .apply(&detector((2, 3)))
             .unwrap();
-        let n = Normaliser::new(PixelFields::new((2, 3)), r).unwrap();
+        let n = Normaliser::new(PixelFields::new(), r).unwrap();
         let s = FrameScalars::new();
         let raw = image((2, 3), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(raw.shape(), (2, 3));
@@ -728,32 +717,46 @@ mod tests {
                 expected: (2, 3),
             };
             assert_eq!(n.normalise(&other, &s, &[]), Err(refused("raw frame")));
-            let fields = PixelFields::new((2, 3));
-            let dark = fields.clone().dark_rate(other.clone());
-            assert_eq!(dark, Err(refused("dark field")));
-            assert_eq!(fields.flat(other), Err(refused("flat field")));
         }
     }
 
-    /// Fields and a region of another raw shape are refused where they
-    /// meet, before any frame: another pixel count, and the same count in
-    /// another shape.
+    /// A dark or flat field and a region of another raw shape are refused
+    /// where they meet, before any frame: another pixel count, and the same
+    /// count in another shape. Each field is checked, not only the first.
     #[test]
     fn fields_of_another_raw_shape_are_refused_at_setup() {
         let (_, r) = Region::new(0..1, 0..3, (1, 1))
             .apply(&detector((1, 3)))
             .unwrap();
         for shape in [(2, 3), (3, 1)] {
-            let e = Normaliser::new(PixelFields::new(shape), r.clone()).unwrap_err();
-            let want = Error::ShapeMismatch {
-                what: "pixel fields",
-                shape,
-                expected: (1, 3),
-            };
-            assert_eq!(e.to_string(), want.to_string());
-            assert_eq!(e, want);
+            let ones = image(shape, &vec![1.0; shape.0 * shape.1]);
+            for (what, fields) in [
+                ("dark field", PixelFields::new().dark_rate(ones.clone())),
+                ("flat field", PixelFields::new().flat(ones)),
+            ] {
+                let e = Normaliser::new(fields.unwrap(), r.clone()).unwrap_err();
+                let want = Error::ShapeMismatch {
+                    what,
+                    shape,
+                    expected: (1, 3),
+                };
+                assert_eq!(e.to_string(), want.to_string());
+                assert_eq!(e, want);
+            }
         }
-        let n = Normaliser::new(PixelFields::new((1, 3)), r).unwrap();
+        let both = PixelFields::new()
+            .dark_rate(image((1, 3), &[0.0; 3]))
+            .unwrap()
+            .flat(image((3, 1), &[1.0; 3]))
+            .unwrap();
+        assert!(matches!(
+            Normaliser::new(both, r.clone()),
+            Err(Error::ShapeMismatch {
+                what: "flat field",
+                ..
+            })
+        ));
+        let n = Normaliser::new(PixelFields::new(), r).unwrap();
         assert_eq!(n.raw_shape(), (1, 3));
     }
 
@@ -803,7 +806,7 @@ mod tests {
             .unwrap()
             .count_time(2.0)
             .unwrap();
-        let frame = Normaliser::new(PixelFields::new((1, 4)), red)
+        let frame = Normaliser::new(PixelFields::new(), red)
             .unwrap()
             .normalise(&image((1, 4), &raw), &scalars, &[&w])
             .unwrap();

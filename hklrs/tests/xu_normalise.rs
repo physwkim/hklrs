@@ -102,7 +102,7 @@ fn build(case: &Value) -> Case {
             Ok(s)
         })
         .collect();
-    let mut fields = PixelFields::new(shape);
+    let mut fields = PixelFields::new();
     if case["dark"].is_array() {
         fields = fields
             .dark_rate(Image::new(shape, flat(&case["dark"])).unwrap())

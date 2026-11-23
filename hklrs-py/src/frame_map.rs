@@ -159,7 +159,7 @@ impl PyFrameMap {
         let raw_shape = detector.0.shape();
         let (mut sample, mut normal) = (None, None);
         let mut region = Region::new(0..raw_shape.0, 0..raw_shape.1, (1, 1));
-        let mut fields = PixelFields::new(raw_shape);
+        let mut fields = PixelFields::new();
         xu_options(options, |key, value| {
             match key {
                 "sample" => sample = Some(value.extract::<PyRef<'_, PySample>>()?.0.clone()),

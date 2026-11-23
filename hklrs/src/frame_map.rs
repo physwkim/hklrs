@@ -146,7 +146,7 @@ mod tests {
             },
             &raw_detector(),
             &Region::new(0..4, 0..6, (1, 1)),
-            PixelFields::new((4, 6)),
+            PixelFields::new(),
             binnings(3),
         )
         .unwrap_err();
@@ -175,7 +175,7 @@ mod tests {
             Projection::QSample,
             &raw_detector(),
             &region,
-            PixelFields::new((4, 6)),
+            PixelFields::new(),
             binnings(3),
         )
         .unwrap();
@@ -215,25 +215,26 @@ mod tests {
         assert_eq!(cube.contributions().iter().sum::<u64>(), 2);
     }
 
-    /// Fields of another raw shape, which each frame used to refuse, are
+    /// A field of another raw shape, which each frame used to refuse, is
     /// refused before the first: another pixel count, and the transposed
     /// shape of the same count.
     #[test]
     fn fields_of_another_raw_shape_are_refused_at_setup() {
         for shape in [(3, 6), (6, 4)] {
+            let dark = Image::new(shape, vec![0.0; shape.0 * shape.1]).unwrap();
             let e = FrameMap::new(
                 preset("K6C").unwrap(),
                 Projection::QSample,
                 &raw_detector(),
                 &Region::new(1..4, 1..6, (2, 2)),
-                PixelFields::new(shape),
+                PixelFields::new().dark_rate(dark).unwrap(),
                 binnings(3),
             )
             .unwrap_err();
             assert_eq!(
                 e,
                 Error::ShapeMismatch {
-                    what: "pixel fields",
+                    what: "dark field",
                     shape,
                     expected: (4, 6),
                 }
@@ -251,7 +252,7 @@ mod tests {
             Projection::QSample,
             &raw_detector(),
             &Region::new(0..4, 0..6, (1, 1)),
-            PixelFields::new((4, 6)),
+            PixelFields::new(),
             binnings(3),
         )
         .unwrap();
