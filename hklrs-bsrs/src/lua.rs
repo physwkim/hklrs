@@ -35,7 +35,9 @@ use crate::{DiffError, Diffractometer, Measured};
 /// - `inverse(hkl, positions)`: the positions reaching `hkl`, closest to
 ///   `positions`.
 /// - `ca(hkl)`: the positions a move to `hkl` would go to, without moving.
-/// - `wh()`: `{hkl, positions, wavelength}` at the readbacks.
+/// - `wh()`: `{hkl, psi, positions, wavelength}` at the readbacks, `psi`
+///   in degrees on a geometry with a psi mode and nil where the reading's
+///   ψ is NaN.
 /// - `save_config(path)`: writes [`Diffractometer::config`] as hklrs JSON
 ///   (`.json`) or YAML (`.yml`, `.yaml`).
 /// - `load_config(path)`: [`Diffractometer::load_config`] from hklrs JSON or
@@ -90,6 +92,8 @@ struct ModeParams {
 #[derive(Serialize)]
 struct Where {
     hkl: [f64; 3],
+    /// The reading's ψ: NaN goes to nil as the reading's goes to null.
+    psi: Option<f64>,
     positions: Positions,
     /// Å.
     wavelength: f64,
@@ -184,8 +188,10 @@ impl LuaDiffractometer {
     #[lua_method]
     async fn wh(&self) -> Result<Where, Fault> {
         let (current, wavelength) = try_join!(self.dx.positions(), self.dx.wavelength())?;
+        let (hkl, psi) = self.dx.pseudos(&current, wavelength)?;
         Ok(Where {
-            hkl: self.dx.hkl(&current, wavelength)?.into(),
+            hkl: hkl.into(),
+            psi,
             positions: self.named(&current),
             wavelength: wavelength.angstrom(),
         })
