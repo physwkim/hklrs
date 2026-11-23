@@ -398,6 +398,30 @@ pub struct Diffractometer {
     /// last real's set, so concurrent moves reach the reals in setpoint
     /// order.
     moving: futures::lock::Mutex<()>,
+    /// The plan whose run holds the reals: [`Diffractometer::move_to`]
+    /// refuses while it is set. Set by [`Diffractometer::claim`] and cleared
+    /// when its [`Scanning`] drops.
+    scan: std::sync::Mutex<Option<&'static str>>,
+}
+
+/// A scan's hold on the reals, from before it reads the readbacks it solves
+/// from to the end of its run; dropping it releases them.
+pub(crate) struct Scanning {
+    dx: Arc<Diffractometer>,
+}
+
+impl Scanning {
+    /// Drops the pseudo setpoint: the reals move outside the pseudo axes.
+    /// No move is in flight while a scan holds the reals.
+    pub fn clear_target(&self) {
+        self.dx.state_mut().target = None;
+    }
+}
+
+impl Drop for Scanning {
+    fn drop(&mut self) {
+        *self.dx.scan() = None;
+    }
 }
 
 impl Diffractometer {
@@ -440,6 +464,7 @@ impl Diffractometer {
                 target: None,
             }),
             moving: futures::lock::Mutex::new(()),
+            scan: std::sync::Mutex::new(None),
         })
     }
 
@@ -663,17 +688,36 @@ impl Diffractometer {
         })
     }
 
-    /// Drops the pseudo setpoint once any move in flight has set its reals.
-    pub(crate) async fn clear_target(&self) {
+    fn scan(&self) -> std::sync::MutexGuard<'_, Option<&'static str>> {
+        self.scan.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Holds the reals for `plan`'s run, once any move in flight has set its
+    /// reals; refused while another scan holds them.
+    pub(crate) async fn claim(self: &Arc<Self>, plan: &'static str) -> Result<Scanning, DiffError> {
         let _gate = self.moving.lock().await;
-        self.state_mut().target = None;
+        let mut scan = self.scan();
+        if let Some(holder) = *scan {
+            return Err(DiffError::Scanning {
+                plan: holder.to_owned(),
+            });
+        }
+        *scan = Some(plan);
+        Ok(Scanning { dx: self.clone() })
     }
 
     /// The only move that solves and commits a pseudo setpoint: solves
     /// `setpoint` closest to the readbacks and sets every real; the
-    /// setpoint is kept only when the solve succeeds.
+    /// setpoint is kept only when the solve succeeds. Refused while a scan
+    /// holds the reals.
     pub(crate) async fn move_to(&self, setpoint: Setpoint) -> Result<Status, BsrsError> {
         let _gate = self.moving.lock().await;
+        if let Some(plan) = *self.scan() {
+            return Err(DiffError::Scanning {
+                plan: plan.to_owned(),
+            }
+            .into());
+        }
         let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
         // one write lock, so a set_mode meanwhile is not lost to a ψ commit
         let values = self.state_mut().commit(setpoint, &current, wavelength)?;
