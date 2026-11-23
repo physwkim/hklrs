@@ -37,10 +37,10 @@ pub fn psi_frame(
     p.dot(&e2).atan2(p.dot(&e1))
 }
 
-/// The hkl miss (Miller units) then one miss per extra equation of `mode`
-/// (rad, or relative to k²), signed and smooth in `values`: zero exactly at
-/// a solution, computed through `forward`'s scattering and not the solver's
-/// residuals.
+/// The hkl miss (Miller units), one miss per extra equation of `mode` (rad,
+/// or relative to k²) and, with slits, the cosine of the slits normal to the
+/// surface, signed and smooth in `values`: zero exactly at a solution,
+/// computed through `forward`'s scattering and not the solver's residuals.
 pub fn residuals(
     mode: &Mode,
     ub: &Matrix3<f64>,
@@ -89,7 +89,18 @@ pub fn residuals(
             let ki = ki.normalize();
             (n - ki * n.dot(&ki)).angle(&Vector3::y()) - azimuth
         }
+        Equation::Emergence { surface, emergence } => {
+            let poses = geo.poses(values).unwrap();
+            let n = poses.sample.rotation * surface;
+            let kf = poses.detector.rotation * geo.beam_direction().into_inner();
+            wrap(FRAC_PI_2 - n.cross(&kf).norm().atan2(n.dot(&kf)) - emergence)
+        }
     }));
+    if let Some(slits) = mode.slits() {
+        let poses = geo.poses(values).unwrap();
+        let n = poses.sample.rotation * slits.surface();
+        r.push(n.dot(&(poses.detector.rotation * slits.normal())));
+    }
     Ok(r)
 }
 
@@ -111,7 +122,8 @@ pub fn check(
     })?;
     for (i, (v, c)) in values.iter().zip(current).enumerate() {
         let axis = &mode.geometry().axes()[i];
-        let ok = if mode.written().contains(&i) {
+        let written = mode.written().contains(&i) || mode.slits().is_some_and(|s| s.axis() == i);
+        let ok = if written {
             let (min, max) = axis.limits();
             axis.cut_point()
                 .is_some_and(|cut| cut <= *v && *v < cut + TAU)
@@ -129,6 +141,10 @@ pub fn check(
     for (e, miss) in mode.extra().iter().zip(&r[3..]) {
         let miss = miss.abs();
         within(miss, || format!("{values:?} misses {e:?} by {miss:e}"))?;
+    }
+    if let Some(miss) = r.get(3 + mode.extra().len()) {
+        let miss = miss.abs();
+        within(miss, || format!("{values:?} misses the slits by {miss:e}"))?;
     }
     Ok(())
 }

@@ -31,7 +31,7 @@ struct Search<'a> {
 impl<'a> Search<'a> {
     /// Solves from `seed` unless it was tried or the set is degenerate;
     /// returns the written values of the solution reached and of its kappa
-    /// twin, those the set admits.
+    /// twin, those the set admits at one of their slit roots.
     fn seed(&mut self, seed: Vec<f64>) -> Vec<Vec<f64>> {
         if self.set.is_degenerate() || self.tried.iter().any(|t| same(t, &seed)) {
             return Vec::new();
@@ -44,9 +44,16 @@ impl<'a> Search<'a> {
             .into_iter()
             .flatten()
             .filter_map(|c| {
-                self.set
-                    .offer(&c)
-                    .map(|new| self.system.written_values(new))
+                // Every slit root is offered; they share the written values.
+                self.system
+                    .slit_images(c)
+                    .into_iter()
+                    .filter_map(|s| {
+                        self.set
+                            .offer(&s)
+                            .map(|new| self.system.written_values(new))
+                    })
+                    .reduce(|first, _| first)
             })
             .collect()
     }

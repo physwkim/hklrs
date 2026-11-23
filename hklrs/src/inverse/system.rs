@@ -1,10 +1,13 @@
 //! The mode's residual and its analytic Jacobian over the written axes.
 
+use std::f64::consts::{FRAC_PI_2, PI};
+
 use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
 
 use super::jet::{Scalar, Vec3};
 use super::kappa::{Branch, KappaAxes, restrict};
-use super::{Equation, Eulerian, Mode, wrap};
+use super::validate::ACCEPT;
+use super::{Equation, Eulerian, Mode, Slits, wrap};
 use crate::{Axis, AxisKind, Error, Geometry};
 
 /// Sine below which an angle ψ is built from (θ, π − 2θ, Q to the
@@ -22,6 +25,7 @@ pub(super) struct System<'a> {
     q: Vector3<f64>,
     /// UB in units of k.
     ub: Matrix3<f64>,
+    slits: Option<&'a Slits>,
 }
 
 pub(super) struct Eval {
@@ -119,6 +123,7 @@ impl<'a> System<'a> {
             current,
             q,
             ub,
+            slits: mode.slits(),
         }
     }
 
@@ -130,8 +135,64 @@ impl<'a> System<'a> {
         self.kappa
     }
 
+    /// Whether the inverse writes `axis`: solved for, or the slits axis.
     pub fn is_written(&self, axis: usize) -> bool {
-        self.written.contains(&axis)
+        self.written.contains(&axis) || self.slits.is_some_and(|s| s.axis() == axis)
+    }
+
+    /// `values` once per root of the slit equation, the slits axis there,
+    /// nearest `current` first; `values` itself without slits, or where the
+    /// equation holds within ACCEPT for every slits value (the surface
+    /// along the slits axis), which then stays at `current`.
+    pub fn slit_images(&self, values: Vec<f64>) -> Vec<Vec<f64>> {
+        let Some(slits) = self.slits else {
+            return vec![values];
+        };
+        let Ok(poses) = self.geometry.poses(&values) else {
+            return Vec::new();
+        };
+        let axis = slits.axis();
+        let stack = self.geometry.detector_stack();
+        // The slits axis is innermost: R_detector = outer·R(η), and with a
+        // fixed rotation axis f(η) = a + p·cos η + q·sin η.
+        let outer = stack[..stack.len() - 1]
+            .iter()
+            .fold(UnitQuaternion::identity(), |r, &i| {
+                r * self.axis(i).transform(values[i]).rotation
+            });
+        let s = outer.inverse() * (poses.sample.rotation * slits.surface().into_inner());
+        let f = |eta: f64| {
+            s.dot(&(self.axis(axis).transform(eta).rotation * slits.normal().into_inner()))
+        };
+        let (f0, f1, f2) = (f(0.0), f(FRAC_PI_2), f(PI));
+        let (a, p) = ((f0 + f2) / 2.0, (f0 - f2) / 2.0);
+        let q = f1 - a;
+        let r = p.hypot(q);
+        if a.abs() + r <= ACCEPT {
+            return vec![values];
+        }
+        let (phi, d) = (q.atan2(p), (-a / r).clamp(-1.0, 1.0).acos());
+        let mut roots = [phi - d, phi + d];
+        let from_current = |eta: &f64| wrap(eta - self.current[axis]).abs();
+        roots.sort_by(|x, y| from_current(x).total_cmp(&from_current(y)));
+        roots
+            .into_iter()
+            .map(|eta| {
+                let mut v = values.clone();
+                v[axis] = eta;
+                v
+            })
+            .collect()
+    }
+
+    /// (R_sample·surface)·(R_detector·normal) at `values`; `None` without
+    /// slits.
+    pub fn slit_miss(&self, values: &[f64]) -> Option<f64> {
+        let slits = self.slits?;
+        Some(self.geometry.poses(values).map_or(f64::NAN, |p| {
+            (p.sample.rotation * slits.surface().into_inner())
+                .dot(&(p.detector.rotation * slits.normal().into_inner()))
+        }))
     }
 
     pub fn axis(&self, axis: usize) -> &'a Axis {
@@ -207,6 +268,14 @@ impl<'a> System<'a> {
                         d: a.d,
                     }
                 }
+                // sin of the emergence, monotonic on [−π/2, π/2]
+                Equation::Emergence { surface, emergence } => {
+                    let c = fr.sample(&surface.normalize()).dot(&fr.kf);
+                    Scalar {
+                        v: c.v - emergence.sin(),
+                        d: c.d,
+                    }
+                }
             });
         }
         Some(Eval {
@@ -273,7 +342,10 @@ impl<'a> System<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inverse::{e4c, e6c, zaxis};
+    use crate::inverse::{
+        aps_04id_polar as polar, e4c, e6c, petra3_p09_eh2 as p09, petra3_p23_4c as p23_4c,
+        soleil_sixs_med as med, zaxis,
+    };
     use crate::presets::preset;
 
     fn modes<'g>(name: &str, geo: &'g Geometry) -> Vec<Mode<'g>> {
@@ -284,6 +356,31 @@ mod tests {
                 zaxis::zaxis(geo).unwrap(),
                 zaxis::reflectivity(geo).unwrap(),
             ],
+            "SOLEIL SIXS MED2+2" => vec![
+                med::mu_fixed(geo).unwrap(),
+                med::reflectivity(geo).unwrap(),
+                med::emergence_fixed(geo, Vector3::new(0.1, 1.0, 0.2), -0.3).unwrap(),
+            ],
+            "SOLEIL SIXS MED1+2" => vec![
+                med::pitch_fixed(geo).unwrap(),
+                med::delta_fixed(geo).unwrap(),
+            ],
+            "SOLEIL SIXS MED2+3" => vec![med::gamma_fixed(geo).unwrap()],
+            "APS POLAR" => vec![
+                polar::zaxis_beta_fixed(geo).unwrap(),
+                polar::zaxis_alpha_eq_beta(geo).unwrap(),
+                polar::bissecting_horizontal(geo).unwrap(),
+                polar::psi_constant_vertical(geo, reference, 0.4).unwrap(),
+            ],
+            "PETRA3 P09 EH2" => vec![
+                p09::zaxis_beta_fixed(geo).unwrap(),
+                p09::zaxis_alpha_eq_beta(geo).unwrap(),
+                p09::bissecting_horizontal(geo).unwrap(),
+            ],
+            "PETRA3 P23 4C" => vec![
+                p23_4c::bissector_vertical(geo).unwrap(),
+                p23_4c::psi_constant(geo, reference, 0.4).unwrap(),
+            ],
             "E6C" => vec![
                 e6c::bissector_vertical(geo).unwrap(),
                 e6c::lifting_detector_phi(geo).unwrap(),
@@ -292,6 +389,13 @@ mod tests {
                 e6c::bissector_horizontal(geo).unwrap(),
                 e6c::double_diffraction_horizontal(geo, hkl2).unwrap(),
                 e6c::psi_constant_horizontal(geo, reference, 0.4).unwrap(),
+                Mode::named(geo, "emergence", &["mu", "omega", "gamma", "delta"], |_| {
+                    vec![Equation::Emergence {
+                        surface: Vector3::new(0.2, 1.0, -0.3),
+                        emergence: 0.3,
+                    }]
+                })
+                .unwrap(),
             ],
             "K4CV" => [
                 Eulerian::Omega(0.2),
@@ -389,10 +493,12 @@ mod tests {
     }
 
     /// Analytic Jacobian against a central difference of the residual, for
-    /// every E4C mode, every kind of E6C mode, both ZAXIS modes (mu in both
-    /// stacks), every kappa eulerian row on K4CV and the surface rows on
-    /// K6C, at points away from the wrap cuts of the angular rows and from
-    /// kappa = 0.
+    /// every E4C mode, every kind of E6C mode and an emergence one, both
+    /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
+    /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
+    /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa
+    /// eulerian row on K4CV and the surface rows on K6C, at points away from
+    /// the wrap cuts of the angular rows and from kappa = 0.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
@@ -403,7 +509,20 @@ mod tests {
             [-2.0, 1.1, -0.7, -1.4, 0.8, -1.3],
             [1.0, 2.5, 3.0, 2.2, 2.9, 0.7],
         ];
-        for name in ["E4CV", "E4CH", "E6C", "ZAXIS", "K4CV", "K6C"] {
+        for name in [
+            "E4CV",
+            "E4CH",
+            "E6C",
+            "ZAXIS",
+            "SOLEIL SIXS MED2+2",
+            "SOLEIL SIXS MED1+2",
+            "SOLEIL SIXS MED2+3",
+            "APS POLAR",
+            "PETRA3 P09 EH2",
+            "PETRA3 P23 4C",
+            "K4CV",
+            "K6C",
+        ] {
             let geo = preset(name).unwrap();
             let n = geo.axes().len();
             for point in &points {

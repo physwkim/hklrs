@@ -1,10 +1,13 @@
 //! The only way into a solution set. Generators (the solver from each seed,
-//! and any later Ewald or kappa-twin construction) only offer candidates; a
-//! candidate is a solution when every axis the mode does not write is
-//! exactly `current` and all of the mode's equations hold at its values,
-//! written axes wrapped to their cut points. A regular solution is admitted;
-//! a singular one makes the set degenerate. Axis limits filter the admitted
-//! set once the search is over, so a solution outside them still seeds it.
+//! the kappa twin and slit roots of its solution, and any later Ewald
+//! construction) only offer candidates; a candidate is a solution when every
+//! axis the mode does not write is exactly `current` and all of the mode's
+//! equations, the slit equation included, hold at its values, written axes
+//! wrapped to their cut points. A regular solution is admitted; a singular
+//! one makes the set degenerate. Regularity is that of the solved axes: the
+//! slits move no other equation, and where they are free the generator holds
+//! them. Axis limits filter the admitted set once the search is over, so a
+//! solution outside them still seeds it.
 
 use std::cmp::Ordering;
 
@@ -12,7 +15,7 @@ use super::system::System;
 use super::{InverseError, wrap};
 
 /// Largest residual admitted (dimensionless: Q in units of k, angles in rad).
-const ACCEPT: f64 = 1e-12;
+pub(super) const ACCEPT: f64 = 1e-12;
 /// Axis values closer than this (rad, on every axis) are one solution.
 const SAME: f64 = 1e-9;
 /// Smallest singular value of the Jacobian at a regular solution, whose
@@ -71,7 +74,8 @@ impl<'a> SolutionSet<'a> {
             }
         }
         let e = self.system.eval(&values)?;
-        if !e.f.iter().all(|r| r.abs() <= ACCEPT) {
+        let slit = self.system.slit_miss(&values);
+        if !e.f.iter().chain(&slit).all(|r| r.abs() <= ACCEPT) {
             return None;
         }
         if e.j.singular_values().min() < REGULAR {

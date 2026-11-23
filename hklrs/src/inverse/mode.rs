@@ -1,11 +1,14 @@
-use nalgebra::Vector3;
+use std::f64::consts::FRAC_PI_2;
+
+use nalgebra::{Unit, Vector3};
 
 use super::kappa::{KappaAxes, restrict};
 use super::{InverseError, finite};
 use crate::{Axis, AxisKind, Geometry};
 
 /// An equation a mode adds to the three hkl equations. Angles in rad,
-/// vectors in Miller indices.
+/// vectors in Miller indices but for surface normals, in the sample-holder
+/// frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Equation {
     /// detector ≡ 2·sample (mod 2π), axis indices.
@@ -30,6 +33,13 @@ pub enum Equation {
     /// hkl's azimuth of `normal`, as [`Equation::Incidence`]: the angle from
     /// lab y to n projected normal to k̂i, in [0, π], equals `azimuth`.
     Azimuth { normal: Vector3<f64>, azimuth: f64 },
+    /// k̂f leaves the sample surface, normal `surface` in the sample-holder
+    /// frame (not through UB), at `emergence` ∈ [−π/2, π/2]: π/2 minus the
+    /// angle from the lab surface normal to k̂f.
+    Emergence {
+        surface: Vector3<f64>,
+        emergence: f64,
+    },
 }
 
 /// What a kappa mode holds of the eulerian (omega, chi, phi) of its arm's
@@ -47,6 +57,33 @@ pub enum Eulerian {
     Bisector { detector: usize },
 }
 
+/// Slits on the innermost detector axis `axis`, which turns about the beam
+/// and so moves no other equation: once the mode's equations are solved,
+/// it turns the slits normal into the sample surface,
+/// (R_sample·surface)·(R_detector·normal) = 0.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Slits {
+    axis: usize,
+    surface: Unit<Vector3<f64>>,
+    normal: Unit<Vector3<f64>>,
+}
+
+impl Slits {
+    pub fn axis(&self) -> usize {
+        self.axis
+    }
+
+    /// Surface normal, sample-holder frame (not through UB).
+    pub fn surface(&self) -> Unit<Vector3<f64>> {
+        self.surface
+    }
+
+    /// Slits normal, detector frame.
+    pub fn normal(&self) -> Unit<Vector3<f64>> {
+        self.normal
+    }
+}
+
 /// Which axes the inverse writes and the equations that fix them, checked
 /// against the geometry it borrows, so it cannot outlive or be applied to
 /// another one.
@@ -57,6 +94,7 @@ pub struct Mode<'g> {
     written: Vec<usize>,
     extra: Vec<Equation>,
     kappa: Option<KappaAxes>,
+    slits: Option<Slits>,
 }
 
 /// The axis at `index` and its direction; rotations only.
@@ -150,6 +188,17 @@ impl Equation {
                 reference(normal, "surface normal")?;
                 finite(&[*angle], "surface angle")
             }
+            Self::Emergence { surface, emergence } => {
+                reference(surface, "emergence surface")?;
+                finite(&[*emergence], "emergence")?;
+                if emergence.abs() <= FRAC_PI_2 {
+                    Ok(())
+                } else {
+                    Err(InverseError::EmergenceRange {
+                        emergence: *emergence,
+                    })
+                }
+            }
         }
     }
 }
@@ -212,6 +261,43 @@ impl<'g> Mode<'g> {
             written: written.to_vec(),
             extra,
             kappa,
+            slits: None,
+        })
+    }
+
+    /// The mode with [`Slits`] on `axis`, a detector axis it does not
+    /// write; each solution then comes once per slits root, or with the
+    /// slits at `current` where the surface lies along `axis` and every
+    /// value is a root.
+    pub fn with_slits(
+        self,
+        axis: usize,
+        surface: Vector3<f64>,
+        normal: Vector3<f64>,
+    ) -> Result<Self, InverseError> {
+        let detector = self.geometry.detector_stack();
+        in_stack(self.geometry, axis, detector, "detector")?;
+        let (turning, u) = rotation(self.geometry, axis)?;
+        let about_beam = u.cross(&self.geometry.beam_direction()) == Vector3::zeros();
+        if detector.last() != Some(&axis) || !about_beam {
+            return Err(InverseError::SlitsMoveDetector {
+                name: turning.name().to_owned(),
+            });
+        }
+        if self.written.contains(&axis) {
+            return Err(InverseError::WrittenTwice {
+                name: turning.name().to_owned(),
+            });
+        }
+        reference(&surface, "slits surface")?;
+        reference(&normal, "slits normal")?;
+        Ok(Self {
+            slits: Some(Slits {
+                axis,
+                surface: Unit::new_normalize(surface),
+                normal: Unit::new_normalize(normal),
+            }),
+            ..self
         })
     }
 
@@ -265,5 +351,9 @@ impl<'g> Mode<'g> {
 
     pub fn kappa(&self) -> Option<&KappaAxes> {
         self.kappa.as_ref()
+    }
+
+    pub fn slits(&self) -> Option<&Slits> {
+        self.slits.as_ref()
     }
 }

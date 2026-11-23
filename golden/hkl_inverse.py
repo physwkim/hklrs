@@ -9,11 +9,17 @@ called from the start axes. Every returned solution is recorded in hkl's order
 forward hkl, and the residuals of the mode's own constraint.
 The C solver restarts with libc rand(); srand() is seeded per call through
 ctypes so the output is reproducible.
-Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c, -e6c.c, -k4c.c,
--k6c.c, -zaxis.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
-_psi_constant_*); the ESRF BM28 and ID01 PSIC modes only hold axes. Only
-hkl's own GError is recorded as a case error; a failure of the recording
-itself raises.
+Mode residual sources (C pin 7be4f79, hkl/): hkl-engine-e4c.c (E4CV, E4CH and
+SOLEIL MARS), -e6c.c, -k4c.c,
+-k6c.c, -zaxis.c, -aps-04id-polar.c, -petra3-p09-eh2.c, -petra3-p23-4c.c,
+-petra3-p23-6c.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
+_psi_constant_*, _emergence_fixed_func), -soleil-sixs-med.c; the ESRF BM28
+and ID01 PSIC, SOLEIL SIRIUS TURRET and NANOSCOPIUM ROBOT modes only hold
+axes. SOLEIL SIXS MED2+3, and MED2+3 v2 with
+its engine-list parameter eta_a_rotation = 1, refit eta_a after the solve
+(the list's multiply, soleil-sixs-med.c:294); those cases name it in
+fitted_axes. Only hkl's own GError is recorded as a case error; a failure of
+the recording itself raises.
 """
 import ctypes
 import json
@@ -36,9 +42,16 @@ WL = 1.54
 N_TARGETS = 40
 N_UNREACH = 4
 TOL = 1e-6
+HKL_EPSILON = 1e-6  # hkl.h:49
 GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
-              "ESRF ID01 PSIC"]
-PARAM_MODES = ("double_diffraction", "psi_constant", "constant_incidence")
+              "ESRF ID01 PSIC", "SOLEIL SIXS MED2+2", "SOLEIL SIXS MED1+2",
+              "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS",
+              "APS POLAR", "PETRA3 P09 EH2", "PETRA3 P23 4C",
+              "PETRA3 P23 6C", "SOLEIL SIRIUS TURRET", "SOLEIL NANOSCOPIUM ROBOT"]
+# Engine-list parameter sets run per geometry; [] where the list has none.
+LIST_PARAMS = {"SOLEIL SIXS MED2+3 v2": [[0.0], [1.0]]}
+PARAM_MODES = ("double_diffraction", "psi_constant", "psi constant",
+               "constant_incidence", "emergence_fixed")
 UNIT = {"Degree": ("rot", 1.0), "Milli Radian": ("rot", math.pi / 180.0 * 1000.0),
         "Milli Meter": ("trans", 1.0), "Meter": ("trans", 1e-3)}
 ALPHA = math.radians(50.0)  # kappa angle of the 4-circle kappa geometries
@@ -63,8 +76,15 @@ def rs_rd(geo, smp, det):
             np.array(mat(geo.detector_rotation_get(det).to_matrix())))
 
 
+def fitted_axes(gname, list_params):
+    """Axes hkl refits after the solve: eta_a, soleil-sixs-med.c:545 and :661-680."""
+    if gname == "SOLEIL SIXS MED2+3" or (gname == "SOLEIL SIXS MED2+3 v2" and list_params == [1.0]):
+        return ["eta_a"]
+    return []
+
+
 class Ctx:
-    def __init__(self, gname, rng):
+    def __init__(self, gname, rng, list_params=()):
         self.gname = gname
         self.fac = Hkl.factories()[gname]
         self.geo = self.fac.create_new_geometry()
@@ -80,11 +100,14 @@ class Ctx:
         self.smp.U_set(Hkl.Matrix.new_euler(*(math.radians(v) for v in e)))
         self.el = self.fac.create_new_engine_list()
         self.el.init(self.geo, self.det, self.smp)
+        self.list_params = list(list_params)
+        if self.list_params:
+            self.el.parameters_values_set(self.list_params, USER)
         self.eng = self.el.engine_get_by_name("hkl")
-        engines = [e.name_get() for e in self.el.engines_get()]
-        self.psi_eng = self.el.engine_get_by_name("psi") if "psi" in engines else None
         self.ub = np.array(mat(self.smp.UB_get()))
-        self.ranges = {n: [v / UNIT[u][1] for v in self.geo.axis_get(n).min_max_get(USER)]
+        # null: hkl's unlimited +-DBL_MAX (a length in m) overflows in mm
+        self.ranges = {n: [c if math.isfinite(c) else None
+                           for c in (v / UNIT[u][1] for v in self.geo.axis_get(n).min_max_get(USER))]
                        for n, u in zip(self.names, self.units)}
 
     def to_user(self, canon):
@@ -132,6 +155,8 @@ def mode_params(ctx, rng, mode, random_set):
             out.append(rng.uniform(0, 30))
         elif n == "azimuth":
             out.append(rng.uniform(0, 180))
+        elif n == "emergence":
+            out.append(rng.uniform(-30, 30))
         else:
             out.append(v)
     # keep the reference vectors non-null
@@ -166,16 +191,21 @@ def kappa_derived(a):
 
 
 def psi_of(ctx, h2, geo):
-    """psi from hkl's read-only "psi" engine, whose reference is h2k2l2, for geometry geo."""
-    if ctx.psi_eng is None:
+    """psi (deg) of h2k2l2 as hkl_psi_write computes it (common.c:143), None where Q or the projection
+    of h2k2l2 normal to Q is null: the angle about Q from n = (kf x ki) x Q to that projection."""
+    rs, rd = rs_rd(geo, ctx.smp, ctx.det)
+    ki = np.array([2 * math.pi / WL, 0, 0])
+    kf = rd @ ki
+    q = kf - ki
+    if np.linalg.norm(q) <= HKL_EPSILON:
         return None
-    ctx.geo.axis_values_set(list(geo.axis_values_get(USER)), USER)
-    ctx.el.get()
-    cur = ctx.psi_eng.current_mode_get()
-    if ctx.psi_eng.parameters_names_get():
-        ctx.psi_eng.parameters_values_set([float(x) for x in h2], USER)
-    ctx.el.get()
-    return float(ctx.psi_eng.pseudo_axis_values_get(USER)[0])
+    q /= np.linalg.norm(q)
+    n = np.cross(np.cross(kf, ki), q)
+    h = rs @ ctx.ub @ np.array(h2, float)
+    h -= (h @ q) * q
+    if np.linalg.norm(h) <= HKL_EPSILON:
+        return None
+    return math.degrees(math.atan2(np.cross(n, h) @ q, n @ h))
 
 
 def incidence_of(ctx, geo, n, init_geo):
@@ -192,17 +222,36 @@ def incidence_of(ctx, geo, n, init_geo):
     return math.degrees(inc), math.degrees(ang(proj, np.array([0.0, 1, 0])))
 
 
-def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable):
+def emergence_of(ctx, geo, n):
+    """emergence (deg) as hkl_emergence_fixed_write computes it (common.c:199, readonly-private.h:49)."""
+    rs, rd = rs_rd(geo, ctx.smp, ctx.det)
+    nv = rs @ np.array(n, float)
+    kf = rd @ np.array([1.0, 0, 0])
+    c = nv @ kf / (np.linalg.norm(nv) * np.linalg.norm(kf))
+    return math.degrees(math.pi / 2 - math.acos(max(-1.0, min(1.0, c))))
+
+
+def slits_of(ctx, geo):
+    """Angle (deg) of the slits normal from the surface plane: asin of slits_func's f (soleil-sixs-med.c:221)."""
+    rs, rd = rs_rd(geo, ctx.smp, ctx.det)
+    f = (rs @ np.array([0.0, -1, 0])) @ (rd @ np.array([0.0, 0, 1]))
+    return math.degrees(math.asin(max(-1.0, min(1.0, f))))
+
+
+def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable, fitted):
     """Residuals of the mode's own constraint (deg or reciprocal units).
 
     Axes absent from the mode's writable list must keep their start value
-    (hkl-pseudoaxis-auto.c: only axes_w are solved). Mode formulas cite the C
+    (hkl-pseudoaxis-auto.c: only axes_w are solved), but for the fitted ones,
+    whose slits must be normal to the surface instead. Mode formulas cite the C
     functions (pin 7be4f79).
     """
     g = ctx.gname
     n = dict(zip(ctx.names, sol))
     s = dict(zip(ctx.names, start))
-    r = {f"fixed:{a}": wrap(n[a] - s[a]) for a in ctx.names if a not in writable}
+    r = {f"fixed:{a}": wrap(n[a] - s[a]) for a in ctx.names if a not in writable + fitted}
+    if fitted:
+        r["slits"] = slits_of(ctx, geo_sol)
     kappa = g in ("K4CV", "K6C")
     if kappa:
         om, chi, phi = kappa_derived([n["komega"], n["kappa"], n["kphi"]])
@@ -210,14 +259,27 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable):
         om, chi, phi = (n.get(a) for a in ("omega", "chi", "phi"))
     pv = dict(zip(ctx.eng.parameters_names_get(), par))
     horiz = mode.endswith("horizontal")
-    tth = n["tth"] if g in ("E4CV", "E4CH", "K4CV") else n["delta"]
-    if mode in ("bissector", "bissector_vertical"):
-        r["tth-2*omega"] = wrap(tth - 2 * om)  # e4c.c:38, e6c.c:61, k4c.c:68, k6c.c:204
-    if mode == "reflectivity":
+    tth = n["tth"] if g in ("E4CV", "E4CH", "K4CV", "SOLEIL MARS") else n["delta"]
+    # petra3-p23-4c.c:39,81: its bissector modes solve the hkl equations only
+    bissect = g != "PETRA3 P23 4C"
+    if bissect and mode in ("bissector", "bissector_vertical"):
+        r["tth-2*omega"] = wrap(tth - 2 * om)  # e4c.c:38, e6c.c:61, k4c.c:68, k6c.c:204, p23-6c.c:70
+    if mode == "reflectivity" and g == "ZAXIS":
         r["mu-gamma"] = n["mu"] - n["gamma"]  # zaxis.c:60, unwrapped as hkl solves it
-    if mode == "bissector_horizontal":
-        r["omega mod 180"] = wrap(om, 180.0)  # e6c.c:50, k6c.c:70
-        r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # e6c.c:51, k6c.c:80
+    if mode == "reflectivity" and g == "SOLEIL SIXS MED2+2":
+        # soleil-sixs-med.c:52; the range shift moves gamma by 360 without mu
+        r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])
+    if g == "APS POLAR" and mode == "4-circles bissecting horizontal":
+        r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # aps-04id-polar.c:157
+    if g == "APS POLAR" and mode == "zaxis + alpha=beta":
+        r["tau-delta"] = wrap(n["tau"] - n["delta"])  # aps-04id-polar.c:123
+    if g == "PETRA3 P09 EH2" and mode == "4-circles bissecting horizontal":
+        r["delta-2*omega"] = wrap(n["delta"] - 2 * n["omega"])  # petra3-p09-eh2.c:110
+    if g == "PETRA3 P09 EH2" and mode == "zaxis + alpha=beta":
+        r["mu-gamma"] = wrap(n["mu"] - n["gamma"])  # petra3-p09-eh2.c:75
+    if bissect and mode == "bissector_horizontal":
+        r["omega mod 180"] = wrap(om, 180.0)  # e6c.c:50, k6c.c:70, p23-6c.c:51
+        r["gamma-2*mu"] = wrap(n["gamma"] - 2 * n["mu"])  # e6c.c:51, k6c.c:80, p23-6c.c:52
     if kappa:
         # f1/f2 branches differ by omega+-180, phi+-180, chi sign (k4c.c:127-285)
         if mode in ("constant_omega", "constant_omega_vertical"):
@@ -238,7 +300,7 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable):
         k = 2 * math.pi / WL
         v = rs @ ctx.ub @ np.array([pv["h2"], pv["k2"], pv["l2"]], float) + np.array([k, 0, 0])
         r["|R.UB.h2+ki|^2-|ki|^2"] = float(v @ v - k * k)  # common-hkl.c:512 (f[3])
-    if mode.startswith("psi_constant"):
+    if mode.startswith(("psi_constant", "psi constant")):
         ps = psi_of(ctx, [pv["h2"], pv["k2"], pv["l2"]], geo_sol)
         if ps is not None:
             r["psi-psi0"] = wrap(ps - pv["psi"])  # common-hkl.c:567
@@ -246,6 +308,9 @@ def constraints(ctx, mode, par, start, sol, geo_sol, init_geo, writable):
         inc, az = incidence_of(ctx, geo_sol, [pv["x"], pv["y"], pv["z"]], init_geo)
         r["incidence-incidence0"] = wrap(inc - pv["incidence"])  # k6c.c:322
         r["azimuth-azimuth0"] = wrap(az - pv["azimuth"])
+    if mode == "emergence_fixed":
+        e = emergence_of(ctx, geo_sol, [pv["x"], pv["y"], pv["z"]])
+        r["emergence-emergence0"] = wrap(e - pv["emergence"])  # common-hkl.c:767
     return r
 
 
@@ -256,6 +321,11 @@ def one_case(ctx, mode, params, target, start, unreachable, c_seed):
             "UB": ctx.ub.tolist(), "axis_ranges": ctx.ranges,
             "start_axes": named(ctx, start), "target_hkl": list(target),
             "unreachable_by_q": unreachable, "c_srand": c_seed}
+    if ctx.list_params:
+        case["engine_list_parameters"] = dict(zip(ctx.el.parameters_names_get(), ctx.list_params))
+    fitted = fitted_axes(ctx.gname, ctx.list_params)
+    if fitted:
+        case["fitted_axes"] = fitted
     try:
         enter_mode(ctx, mode, params, start)
         init_geo = ctx.geo.copy()
@@ -277,16 +347,21 @@ def one_case(ctx, mode, params, target, start, unreachable, c_seed):
         ent["hkl_engine"] = ctx.forward_hkl(canon)
         ent["hkl_numpy"] = ctx.forward_numpy(gs)
         ent["hkl_miss"] = float(np.abs(np.array(ent["hkl_engine"]) - np.array(target)).max())
-        ent["constraint_resid"] = constraints(ctx, mode, params, start, canon, gs, init_geo, case["writable_axes"])
+        ent["constraint_resid"] = constraints(ctx, mode, params, start, canon, gs, init_geo,
+                                              case["writable_axes"], fitted)
         out.append(ent)
     case["solutions"] = out
     return case
 
 
 def fixed_values(ctx, rng, writable):
-    """Value of every axis the mode does not solve: 0 for mu/gamma/delta/omega, seeded +-60 otherwise."""
-    return {n: (0.0 if n in ("mu", "gamma", "delta", "omega") else rng.uniform(-60, 60))
-            for n in ctx.names if n not in writable}
+    """Value of every axis the mode does not solve: 0 for mu/gamma/delta/omega, seeded +-60 otherwise.
+
+    PETRA3 P09 EH2's mu tilts both stacks, as APS POLAR's tau does, and is seeded like it: at 0
+    with omega it would turn chi about the beam, where "lifting detector chi" is degenerate.
+    """
+    zero = ("gamma", "delta", "omega") + (() if ctx.gname == "PETRA3 P09 EH2" else ("mu",))
+    return {n: (0.0 if n in zero else rng.uniform(-60, 60)) for n in ctx.names if n not in writable}
 
 
 def make_start(ctx, rng, writable, fixed, prev, near):
@@ -346,8 +421,11 @@ def targets_for(ctx, rng, mode, params, writable, fixed):
 
 def main():
     cases, geoms, summary = [], {}, {}
-    for gname in GEOMETRIES:
-        ctx0 = Ctx(gname, random.Random(f"{SEED}-{gname}-U"))
+    runs = [(g, lp) for g in GEOMETRIES for lp in LIST_PARAMS.get(g, [[]])]
+    for gname, list_params in runs:
+        # the rng keys of a geometry without list parameters are unchanged
+        key = gname + "".join(f"-{v:g}" for v in list_params)
+        ctx0 = Ctx(gname, random.Random(f"{SEED}-{gname}-U"), list_params)
         geoms[gname] = {"axes": ctx0.names, "units": ctx0.units, "ranges": ctx0.ranges,
                         "U_euler_deg": ctx0.u_euler, "UB": ctx0.ub.tolist(),
                         "lattice": dict(LATTICE), "wavelength": WL,
@@ -357,8 +435,9 @@ def main():
             if mode.startswith(PARAM_MODES):
                 sets.append(("random", True))
             for label, rand_p in sets:
-                rng = random.Random(f"{SEED}-{gname}-{mode}-{label}")
-                ctx = Ctx(gname, random.Random(f"{SEED}-{gname}-U"))  # same U for every mode
+                rng = random.Random(f"{SEED}-{key}-{mode}-{label}")
+                # same U for every mode
+                ctx = Ctx(gname, random.Random(f"{SEED}-{gname}-U"), list_params)
                 ctx.eng.current_mode_set(mode)
                 params = mode_params(ctx, rng, mode, rand_p)
                 writable = list(ctx.eng.axis_names_get(Hkl.EngineAxisNamesGet.WRITE))
@@ -375,12 +454,12 @@ def main():
                     cases.append(c)
                     if c["solutions"]:
                         prev = c["solutions"][0]["axes"]
-                    summary.setdefault((gname, mode, label), []).append(c)
+                    summary.setdefault((key, mode, label), []).append(c)
     doc = {"hkl_version": Hkl.VERSION, "seed": SEED,
            "units": {"angle": "deg", "length": "mm", "wavelength": "angstrom", "hkl": "r.l.u."},
            "tolerance_hkl_miss": TOL, "geometries": geoms, "cases": cases}
     with open(OUT, "w") as f:
-        json.dump(doc, f, indent=1)
+        json.dump(doc, f, indent=1, allow_nan=False)
         f.write("\n")
     print("wrote", OUT, "cases", len(cases))
     miss, viol, bad_unreach = [], [], []
