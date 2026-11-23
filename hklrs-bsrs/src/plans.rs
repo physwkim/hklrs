@@ -8,8 +8,8 @@ use bsrs::core::msg::{MovableObj, NamedObj, ReadableObj};
 use bsrs::core::{Msg, Plan, plan_box};
 use bsrs::plans::list_scan_nd;
 use bsrs::plans::preprocessors::msg_mutator;
-use bsrs::plans::stubs::mv_many;
-use futures::{StreamExt, stream, try_join};
+use bsrs::plans::stubs::mv;
+use futures::{StreamExt, stream};
 use hklrs::nalgebra::{Unit, UnitQuaternion, Vector3};
 use hklrs::{Lattice, ModeSpec, PARALLEL_SIN};
 use serde_json::{Map, Value, json};
@@ -95,13 +95,7 @@ pub fn psi_scan(
 /// Moves the reals to `hkl` in the device's mode, closest to their
 /// readbacks, and makes `hkl` the pseudo axes' setpoint. Opens no run.
 pub fn mv_hkl(dx: Arc<Diffractometer>, hkl: [f64; 3]) -> Plan {
-    once("mv_hkl", async move {
-        let (current, wavelength) = try_join!(dx.positions(), dx.wavelength())?;
-        let values = dx.inverse(hkl, &current, wavelength)?;
-        dx.set_target(Some(hkl));
-        let moves = dx.reals().iter().map(|r| r.clone() as Arc<dyn MovableObj>);
-        Ok(mv_many(moves.zip(values).collect()))
-    })
+    mv(Arc::new(dx.hkl_move(hkl)), 0.0)
 }
 
 enum Trajectory {
@@ -259,7 +253,7 @@ fn scan(
             ("plan_args".to_owned(), args),
         ]);
         // the reals move outside the pseudo axes from here
-        dx.set_target(None);
+        dx.clear_target().await;
         let axes = dx.reals().iter().enumerate().map(|(i, r)| {
             let column = solved.iter().map(|values| values[i]).collect();
             (

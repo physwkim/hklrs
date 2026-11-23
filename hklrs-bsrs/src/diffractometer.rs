@@ -249,13 +249,25 @@ pub(crate) fn configuration(
     CONFIG.iter().map(|c| c.0).zip(values).collect()
 }
 
+/// Where a [`Diffractometer::move_to`] goes.
+pub(crate) enum Setpoint {
+    /// Component `index` replaced in the pseudo setpoint, or in the
+    /// readback h, k, l before the first move.
+    Component {
+        index: usize,
+        value: f64,
+    },
+    Hkl([f64; 3]),
+}
+
 pub struct Diffractometer {
     name: String,
     /// `reals[i]` drives `geometry.axes()[i]`.
     reals: Vec<Arc<dyn RealAxis>>,
     state: RwLock<State>,
-    /// Held by a pseudo-axis move from its setpoint through its last real's
-    /// set, so concurrent moves reach the reals in setpoint order.
+    /// Held by [`Diffractometer::move_to`] from its setpoint through its
+    /// last real's set, so concurrent moves reach the reals in setpoint
+    /// order.
     moving: futures::lock::Mutex<()>,
 }
 
@@ -312,7 +324,7 @@ impl Diffractometer {
         &self.reals
     }
 
-    fn key(&self, field: &str) -> String {
+    pub(crate) fn key(&self, field: &str) -> String {
         format!("{}_{field}", self.name)
     }
 
@@ -530,26 +542,29 @@ impl Diffractometer {
         })
     }
 
-    pub(crate) fn set_target(&self, target: Option<[f64; 3]>) {
-        self.state_mut().target = target;
+    /// Drops the pseudo setpoint once any move in flight has set its reals.
+    pub(crate) async fn clear_target(&self) {
+        let _gate = self.moving.lock().await;
+        self.state_mut().target = None;
     }
 
-    /// Replaces component `index` of the pseudo setpoint (the readback h, k,
-    /// l before the first move), solves closest to the readbacks and sets
-    /// every real; the setpoint is kept only when the solve succeeds.
-    pub(crate) async fn set_component(
-        &self,
-        index: usize,
-        value: f64,
-    ) -> Result<Status, BsrsError> {
+    /// The only move that solves and commits a pseudo setpoint: solves
+    /// `setpoint` closest to the readbacks and sets every real; the
+    /// setpoint is kept only when the solve succeeds.
+    pub(crate) async fn move_to(&self, setpoint: Setpoint) -> Result<Status, BsrsError> {
         let _gate = self.moving.lock().await;
         let (current, wavelength) = try_join!(self.positions(), self.wavelength())?;
-        let saved = self.target();
-        let mut target = match saved {
-            Some(t) => t,
-            None => self.hkl(&current, wavelength)?.into(),
+        let target = match setpoint {
+            Setpoint::Hkl(hkl) => hkl,
+            Setpoint::Component { index, value } => {
+                let mut target = match self.target() {
+                    Some(t) => t,
+                    None => self.hkl(&current, wavelength)?.into(),
+                };
+                target[index] = value;
+                target
+            }
         };
-        target[index] = value;
         let values = self.inverse(target, &current, wavelength)?;
         self.state_mut().target = Some(target);
         let sets = self.reals.iter().zip(values).map(|(r, v)| r.set_dyn(v));

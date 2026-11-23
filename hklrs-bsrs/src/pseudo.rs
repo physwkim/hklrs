@@ -1,5 +1,6 @@
 //! h, k and l as movable axes, with ophyd's pseudo-positioner semantics:
 //! a set replaces one component of the shared setpoint and moves every real.
+//! Every move goes through [`Diffractometer::move_to`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use bsrs::event_model::compose::now;
 use serde_json::json;
 
 use crate::Diffractometer;
-use crate::diffractometer::datakey;
+use crate::diffractometer::{Setpoint, datakey};
 
 pub struct PseudoAxis {
     dx: Arc<Diffractometer>,
@@ -31,6 +32,44 @@ impl Diffractometer {
             name: names.next().expect("three keys"),
         })
     }
+
+    /// A one-shot move of the whole setpoint to `hkl`.
+    pub(crate) fn hkl_move(self: &Arc<Self>, hkl: [f64; 3]) -> HklMove {
+        HklMove {
+            dx: self.clone(),
+            hkl,
+            name: self.key("hkl"),
+        }
+    }
+}
+
+/// `mv_hkl`'s move, set through the engine so a pause or the run's end
+/// stops the reals as it does for h, k and l. The engine's set carries one
+/// number; the destination is `hkl`, so the value is unused.
+pub(crate) struct HklMove {
+    dx: Arc<Diffractometer>,
+    hkl: [f64; 3],
+    name: String,
+}
+
+impl NamedObj for HklMove {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[async_trait]
+impl MovableObj for HklMove {
+    async fn set_dyn(&self, _: f64) -> Status {
+        self.dx
+            .move_to(Setpoint::Hkl(self.hkl))
+            .await
+            .unwrap_or_else(|e| Status::fail(StatusError::Failed(format!("mv_hkl: {e}"))))
+    }
+
+    async fn stop_on_pause(&self, success: bool) -> Result<(), BsrsError> {
+        self.dx.stop_reals(success).await
+    }
 }
 
 impl NamedObj for PseudoAxis {
@@ -43,7 +82,10 @@ impl NamedObj for PseudoAxis {
 impl MovableObj for PseudoAxis {
     async fn set_dyn(&self, value: f64) -> Status {
         self.dx
-            .set_component(self.index, value)
+            .move_to(Setpoint::Component {
+                index: self.index,
+                value,
+            })
             .await
             .unwrap_or_else(|e| Status::fail(StatusError::Failed(format!("{}: {e}", self.name))))
     }

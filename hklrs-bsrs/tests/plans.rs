@@ -229,18 +229,19 @@ async fn a_reader_given_twice_is_read_once() {
 #[tokio::test]
 async fn mv_hkl_moves_the_reals_and_sets_the_setpoint() {
     let dx = e4cv();
-    let run = run(mv_hkl(dx.clone(), [1.0, 0.0, 1.0])).await;
-    assert!(run.documents.is_empty());
-    run.result.unwrap();
+    let moved = run(mv_hkl(dx.clone(), [1.0, 0.0, 1.0])).await;
+    assert!(moved.documents.is_empty());
+    moved.result.unwrap();
     let at = dx.positions().await.unwrap();
     assert_close(&[at[0], at[3]], &[45.0, 90.0], 1e-9);
     assert_eq!(dx.target(), Some([1.0, 0.0, 1.0]));
 
+    // fails as an unreachable h set does, in its status, with nothing moved
+    let at = dx.positions().await.unwrap();
     let message = run_fail(mv_hkl(dx.clone(), [3.0, 0.0, 1.0])).await;
-    assert!(
-        message.contains("mv_hkl: hkl [3.0, 0.0, 1.0]: "),
-        "{message}"
-    );
+    assert!(message.contains("mv_hkl: "), "{message}");
+    assert!(message.contains("hkl [3.0, 0.0, 1.0]: "), "{message}");
+    assert_eq!(dx.positions().await.unwrap(), at);
     assert_eq!(dx.target(), Some([1.0, 0.0, 1.0]));
 }
 

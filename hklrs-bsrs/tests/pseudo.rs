@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use bsrs::backends::soft::SoftMotor;
@@ -17,8 +17,9 @@ use bsrs::engine::{DocumentSink, RunEngine};
 use hklrs::nalgebra::UnitQuaternion;
 use hklrs::presets::preset;
 use hklrs::{InverseError, Lattice, ModeSpec, Orientation, Sample, Wavelength};
-use hklrs_bsrs::{DiffError, Diffractometer, RealAxis, WavelengthSource};
+use hklrs_bsrs::{DiffError, Diffractometer, RealAxis, WavelengthSource, mv_hkl};
 use serde_json::json;
+use tokio::sync::Notify;
 
 const AXES: [&str; 4] = ["omega", "chi", "phi", "tth"];
 const LAMBDA: f64 = 1.54;
@@ -110,6 +111,82 @@ async fn concurrent_sets_reach_the_reals_in_setpoint_order() {
     b.await.unwrap();
     assert_close(&hkl(&dx).await, &[1.0, 1.0, 1.0], 1e-9);
     assert_close(&dx.target().unwrap(), &[1.0, 1.0, 1.0], 1e-12);
+}
+
+/// A soft motor whose first set waits for `release`, after signalling
+/// `entered`.
+struct Held {
+    motor: SoftMotor,
+    held: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl NamedObj for Held {
+    fn name(&self) -> &str {
+        self.motor.name()
+    }
+}
+
+#[async_trait]
+impl MovableObj for Held {
+    async fn set_dyn(&self, value: f64) -> Status {
+        if self.held.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.motor.set_dyn(value).await
+    }
+}
+
+#[async_trait]
+impl LocatableObj for Held {
+    async fn locate_dyn(&self) -> Result<DynLocation, BsrsError> {
+        self.motor.locate_dyn().await
+    }
+}
+
+#[async_trait]
+impl ReadableObj for Held {
+    async fn read_dyn(&self) -> Result<HashMap<String, ReadingValue>, BsrsError> {
+        self.motor.read_dyn().await
+    }
+
+    async fn describe_dyn(&self) -> Result<HashMap<String, DataKey>, BsrsError> {
+        self.motor.describe_dyn().await
+    }
+}
+
+#[tokio::test]
+async fn a_pseudo_set_during_mv_hkl_leaves_the_setpoint_where_the_reals_went() {
+    let omega = Arc::new(Held {
+        motor: SoftMotor::new("omega", Some(AT_001[0])),
+        held: AtomicBool::new(true),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let mut reals = soft(AT_001);
+    reals[0] = omega.clone();
+    let dx = e4cv(reals);
+    let [h, ..] = dx.hkl_axes();
+    let re = RunEngine::new(vec![]);
+    let h_set = async {
+        omega.entered.notified().await;
+        // mv_hkl is now part way through moving the reals
+        let set = async { h.set_dyn(0.5).await.await.unwrap() };
+        let release = async {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            omega.release.notify_one();
+        };
+        futures::join!(set, release);
+    };
+    let (result, ()) = futures::join!(re.run_async(mv_hkl(dx.clone(), [1.0, 0.0, 1.0])), h_set);
+    result.unwrap();
+    // the h set came second, from the setpoint mv_hkl left
+    assert_close(&dx.target().unwrap(), &[0.5, 0.0, 1.0], 1e-12);
+    assert_close(&hkl(&dx).await, &[0.5, 0.0, 1.0], 1e-9);
 }
 
 #[tokio::test]
@@ -247,11 +324,19 @@ async fn a_pause_stop_reaches_every_real() {
             .map(|c| c.clone() as Arc<dyn RealAxis>)
             .collect(),
     );
+    let stops = || -> Vec<usize> {
+        counted
+            .iter()
+            .map(|c| c.stops.load(Ordering::SeqCst))
+            .collect()
+    };
     let [_, k, _] = dx.hkl_axes();
     k.stop_on_pause(true).await.unwrap();
-    let stops: Vec<usize> = counted
-        .iter()
-        .map(|c| c.stops.load(Ordering::SeqCst))
-        .collect();
-    assert_eq!(stops, [1; 4]);
+    assert_eq!(stops(), [1; 4]);
+    // the engine stops what a run set when the run ends
+    let re = RunEngine::new(vec![]);
+    re.run_async(mv_hkl(dx.clone(), [1.0, 0.0, 1.0]))
+        .await
+        .unwrap();
+    assert_eq!(stops(), [2; 4]);
 }
