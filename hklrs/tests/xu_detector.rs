@@ -7,7 +7,7 @@ pub mod common;
 use common::{f, load, vec3};
 use hklrs::nalgebra::Unit;
 use hklrs::xu::{Area, Direction, Linear};
-use hklrs::{Deg, Geometry, PixelDetector, Wavelength, scattering};
+use hklrs::{Deg, Error, Geometry, PixelDetector, Rad, Wavelength, scattering};
 use serde_json::Value;
 
 const POS_TOL: f64 = 1e-14;
@@ -235,5 +235,46 @@ fn xu13_nav_pixel_is_the_first_pixel_of_a_pixel_0_aligned_block() {
                 }
             }
         }
+    }
+}
+
+/// XU-14: a linear row along r_i has no tilt axis. xu zeroes the NaN axis,
+/// which scales the pitch by cos(tilt); hklrs rejects the tilt, and the same
+/// row untilted keeps its pitch.
+#[test]
+fn xu14_tilted_linear_along_r_i_is_rejected_where_xu_scales_its_pitch() {
+    let doc = doc();
+    let c = &doc["linear_along_r_i"];
+    let beam = Unit::new_normalize(vec3(&doc["r_i"]));
+    let tilted = linear(&c["params"]);
+    assert_ne!(tilted.tilt.0, 0.0);
+    assert!(matches!(
+        tilted.detector(beam),
+        Err(Error::ParallelDirections { .. })
+    ));
+
+    let det = Linear {
+        tilt: Deg(0.0),
+        ..tilted.clone()
+    }
+    .detector(beam)
+    .unwrap();
+    let pitch = det.e_fast().norm();
+    assert!(
+        (pitch - tilted.pwidth).abs() <= POS_TOL,
+        "hklrs pitch {pitch}"
+    );
+    let xu = grid(&c["pos"], true).remove(0);
+    let centre = tilted.cch as usize;
+    let err = (det.pixel(0, centre).unwrap().coords - vec3(xu[centre])).norm();
+    assert!(err <= POS_TOL, "centre channel off by {err}");
+    let scaled = pitch * Rad::from(tilted.tilt).0.cos();
+    for k in 1..xu.len() {
+        let xu_pitch = (vec3(xu[k]) - vec3(xu[k - 1])).norm();
+        let err = (xu_pitch - scaled).abs();
+        assert!(
+            err <= POS_TOL,
+            "xu pitch {xu_pitch} is not cos(tilt) * {pitch}"
+        );
     }
 }

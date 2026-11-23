@@ -46,6 +46,8 @@ LINEAR = [
     ("nav_roi", dict(nav=2, roi=[1, 9])),
     ("combined", dict(dir="x-", cch=3.6, pwidth=172e-6, tilt=-7.0, nav=2, roi=[1, 7])),
 ]
+# XU-14: a tilted row along r_i has no tilt axis; xu scales its pitch by cos(tilt), hklrs rejects it.
+LINEAR_ALONG_R_I = dict(LINEAR_BASE, dir="y+", tilt=60.0)
 
 
 def conversion():
@@ -127,6 +129,8 @@ def main():
                       lambda p: dict(p, nav=[1, 1], roi=None)) for n, d in AREA],
         "linear": [case(n, dict(LINEAR_BASE, **d), linear_detector, linear_reference,
                         lambda p: dict(p, nav=1, roi=None)) for n, d in LINEAR],
+        "linear_along_r_i": {"params": LINEAR_ALONG_R_I,
+                             "pos": linear_detector(LINEAR_ALONG_R_I)[0].tolist()},
     }
     with open(OUT, "w") as f:
         json.dump(doc, f, indent=1)
