@@ -345,9 +345,13 @@ def one_case(ctx, mode, params, target, start, unreachable, c_seed):
 
 
 def fixed_values(ctx, rng, writable):
-    """Value of every axis the mode does not solve: 0 for mu/gamma/delta/omega, seeded +-60 otherwise."""
-    return {n: (0.0 if n in ("mu", "gamma", "delta", "omega") else rng.uniform(-60, 60))
-            for n in ctx.names if n not in writable}
+    """Value of every axis the mode does not solve: 0 for mu/gamma/delta/omega, seeded +-60 otherwise.
+
+    PETRA3 P09 EH2's mu tilts both stacks, as APS POLAR's tau does, and is seeded like it: at 0
+    with omega it would turn chi about the beam, where "lifting detector chi" is degenerate.
+    """
+    zero = ("gamma", "delta", "omega") + (() if ctx.gname == "PETRA3 P09 EH2" else ("mu",))
+    return {n: (0.0 if n in zero else rng.uniform(-60, 60)) for n in ctx.names if n not in writable}
 
 
 def make_start(ctx, rng, writable, fixed, prev, near):
