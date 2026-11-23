@@ -30,20 +30,26 @@ pub enum Masked {
     /// The weight is not a positive finite number: the path transmits
     /// nothing in f64.
     Opaque,
+    /// No solid angle: the pixel is seen edge-on from the sample.
+    EdgeOn,
+    /// No polarisation factor: the beam's field allows no scattering
+    /// towards the pixel.
+    Extinct,
 }
 
-/// An absorption weight, positive and finite by construction, so the
+/// A per-pixel weight, positive and finite by construction, so the
 /// correction can always divide by it.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct Weight(f64);
 
 impl Weight {
-    /// The one gate every weight passes.
-    fn new(value: f64) -> Result<Self, Masked> {
+    /// The one gate every weight passes: anything else is masked as
+    /// `otherwise`.
+    pub(crate) fn new(value: f64, otherwise: Masked) -> Result<Self, Masked> {
         if value > 0.0 && value.is_finite() {
             Ok(Self(value))
         } else {
-            Err(Masked::Opaque)
+            Err(otherwise)
         }
     }
 
@@ -54,7 +60,7 @@ impl Weight {
     /// The product of two weights, such as the sample and detector sides,
     /// which can underflow where neither factor does.
     pub fn times(self, other: Self) -> Result<Self, Masked> {
-        Self::new(self.0 * other.0)
+        Self::new(self.0 * other.0, Masked::Opaque)
     }
 }
 
@@ -340,7 +346,7 @@ impl SlabFrame {
         } else {
             return Err(Masked::GrazingExit);
         };
-        Weight::new(lit.footprint * path)
+        Weight::new(lit.footprint * path, Masked::Opaque)
     }
 }
 
@@ -392,7 +398,7 @@ impl DetectorPath {
             .map_or(1.0, |mu| (-mu.per_metre() * distance).exp());
         let window = self.window.map_or(1.0, |w| (-w.depth(cos)).exp());
         let sensor = self.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1());
-        Ok(Weight::new(air * window * sensor))
+        Ok(Weight::new(air * window * sensor, Masked::Opaque))
     }
 }
 
@@ -773,12 +779,12 @@ mod tests {
     #[test]
     fn weight_masks_what_is_not_a_positive_finite_number() {
         for v in [0.0, -0.0, -1.0, f64::INFINITY, f64::NAN] {
-            assert_eq!(Weight::new(v), Err(Masked::Opaque), "{v}");
+            assert_eq!(Weight::new(v, Masked::Opaque), Err(Masked::Opaque), "{v}");
         }
         for v in [f64::from_bits(1), 1.0, f64::MAX] {
-            assert_eq!(Weight::new(v).map(Weight::get), Ok(v));
+            assert_eq!(Weight::new(v, Masked::Opaque).map(Weight::get), Ok(v));
         }
-        let small = Weight::new(1e-200).unwrap();
+        let small = Weight::new(1e-200, Masked::Opaque).unwrap();
         assert_eq!(small.times(small), Err(Masked::Opaque));
     }
 

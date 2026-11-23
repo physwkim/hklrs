@@ -6,6 +6,7 @@
 use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 
+use crate::absorption::{Masked, Weight};
 use crate::{Error, Geometry, PixelDetector, Poses, Scattering, Wavelength, scattering_at};
 
 /// Axis values (axis order, radians / metres) and wavelength of one frame.
@@ -42,18 +43,19 @@ impl Planes {
 
 /// Fills `N` planes of `detector`'s shape, one rayon task per row. `f` sees
 /// the frame's poses, the lab-frame sample-to-pixel vector and the kernel's
-/// [`Scattering`] for each pixel.
-fn fill<const N: usize>(
+/// [`Scattering`] for each pixel; it overwrites `blank` at every pixel.
+fn fill<T: Copy + Send, const N: usize>(
     geometry: &Geometry,
     frame: &Frame,
     detector: &PixelDetector,
-    f: impl Fn(&Poses, &Vector3<f64>, &Scattering) -> [f64; N] + Sync,
-) -> Result<[Vec<f64>; N], Error> {
+    blank: T,
+    f: impl Fn(&Poses, &Vector3<f64>, &Scattering) -> [T; N] + Sync,
+) -> Result<[Vec<T>; N], Error> {
     let (slow, fast) = detector.shape();
     let poses = geometry.poses(&frame.values)?;
-    let mut planes: [Vec<f64>; N] = std::array::from_fn(|_| vec![0.0; slow * fast]);
+    let mut planes: [Vec<T>; N] = std::array::from_fn(|_| vec![blank; slow * fast]);
     let mut chunks: Vec<_> = planes.iter_mut().map(|p| p.chunks_mut(fast)).collect();
-    let rows: Vec<[&mut [f64]; N]> = (0..slow)
+    let rows: Vec<[&mut [T]; N]> = (0..slow)
         .map(|_| std::array::from_fn(|k| chunks[k].next().expect("one chunk per row")))
         .collect();
     rows.into_par_iter()
@@ -77,7 +79,7 @@ fn planes3(shape: (usize, usize), [x, y, z]: [Vec<f64>; 3]) -> Planes {
 
 /// Q in the sample frame for every pixel.
 pub fn q_map(geometry: &Geometry, frame: &Frame, detector: &PixelDetector) -> Result<QMap, Error> {
-    let planes = fill(geometry, frame, detector, |_, _, s| s.q_sample.into())?;
+    let planes = fill(geometry, frame, detector, 0.0, |_, _, s| s.q_sample.into())?;
     Ok(planes3(detector.shape(), planes))
 }
 
@@ -88,15 +90,17 @@ pub fn detector_positions(
     frame: &Frame,
     detector: &PixelDetector,
 ) -> Result<Planes, Error> {
-    let planes = fill(geometry, frame, detector, |_, p, _| (*p).into())?;
+    let planes = fill(geometry, frame, detector, 0.0, |_, p, _| (*p).into())?;
     Ok(planes3(detector.shape(), planes))
 }
 
-/// One f64 per pixel, row-major (slow, fast).
+/// One weight per pixel, row-major (slow, fast): a positive finite
+/// [`Weight`], or the reason the pixel has none, so a masked pixel holds no
+/// number to read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Weights {
     shape: (usize, usize),
-    pub data: Vec<f64>,
+    pub data: Vec<Result<Weight, Masked>>,
 }
 
 impl Weights {
@@ -105,13 +109,16 @@ impl Weights {
     }
 
     /// The weight at pixel (slow, fast); panics outside the shape.
-    pub fn get(&self, slow: usize, fast: usize) -> f64 {
+    pub fn get(&self, slow: usize, fast: usize) -> Result<Weight, Masked> {
         assert!(slow < self.shape.0 && fast < self.shape.1);
         self.data[slow * self.shape.1 + fast]
     }
 }
 
-fn weights(shape: (usize, usize), [data]: [Vec<f64>; 1]) -> Weights {
+/// Every pixel overwrites it.
+const BLANK: Result<Weight, Masked> = Err(Masked::Opaque);
+
+fn weights(shape: (usize, usize), [data]: [Vec<Result<Weight, Masked>>; 1]) -> Weights {
     Weights { shape, data }
 }
 
@@ -119,7 +126,7 @@ fn weights(shape: (usize, usize), [data]: [Vec<f64>; 1]) -> Weights {
 /// the pixel area vector rotated by the detector pose. A detector whose
 /// steps span no area (a point, or a linear detector built with a zero
 /// `e_slow` rather than a pixel height) has none and gets
-/// [`Error::NoPixelArea`].
+/// [`Error::NoPixelArea`]; a pixel seen edge-on is [`Masked::EdgeOn`].
 pub fn solid_angle(
     geometry: &Geometry,
     frame: &Frame,
@@ -131,8 +138,9 @@ pub fn solid_angle(
     if norm.is_nan() || norm <= 0.0 {
         return Err(Error::NoPixelArea { shape });
     }
-    let data = fill(geometry, frame, detector, |poses, p, s| {
-        [(poses.detector.rotation * area).dot(&s.kf).abs() / p.norm_squared()]
+    let data = fill(geometry, frame, detector, BLANK, |poses, p, s| {
+        let omega = (poses.detector.rotation * area).dot(&s.kf).abs() / p.norm_squared();
+        [Weight::new(omega, Masked::EdgeOn)]
     })?;
     Ok(weights(shape, data))
 }
@@ -142,7 +150,8 @@ pub fn solid_angle(
 /// degree `factor` (1 fully along `e`, 0 unpolarised, −1 fully across):
 /// `P = ½(1+f)(1−(ê·k̂f)²) + ½(1−f)(1−(ê⊥·k̂f)²)`, ê⊥ = k̂i × ê. With
 /// `e` the horizontal direction this is pyFAI's
-/// `½(1 + cos²2θ − f cos 2χ sin²2θ)`.
+/// `½(1 + cos²2θ − f cos 2χ sin²2θ)`. Where it vanishes the pixel is
+/// [`Masked::Extinct`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Polarisation {
     pub e: Vector3<f64>,
@@ -171,10 +180,11 @@ pub fn polarisation(
     }
     let e = e / norm;
     let across = ki.cross(&e);
-    let data = fill(geometry, frame, detector, |_, _, s| {
+    let data = fill(geometry, frame, detector, BLANK, |_, _, s| {
         let kf = s.kf.into_inner();
-        [0.5 * (1.0 + f) * (1.0 - e.dot(&kf).powi(2))
-            + 0.5 * (1.0 - f) * (1.0 - across.dot(&kf).powi(2))]
+        let p = 0.5 * (1.0 + f) * (1.0 - e.dot(&kf).powi(2))
+            + 0.5 * (1.0 - f) * (1.0 - across.dot(&kf).powi(2));
+        [Weight::new(p, Masked::Extinct)]
     })?;
     Ok(weights(detector.shape(), data))
 }
@@ -274,12 +284,15 @@ mod tests {
         PixelDetector::point(Unit::new_normalize(direction.into()), 0.5).unwrap()
     }
 
-    fn one(g: &Geometry, d: &PixelDetector, pol: Polarisation) -> f64 {
+    fn one(g: &Geometry, d: &PixelDetector, pol: Polarisation) -> Result<f64, Masked> {
         let f = Frame {
             values: vec![0.0],
             wavelength: Wavelength::new(1.0).unwrap(),
         };
-        polarisation(g, &f, d, pol).unwrap().get(0, 0)
+        polarisation(g, &f, d, pol)
+            .unwrap()
+            .get(0, 0)
+            .map(Weight::get)
     }
 
     fn om_only() -> Geometry {
@@ -301,14 +314,16 @@ mod tests {
             e: Vector3::z(),
             factor,
         };
-        // beam along x, in the plane means kf along y
+        // beam along x, in the plane means kf along y; along the field
+        // nothing scatters
         let inp = point_at([0.0, 1.0, 0.0]);
         let out = point_at([0.0, 0.0, 1.0]);
-        for (d, ph, pv) in [(&inp, 0.0, 1.0), (&out, 1.0, 0.0)] {
+        let (none, all) = (Err(Masked::Extinct), Ok(1.0));
+        for (d, ph, pv) in [(&inp, none, all), (&out, all, none)] {
             assert_eq!(one(&g, d, h(1.0)), ph);
             assert_eq!(one(&g, d, v(1.0)), pv);
             assert_eq!(one(&g, d, h(-1.0)), pv);
-            assert_eq!(one(&g, d, h(0.0)), 0.5);
+            assert_eq!(one(&g, d, h(0.0)), Ok(0.5));
         }
     }
 
@@ -327,7 +342,8 @@ mod tests {
                     e: Vector3::y(),
                     factor: f,
                 },
-            );
+            )
+            .unwrap();
             assert!((got - want).abs() < 1e-15, "f = {f}: {got} vs {want}");
         }
     }
@@ -358,7 +374,7 @@ mod tests {
         };
         let d = point_at([0.3, 0.8, 0.5]);
         let pol = |e| Polarisation { e, factor: 0.7 };
-        let w = |e| polarisation(&g, &f, &d, pol(e)).map(|w| w.get(0, 0));
+        let w = |e| polarisation(&g, &f, &d, pol(e)).map(|w| w.get(0, 0).unwrap().get());
         // the beam-parallel part of e and its length do not matter
         let a = w(Vector3::y()).unwrap();
         let b = w(Vector3::new(5.0, 3.0, 0.0)).unwrap();
@@ -395,11 +411,11 @@ mod tests {
         let (d, a, b) = (0.4_f64, 1e-3, 2e-3);
         let w = solid_angle(&g, &f, &flat(d, a, b)).unwrap();
         let normal = a * b / (d * d);
-        assert!((w.get(0, 0) - normal).abs() < 1e-12 * normal);
+        assert!((w.get(0, 0).unwrap().get() - normal).abs() < 1e-12 * normal);
         // pixel (3, 2) sits at (d, 2b, 3a): cos α = d / r
         let r2 = d * d + (2.0 * b).powi(2) + (3.0 * a).powi(2);
         let tilted = a * b * d / r2.powf(1.5);
-        assert!((w.get(3, 2) - tilted).abs() < 1e-12 * tilted);
+        assert!((w.get(3, 2).unwrap().get() - tilted).abs() < 1e-12 * tilted);
     }
 
     #[test]
@@ -418,7 +434,7 @@ mod tests {
         let (d, a, b) = (0.4_f64, 1e-3, 2e-3);
         let w = solid_angle(&g, &f, &flat(d, a, b)).unwrap();
         let normal = a * b / (d * d);
-        assert!((w.get(0, 0) - normal).abs() < 1e-12 * normal);
+        assert!((w.get(0, 0).unwrap().get() - normal).abs() < 1e-12 * normal);
     }
 
     #[test]
@@ -442,10 +458,10 @@ mod tests {
         let w = solid_angle(&g, &f, &row(Vector3::new(0.0, 0.0, h))).unwrap();
         assert_eq!(w.shape(), (1, 4));
         let normal = h * b / (d * d);
-        assert!((w.get(0, 0) - normal).abs() < 1e-12 * normal);
+        assert!((w.get(0, 0).unwrap().get() - normal).abs() < 1e-12 * normal);
         let r2 = d * d + (3.0 * b).powi(2);
         let tilted = h * b * d / r2.powf(1.5);
-        assert!((w.get(0, 3) - tilted).abs() < 1e-12 * tilted);
+        assert!((w.get(0, 3).unwrap().get() - tilted).abs() < 1e-12 * tilted);
         // built with a zero e_slow it has no height to give
         assert_eq!(
             solid_angle(&g, &f, &row(Vector3::zeros())),
@@ -464,6 +480,25 @@ mod tests {
             solid_angle(&g, &f, &point_at([1.0, 0.0, 0.0])),
             Err(Error::NoPixelArea { shape: (1, 1) })
         );
+    }
+
+    /// A detector plane through the sample is seen edge-on at every pixel.
+    #[test]
+    fn solid_angle_masks_a_pixel_seen_edge_on() {
+        let g = om_only();
+        let f = Frame {
+            values: vec![0.0],
+            wavelength: Wavelength::new(1.0).unwrap(),
+        };
+        let d = PixelDetector::new(
+            (2, 3),
+            Vector3::new(0.0, 0.3, 0.0),
+            Vector3::new(0.0, 0.0, 1e-3),
+            Vector3::new(0.0, 2e-3, 0.0),
+        )
+        .unwrap();
+        let w = solid_angle(&g, &f, &d).unwrap();
+        assert!(w.data.iter().all(|w| *w == Err(Masked::EdgeOn)), "{w:?}");
     }
 
     #[test]
