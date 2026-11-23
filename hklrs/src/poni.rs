@@ -12,11 +12,11 @@ mod detectors;
 
 use std::collections::{BTreeMap, HashMap};
 
-use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, Unit, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Unit, Vector3};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{Error, PixelAxis, PixelDetector, Rad, Wavelength};
+use crate::{Error, Module, PixelAxis, PixelDetector, Rad, Wavelength};
 use detectors::{Class, Grid, Layout};
 
 /// Smallest sine of the angle between `up` and the beam for them to define
@@ -73,17 +73,22 @@ pub enum Orientation {
 }
 
 impl Orientation {
+    /// Whether the image runs against pyFAI's slow and fast axis.
+    fn flips(self) -> [bool; 2] {
+        match self {
+            Orientation::TopLeft => [true, true],
+            Orientation::TopRight => [true, false],
+            Orientation::BottomRight => [false, false],
+            Orientation::BottomLeft => [false, true],
+        }
+    }
+
     /// For the slow and the fast axis: the physical index step per image
     /// index (−1 where the image runs against pyFAI's axis) and the physical
     /// index of image index 0. In f64 so that a zero shape reaches
     /// `PixelDetector::new`'s check.
     fn index_map(self, shape: (usize, usize)) -> [(f64, f64); 2] {
-        let (flip1, flip2) = match self {
-            Orientation::TopLeft => (true, true),
-            Orientation::TopRight => (true, false),
-            Orientation::BottomRight => (false, false),
-            Orientation::BottomLeft => (false, true),
-        };
+        let [flip1, flip2] = self.flips();
         let map = |flip: bool, n: usize| {
             if flip {
                 (-1.0, n as f64 - 1.0)
@@ -551,25 +556,41 @@ impl PoniFile {
 
     /// The detector pyFAI builds from the file, in the lab where `lab`
     /// places pyFAI's axes: the generic one as [`PoniFile::poni`] gives it,
-    /// a named class with the pitch, shape, default orientation and mask of
-    /// pyFAI's default instance.
+    /// a named class with the pitch or chip edges, shape, default
+    /// orientation and mask of pyFAI's default instance. An ImXPad image is
+    /// flipped as pyFAI flips it over the whole image, not as it places
+    /// pixels by index, which flips them back.
     pub fn detector(&self, lab: &LabAxes) -> Result<PixelDetector, PoniError> {
         let class = self.class()?;
-        let unsupported = |reason| PoniError::UnsupportedDetector {
-            class: class.name,
-            reason,
-        };
-        let (grid, rule) = match class.layout {
-            Layout::Generic => return self.generic()?.detector(lab),
-            Layout::Unsupported(reason) => return Err(unsupported(reason)),
-            Layout::Uniform(grid, rule) => (grid, rule),
-            Layout::Edges(grid, rule) => (grid, Some(rule)),
-        };
-        let orientation = self.orientation(class, &grid)?;
+        match class.layout {
+            Layout::Generic => self.generic()?.detector(lab),
+            Layout::Unsupported(reason) => Err(PoniError::UnsupportedDetector {
+                class: class.name,
+                reason,
+            }),
+            Layout::Uniform(grid, rule) => {
+                let det = self.named(class, &grid)?.detector(lab)?;
+                Ok(match rule {
+                    Some(rule) => det.with_mask(rule.mask(grid.shape))?,
+                    None => det,
+                })
+            }
+            Layout::Edges(grid, chips) => {
+                let det = self
+                    .named(class, &grid)?
+                    .edges_detector(chips.edges(&grid), lab)?;
+                Ok(det.with_mask(chips.mask(grid.shape))?)
+            }
+        }
+    }
+
+    /// The geometry of `class`'s default instance of `grid` in this file.
+    fn named(&self, class: &Class, grid: &Grid) -> Result<Poni, PoniError> {
+        let orientation = self.orientation(class, grid)?;
         if self.parallax {
             return Err(PoniError::Unsupported("parallax correction"));
         }
-        let poni = Poni {
+        Ok(Poni {
             dist: self.dist,
             poni1: self.poni1,
             poni2: self.poni2,
@@ -580,28 +601,6 @@ impl PoniFile {
             pixel2: grid.pixel.1,
             shape: grid.shape,
             orientation,
-        };
-        let det = match class.layout {
-            Layout::Edges(..) => {
-                let model = match class.name {
-                    "ImXPadS70" => crate::Detector::ImxpadS70,
-                    "ImXPadS140" => crate::Detector::ImxpadS140,
-                    _ => return Err(unsupported("no model of its pixel edges")),
-                };
-                // calc_pos_zyx flips both the index and the edges, so pyFAI
-                // places an ImXPad pixel by index as if in orientation 3
-                // and a whole image in the orientation given
-                if orientation != Orientation::BottomRight {
-                    return Err(unsupported("orientation other than 3"));
-                }
-                poni.place(&model.pixel_detector(), lab)?
-            }
-            _ => poni.detector(lab)?,
-        };
-        Ok(match rule {
-            // pyFAI's mask replaces the model's
-            Some(rule) => det.with_mask(rule.mask(grid.shape))?,
-            None => det,
         })
     }
 
@@ -655,27 +654,32 @@ impl PoniFile {
 }
 
 impl Poni {
-    /// `model`, a single module whose axes and pixel edges are pyFAI's, at
-    /// the place this PONI gives pyFAI's pixel (i, j): its slow axis along
-    /// pyFAI's axis 1 and its corner at pyFAI's (0, 0) edge.
-    fn place(&self, model: &PixelDetector, lab: &LabAxes) -> Result<PixelDetector, PoniError> {
-        let [m] = model.modules() else {
-            return Err(PoniError::NotRegular);
-        };
-        let (Some(s), Some(f)) = (m.slow().dir(), m.fast().dir()) else {
-            return Err(PoniError::NotRegular);
-        };
+    /// The detector of pixel `edges` along pyFAI's axes 1 and 2, metres
+    /// from pyFAI's edge 0, in place of the pitches and shape; the image
+    /// runs against an axis the orientation flips.
+    fn edges_detector(
+        &self,
+        edges: [Vec<f64>; 2],
+        lab: &LabAxes,
+    ) -> Result<PixelDetector, PoniError> {
         let r = lab.axes * rotation(self.rot1.0, self.rot2.0, self.rot3.0);
-        let (r1, r2) = (r.column(0).into_owned(), r.column(1).into_owned());
-        let to = Matrix3::from_columns(&[r1, r2, r1.cross(&r2)]);
-        let from = Matrix3::from_columns(&[*s, *f, s.cross(&f)]);
-        let q = Rotation3::from_matrix_unchecked(to * from.transpose());
-        let t = r * Vector3::new(-self.poni1, -self.poni2, self.dist) - q * m.corner().coords;
-        let motion = Isometry3::from_parts(
-            Translation3::from(t),
-            UnitQuaternion::from_rotation_matrix(&q),
-        );
-        Ok(model.transformed(&motion))
+        // pyFAI's edge at the image's edge 0, and the image's axis
+        let axis = |k: usize, e: &[f64], flip: bool| -> Result<(f64, PixelAxis), Error> {
+            let n = e.len() - 1;
+            let (start, sign) = if flip { (e[n], -1.0) } else { (e[0], 1.0) };
+            let image = (0..=n)
+                .map(|j| sign * (e[if flip { n - j } else { j }] - start))
+                .collect();
+            let dir = Unit::new_normalize(r.column(k) * sign);
+            Ok((start, PixelAxis::edges(dir, image)?))
+        };
+        let [flip1, flip2] = self.orientation.flips();
+        let (start1, slow) = axis(0, &edges[0], flip1)?;
+        let (start2, fast) = axis(1, &edges[1], flip2)?;
+        let corner = r * Vector3::new(start1 - self.poni1, start2 - self.poni2, self.dist);
+        let shape = (slow.pixel_count(), fast.pixel_count());
+        let module = Module::new((0, 0), corner.into(), slow, fast)?;
+        Ok(PixelDetector::from_modules(shape, vec![module])?)
     }
 }
 
@@ -686,7 +690,6 @@ mod tests {
     use nalgebra::Point3;
 
     use super::*;
-    use crate::Module;
 
     #[test]
     fn orientation_numbers_are_1_to_4() {

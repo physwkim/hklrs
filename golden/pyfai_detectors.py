@@ -6,12 +6,16 @@ of pyFAI.detectors, with its constructor arguments and the default instance's
 pitch, shape, max_shape, binning and orientation, and the layout hklrs gives
 it: "generic" (Detector itself), "uniform" (calc_cartesian_positions equals
 the generic Detector of that pitch, shape and orientation, both index paths,
-every orientation), "edges" (the ImXPad flat chip layout), or the reason it
-has no model. A modelled class's mask rule reproduces its calc_mask and
-Detector.mask element by element; the golden keeps a fingerprint of that mask.
-"probes" are names put to detector_factory and the class it returns; "cases"
-are a PONI file pyFAI writes for each modelled class and calc_pos_zyx of some
-of its pixels after Geometry.load.
+every orientation), "edges" (ImXPad: the chip rule gives the pixel edges of
+calc_cartesian_positions over the whole image, every orientation), or the
+reason it has no model. A modelled class's mask rule reproduces its calc_mask
+and Detector.mask element by element in every orientation; the golden keeps a
+fingerprint of that mask. "probes" are names put to detector_factory and the
+class it returns; "cases" are a PONI file pyFAI writes for a modelled class
+and, after Geometry.load, calc_pos_zyx of some of its pixels where the image
+is flipped once per orientation: by index for a uniform class, whose index
+path is its whole-image path, over the whole image for ImXPad, whose index
+path flips twice ("zyx_by_index", upstream defect FAI-2).
 
 Writes pyfai_detectors.json next to this script and the class table
 hklrs/src/poni/detectors/table.rs. Produced with pyFAI 2026.9.0, numpy 2.5.5,
@@ -93,6 +97,9 @@ def owner(cls, method):
 def mask_rule(det):
     """(rule, mask) reproducing det.calc_mask and det.mask, or (reason, None)"""
     m = det.calc_mask()
+    for o in (1, 2, 3, 4):
+        other = type(det)(orientation=o).calc_mask()
+        assert (m is None and other is None) or (numpy.asarray(m) == numpy.asarray(other)).all()
     family = owner(type(det), "calc_mask")
     if family in GAPS:
         gap = [int(g) for g in type(det).MODULE_GAP]
@@ -141,10 +148,39 @@ def same_as_generic(cls, rng):
     return True
 
 
-def flat_edges(det):
-    """ImXPad's flat layout: p1 a function of the row only, p2 of the column"""
-    p1, p2, p3 = det.calc_cartesian_positions()
-    return p3 is None and (p1 == p1[:, :1]).all() and (p2 == p2[:1, :]).all()
+def chip_edges(n, module, pitch, border):
+    """ImXPadS10._calc_pixels_size and calc_pixels_edges along one axis: the
+    pixels either side of an interior chip boundary are border pitches wide"""
+    size = numpy.ones(n)
+    for i in range(1, n // module):
+        size[i * module - 1] = size[i * module] = border
+    return numpy.concatenate([[0.0], numpy.cumsum(pitch * size)])
+
+
+def chip_layout(cls):
+    """the chip rule over max_shape and the class's pitch and module gives
+    calc_cartesian_positions of the whole image, the edges reversed along
+    each axis the orientation flips; the index path agrees in orientation 3"""
+    for o in (1, 2, 3, 4):
+        det = cls(orientation=o)
+        if (det.pixel1, det.pixel2) != tuple(cls.PIXEL_SIZE) or det.shape != det.max_shape:
+            return False
+        centres = []
+        for k, flip in ((0, o in (1, 2)), (1, o in (1, 4))):
+            e = chip_edges(det.max_shape[k], det.module_size[k], cls.PIXEL_SIZE[k],
+                           cls.BORDER_SIZE_RELATIVE)
+            e = e[::-1] if flip else e
+            centres.append(0.5 * (e[:-1] + e[1:]))
+        p1, p2, p3 = det.calc_cartesian_positions()
+        if p3 is not None or not (numpy.array_equal(p1, numpy.outer(centres[0], numpy.ones(det.shape[1])))
+                                  and numpy.array_equal(p2, numpy.outer(numpy.ones(det.shape[0]), centres[1]))):
+            return False
+        if o == 3:
+            d1, d2 = numpy.indices(det.shape).reshape(2, -1).astype(float)
+            q1, q2, _ = det.calc_cartesian_positions(d1, d2)
+            if not (numpy.array_equal(q1, p1.ravel()) and numpy.array_equal(q2, p2.ravel())):
+                return False
+    return True
 
 
 def describe(name, cls, rng):
@@ -178,8 +214,9 @@ def describe(name, cls, rng):
         return {**doc, "layout": "pixel corners"}
     if same_as_generic(cls, rng):
         layout = "uniform"
-    elif owner(cls, "calc_cartesian_positions") == "ImXPadS10" and flat_edges(det):
+    elif owner(cls, "calc_cartesian_positions") == "ImXPadS10" and chip_layout(cls):
         layout = "edges"
+        doc["border"] = cls.BORDER_SIZE_RELATIVE
     else:
         return {**doc, "layout": "non-uniform pixels"}
     rule, mask = mask_rule(det)
@@ -214,11 +251,11 @@ def probes(attributes, registry):
     return out
 
 
-def case(doc, tmp, i):
-    """a PONI file pyFAI writes for doc's class and calc_pos_zyx after load"""
+def case(doc, tmp, o):
+    """a PONI file pyFAI writes for doc's class in orientation o and
+    calc_pos_zyx after load"""
     cls = getattr(pyFAI.detectors, doc["class"], None) or next(
         c for c in ALL_DETECTORS.values() if c.__name__ == doc["class"])
-    o = 1 + i % 4 if doc["layout"] == "uniform" else 3
     det = cls(orientation=o)
     n0, n1 = det.shape
     geo = Geometry(dist=0.31, poni1=0.37 * n0 * det.pixel1, poni2=0.61 * n1 * det.pixel2,
@@ -234,11 +271,22 @@ def case(doc, tmp, i):
     back.load(path)
     assert type(back.detector) is cls and int(back.detector.orientation) == o
     pixels = [(0, 0), (n0 - 1, 0), (0, n1 - 1), (n0 - 1, n1 - 1), (n0 // 3, n1 // 2)]
-    z, y, x = back.calc_pos_zyx(d1=numpy.array([p[0] for p in pixels], dtype=float),
-                                d2=numpy.array([p[1] for p in pixels], dtype=float))
-    return {"class": doc["class"], "orientation": o, "poni": text,
-            "pixels": [list(p) for p in pixels],
-            "zyx": [[float(z[k]), float(y[k]), float(x[k])] for k in range(len(pixels))]}
+    if doc["layout"] == "edges":
+        # either side of a chip boundary
+        m0, m1 = doc["module_size"]
+        pixels += [(n0 // 3, m1 - 1), (min(m0, n0 - 1), min(m1, n1 - 1))]
+    d1 = numpy.array([p[0] for p in pixels], dtype=float)
+    d2 = numpy.array([p[1] for p in pixels], dtype=float)
+    out = {"class": doc["class"], "orientation": o, "poni": text, "pixels": [list(p) for p in pixels]}
+    by_index = back.calc_pos_zyx(d1=d1, d2=d2)
+    if doc["layout"] == "edges":
+        whole = back.calc_pos_zyx()
+        zyx = [w[d1.astype(int), d2.astype(int)] for w in whole]
+        out["zyx_by_index"] = [[float(c[k]) for c in by_index] for k in range(len(pixels))]
+    else:
+        zyx = by_index
+    out["zyx"] = [[float(c[k]) for c in zyx] for k in range(len(pixels))]
+    return out
 
 
 def rust_pair(v):
@@ -250,8 +298,7 @@ def rust_rule(rule):
         strip = "None" if rule["strip"] is None else f"Some(({rule['strip'][0]}, {rule['strip'][1]}))"
         return (f"Rule::Gaps {{ module: ({rule['module'][0]}, {rule['module'][1]}), "
                 f"gap: ({rule['gap'][0]}, {rule['gap'][1]}), strip: {strip} }}")
-    if rule["rule"] == "chips":
-        return f"Rule::Chips {{ module: ({rule['module'][0]}, {rule['module'][1]}) }}"
+    assert rule["rule"] == "disc", rule
     return "Rule::Disc"
 
 
@@ -273,7 +320,10 @@ def rust_class(c):
         rule = "None" if c["mask"] is None else f"Some({rust_rule(c['mask'])})"
         lay = f"Layout::Uniform({rust_grid(c)}, {rule})"
     elif layout == "edges":
-        lay = f"Layout::Edges({rust_grid(c)}, {rust_rule(c['mask'])})"
+        m = c["mask"]
+        assert m["rule"] == "chips" and m["module"] == c["module_size"]
+        lay = (f"Layout::Edges({rust_grid(c)}, Chips {{ module: ({m['module'][0]}, "
+               f"{m['module'][1]}), border: {c['border']!r} }})")
     else:
         lay = f'Layout::Unsupported("{layout}")'
     force = "true" if c.get("force_pixel") else "false"
@@ -284,7 +334,7 @@ def rust_class(c):
 def write_table(doc):
     lines = ["// @generated by golden/pyfai_detectors.py from pyFAI "
              f"{doc['pyfai']}; do not edit.\n",
-             "use super::{Class, Grid, Layout, Rule};\n\n",
+             "use super::{Chips, Class, Grid, Layout, Rule};\n\n",
              "/// Every class Detector.factory reaches, sorted by name.\n",
              "pub(super) static CLASSES: &[Class] = &[\n"]
     lines += [rust_class(c) for c in doc["classes"]]
@@ -322,7 +372,9 @@ def main():
         "numpy": numpy.__version__,
         "note": "pixel: repr of the default instance's pixel1, pixel2; fingerprint: "
                 "count, sum and sum of squares mod 2**64 of the row-major indices of "
-                "the masked pixels; zyx = calc_pos_zyx = (t3, t1, t2)",
+                "the masked pixels; zyx = calc_pos_zyx = (t3, t1, t2), by index for a "
+                "uniform class and from the whole image for ImXPad; zyx_by_index: "
+                "ImXPad's calc_pos_zyx(d1, d2)",
         "attributes": attributes,
         "registry": registry,
         "classes": described,
@@ -334,8 +386,10 @@ def main():
             doc["probes"] = probes(attributes, registry)
         finally:
             os.chdir(cwd)
-        modelled = [c for c in described if c["layout"] in ("uniform", "edges")]
-        doc["cases"] = [case(c, tmp, i) for i, c in enumerate(modelled)]
+        uniform = [c for c in described if c["layout"] == "uniform"]
+        doc["cases"] = [case(c, tmp, 1 + i % 4) for i, c in enumerate(uniform)]
+        doc["cases"] += [case(c, tmp, o) for c in described if c["layout"] == "edges"
+                         for o in (1, 2, 3, 4)]
     with open(OUT, "w") as f:
         json.dump(doc, f, indent=1)
         f.write("\n")

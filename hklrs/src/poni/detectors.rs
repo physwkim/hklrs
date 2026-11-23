@@ -36,9 +36,9 @@ pub(super) enum Layout {
     /// The pixels of the generic detector of the grid's pitch, shape and
     /// orientation, with the class's mask.
     Uniform(Grid, Option<Rule>),
-    /// The ImXPad chips, whose pixels either side of an interior chip
-    /// boundary are 2.5 pitches wide.
-    Edges(Grid, Rule),
+    /// The ImXPad chips, the pixels of the grid's shape and orientation at
+    /// the chips' edges.
+    Edges(Grid, Chips),
     /// Why hklrs has no model of the class.
     Unsupported(&'static str),
 }
@@ -54,12 +54,17 @@ pub(super) enum Rule {
         gap: (usize, usize),
         strip: Option<(isize, isize)>,
     },
-    /// `ImXPadS10`: the pixels either side of each chip boundary and the
-    /// outer border.
-    Chips { module: (usize, usize) },
     /// `Mar345`, `Rayonix133`, `RayonixSx165`: outside the disc of radius
     /// half the slow shape.
     Disc,
+}
+
+/// pyFAI's `ImXPadS10`: chips of `module` pixels, the pixels either side
+/// of an interior chip boundary `border` pitches wide.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Chips {
+    pub(super) module: (usize, usize),
+    pub(super) border: f64,
 }
 
 /// The value `key` maps to in a sorted table.
@@ -103,12 +108,59 @@ fn mark(line: &mut [bool], first: usize, step: usize, (lo, hi): (isize, isize)) 
     }
 }
 
+/// Row-major, the pixels in a marked row or a marked column.
+fn cross(rows: &[bool], cols: &[bool]) -> Vec<bool> {
+    let n1 = cols.len();
+    (0..rows.len() * n1)
+        .map(|k| rows[k / n1] || cols[k % n1])
+        .collect()
+}
+
+impl Chips {
+    /// `calc_pixels_edges` along pyFAI's axes 1 and 2 before the
+    /// orientation reverses them: from 0, one more edge than the grid's
+    /// `max_shape` has pixels.
+    pub(super) fn edges(self, grid: &Grid) -> [Vec<f64>; 2] {
+        let axis = |n: usize, m: usize, pitch: f64| {
+            let mut size = vec![1.0; n];
+            for i in 1..n / m {
+                size[i * m - 1] = self.border;
+                size[i * m] = self.border;
+            }
+            // numpy.cumsum of pitch * size, in order
+            let mut edges = vec![0.0];
+            edges.extend(size.iter().scan(0.0, |e, s| {
+                *e += pitch * s;
+                Some(*e)
+            }));
+            edges
+        };
+        [
+            axis(grid.max_shape.0, self.module.0, grid.pixel.0),
+            axis(grid.max_shape.1, self.module.1, grid.pixel.1),
+        ]
+    }
+
+    /// `calc_mask`, row-major over `shape`: the pixels either side of each
+    /// chip boundary and the outer border.
+    pub(super) fn mask(self, (n0, n1): (usize, usize)) -> Vec<bool> {
+        let chips = |n: usize, m: usize| {
+            let mut line = vec![false; n];
+            for i in 1..n / m {
+                line[i * m - 1] = true;
+                line[i * m] = true;
+            }
+            line[0] = true;
+            line[n - 1] = true;
+            line
+        };
+        cross(&chips(n0, self.module.0), &chips(n1, self.module.1))
+    }
+}
+
 impl Rule {
     /// The masked pixels, row-major over `shape`.
     pub(super) fn mask(self, (n0, n1): (usize, usize)) -> Vec<bool> {
-        let cross = |rows: Vec<bool>, cols: Vec<bool>| -> Vec<bool> {
-            (0..n0 * n1).map(|k| rows[k / n1] || cols[k % n1]).collect()
-        };
         match self {
             Rule::Gaps { module, gap, strip } => {
                 let (mut rows, mut cols) = (vec![false; n0], vec![false; n1]);
@@ -118,20 +170,7 @@ impl Rule {
                 if let Some(strip) = strip {
                     mark(&mut cols, module.1 / 2, step.1, strip);
                 }
-                cross(rows, cols)
-            }
-            Rule::Chips { module } => {
-                let chips = |n: usize, m: usize| {
-                    let mut line = vec![false; n];
-                    for i in 1..n / m {
-                        line[i * m - 1] = true;
-                        line[i * m] = true;
-                    }
-                    line[0] = true;
-                    line[n - 1] = true;
-                    line
-                };
-                cross(chips(n0, module.0), chips(n1, module.1))
+                cross(&rows, &cols)
             }
             Rule::Disc => {
                 let (c0, c1) = ((n0 / 2) as f64, (n1 / 2) as f64);
@@ -176,9 +215,6 @@ mod tests {
                 gap: pair(&v["gap"]),
                 strip: (!v["strip"].is_null()).then(|| pair(&v["strip"])),
             }),
-            "chips" => Some(Rule::Chips {
-                module: pair(&v["module"]),
-            }),
             "disc" => Some(Rule::Disc),
             other => panic!("rule {other}"),
         }
@@ -218,8 +254,13 @@ mod tests {
                 ("uniform", Layout::Uniform(g, r)) => {
                     assert_eq!((g, r), (grid(c), rule(&c["mask"])), "{}", t.name)
                 }
-                ("edges", Layout::Edges(g, r)) => {
-                    assert_eq!((g, Some(r)), (grid(c), rule(&c["mask"])), "{}", t.name)
+                ("edges", Layout::Edges(g, chips)) => {
+                    assert_eq!(c["mask"]["rule"], "chips", "{}", t.name);
+                    let want = Chips {
+                        module: pair(&c["mask"]["module"]),
+                        border: c["border"].as_f64().unwrap(),
+                    };
+                    assert_eq!((g, chips), (grid(c), want), "{}", t.name)
                 }
                 (why, Layout::Unsupported(reason)) => assert_eq!(why, reason, "{}", t.name),
                 (why, layout) => panic!("{}: {why} vs {layout:?}", t.name),
@@ -276,13 +317,14 @@ mod tests {
             .iter()
             .zip(table::CLASSES)
         {
-            let (grid, rule) = match t.layout {
-                Layout::Uniform(grid, rule) => (grid, rule),
-                Layout::Edges(grid, rule) => (grid, Some(rule)),
+            let (grid, mask) = match t.layout {
+                Layout::Uniform(grid, rule) => (grid, rule.map(|r| r.mask(grid.shape))),
+                Layout::Edges(grid, chips) => (grid, Some(chips.mask(grid.shape))),
                 _ => continue,
             };
             let (n0, n1) = grid.shape;
-            let mask = rule.map_or(vec![false; n0 * n1], |r| r.mask(grid.shape));
+            let ruled_here = mask.is_some();
+            let mask = mask.unwrap_or(vec![false; n0 * n1]);
             assert_eq!(mask.len(), n0 * n1);
             let want: Vec<u64> = c["fingerprint"]
                 .as_array()
@@ -291,7 +333,7 @@ mod tests {
                 .map(|v| v.as_u64().unwrap())
                 .collect();
             assert_eq!(fingerprint(&mask).as_slice(), want, "{}", t.name);
-            ruled += usize::from(rule.is_some());
+            ruled += usize::from(ruled_here);
         }
         assert!(ruled > 0);
     }

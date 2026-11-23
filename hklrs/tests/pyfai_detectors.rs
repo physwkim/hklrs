@@ -1,7 +1,9 @@
 //! pyFAI 2026.9.0's named detector classes from a PONI file against the
 //! default instances `Detector.factory` builds (golden/pyfai_detectors.py):
 //! `calc_pos_zyx` at pixels of each supported class, `calc_mask`, and a
-//! typed error for every other class.
+//! typed error for every other class. An ImXPad image is flipped once, as
+//! pyFAI's whole-image `calc_cartesian_positions` flips it; pyFAI's
+//! by-index path flips it twice (upstream defect FAI-2).
 
 pub mod common;
 
@@ -13,9 +15,6 @@ use serde_json::Value;
 
 /// Metres; pixel positions are about 0.3 m from the sample.
 const TOL: f64 = 1e-14;
-
-/// The ImXPad classes hklrs has no pixel-edge model of.
-const NO_EDGES: [&str; 2] = ["ImXPadS10", "ImXPadS70V"];
 
 fn labs() -> [(&'static str, LabAxes, [Vector3<f64>; 3]); 2] {
     let beam = Vector3::new(0.3, -0.5, 0.81).normalize();
@@ -81,14 +80,6 @@ fn named_classes_match_pyfai_calc_pos_zyx() {
         let c = class(&g, name);
         let pf = PoniFile::parse(case["poni"].as_str().unwrap()).unwrap();
         assert_eq!(pf.poni(), Err(PoniError::NamedDetector(name.to_string())));
-        if NO_EDGES.contains(&name) {
-            assert_eq!(c["layout"], "edges");
-            assert!(matches!(
-                pf.detector(&lab()),
-                Err(PoniError::UnsupportedDetector { class, .. }) if class == name
-            ));
-            continue;
-        }
         for (lab_name, lab, [a1, a2, a3]) in labs() {
             let det = pf.detector(&lab).unwrap();
             let n = |k: usize| c["shape"][k].as_u64().unwrap() as usize;
@@ -127,7 +118,6 @@ fn named_classes_match_pyfai_calc_pos_zyx() {
         .iter()
         .filter(|c| c["layout"] == "uniform" || c["layout"] == "edges")
         .map(|c| c["class"].as_str().unwrap())
-        .filter(|n| !NO_EDGES.contains(n))
         .collect();
     assert_eq!(built, supported);
 }
@@ -140,13 +130,9 @@ fn other_classes_are_unsupported_by_name() {
         let name = c["class"].as_str().unwrap();
         match c["layout"].as_str().unwrap() {
             "generic" => continue,
-            "uniform" => supported += 1,
-            "edges" if !NO_EDGES.contains(&name) => supported += 1,
+            "uniform" | "edges" => supported += 1,
             layout => {
-                let reason = unsupported(name, "{}").unwrap();
-                if layout != "edges" {
-                    assert_eq!(reason, layout, "{name}");
-                }
+                assert_eq!(unsupported(name, "{}").unwrap(), layout, "{name}");
                 refused += 1;
             }
         }
@@ -238,14 +224,57 @@ fn config_other_than_the_default_instance_is_refused() {
     );
 }
 
+/// FAI-2: `ImXPadS10.calc_cartesian_positions(d1, d2)` reverses the
+/// indices and then interpolates the edges `calc_pixels_edges` has already
+/// reversed, so pyFAI's by-index positions are those of orientation 3 in
+/// every orientation and part from the whole image's in 1, 2 and 4.
 #[test]
-fn imxpad_by_index_is_orientation_3_only() {
-    for name in ["ImXPadS70", "ImXPadS140"] {
-        for o in [1, 2, 4] {
-            let config = format!(r#"{{"orientation": {o}}}"#);
-            assert!(unsupported(name, &config).is_ok(), "{name} {o}");
+fn imxpad_by_index_departs_from_the_whole_image_off_orientation_3() {
+    let g = load("pyfai_detectors.json");
+    let mut seen = 0;
+    for case in g["cases"].as_array().unwrap() {
+        let Some(by_index) = case["zyx_by_index"].as_array() else {
+            continue;
+        };
+        let name = case["class"].as_str().unwrap();
+        let o = case["orientation"].as_u64().unwrap();
+        let apart = case["zyx"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(by_index)
+            .map(|(w, b)| {
+                (0..3)
+                    .map(|k| (f(&w[k]) - f(&b[k])).abs())
+                    .fold(0.0, f64::max)
+            })
+            .fold(0.0, f64::max);
+        if o == 3 {
+            assert_eq!(apart, 0.0, "{name}");
+        } else {
+            // more than a pixel
+            assert!(apart > 1e-3, "{name} orientation {o}: {apart} m");
         }
+        // the two flips cancel: the by-index positions are hklrs's in
+        // orientation 3, the files differing only in the orientation
+        let three = g["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["class"] == name && c["orientation"] == 3)
+            .unwrap();
+        let (_, lab, [a1, a2, a3]) = &labs()[0];
+        let det = PoniFile::parse(three["poni"].as_str().unwrap())
+            .unwrap()
+            .detector(lab)
+            .unwrap();
+        for (px, zyx) in case["pixels"].as_array().unwrap().iter().zip(by_index) {
+            let want = a1 * f(&zyx[1]) + a2 * f(&zyx[2]) + a3 * f(&zyx[0]);
+            let ix = |k: usize| px[k].as_u64().unwrap() as usize;
+            let d = (det.pixel(ix(0), ix(1)).unwrap().coords - want).norm();
+            assert!(d <= TOL, "{name} orientation {o}, pixel {px}: {d} m");
+        }
+        seen += 1;
     }
-    let det = file("imxpad s140", r#"{"orientation": 3}"#);
-    assert_eq!(det.detector(&lab()).unwrap().shape(), (240, 560));
+    assert_eq!(seen, 16);
 }
