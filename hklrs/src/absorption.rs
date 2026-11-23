@@ -18,6 +18,12 @@ impl Attenuation for PerMetre {
     }
 }
 
+impl<A: Attenuation + ?Sized> Attenuation for &A {
+    fn mu(&self, energy: Energy) -> PerMetre {
+        (**self).mu(energy)
+    }
+}
+
 /// Why a pixel has no weight. `s_i = −k̂i·n̂`, `s_f = k̂f·n̂`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Masked {
@@ -30,20 +36,26 @@ pub enum Masked {
     /// The weight is not a positive finite number: the path transmits
     /// nothing in f64.
     Opaque,
+    /// No solid angle: the pixel is seen edge-on from the sample.
+    EdgeOn,
+    /// No polarisation factor: the beam's field allows no scattering
+    /// towards the pixel.
+    Extinct,
 }
 
-/// An absorption weight, positive and finite by construction, so the
+/// A per-pixel weight, positive and finite by construction, so the
 /// correction can always divide by it.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct Weight(f64);
 
 impl Weight {
-    /// The one gate every weight passes.
-    fn new(value: f64) -> Result<Self, Masked> {
+    /// The one gate every weight passes: anything else is masked as
+    /// `otherwise`.
+    pub(crate) fn new(value: f64, otherwise: Masked) -> Result<Self, Masked> {
         if value > 0.0 && value.is_finite() {
             Ok(Self(value))
         } else {
-            Err(Masked::Opaque)
+            Err(otherwise)
         }
     }
 
@@ -54,7 +66,7 @@ impl Weight {
     /// The product of two weights, such as the sample and detector sides,
     /// which can underflow where neither factor does.
     pub fn times(self, other: Self) -> Result<Self, Masked> {
-        Self::new(self.0 * other.0)
+        Self::new(self.0 * other.0, Masked::Opaque)
     }
 }
 
@@ -340,60 +352,105 @@ impl SlabFrame {
         } else {
             return Err(Masked::GrazingExit);
         };
-        Weight::new(lit.footprint * path)
+        Weight::new(lit.footprint * path, Masked::Opaque)
     }
 }
 
-/// A flat layer on the detector, crossed by the scattered beam.
+/// A flat layer on the detector, crossed by the scattered beam. `A` gives
+/// its μ; [`Layer::at`] fixes it at one energy.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Layer {
-    mu: PerMetre,
+pub struct Layer<A = PerMetre> {
+    mu: A,
     thickness: f64,
 }
 
-impl Layer {
+impl<A> Layer<A> {
     /// `thickness` along the detector normal, metres.
-    pub fn new(mu: PerMetre, thickness: f64) -> Result<Self, Error> {
+    pub fn new(mu: A, thickness: f64) -> Result<Self, Error> {
         Ok(Self {
             mu,
             thickness: positive("layer thickness", thickness)?,
         })
     }
+}
 
+impl<A: Attenuation> Layer<A> {
+    pub fn at(&self, energy: Energy) -> Layer {
+        Layer {
+            mu: self.mu.mu(energy),
+            thickness: self.thickness,
+        }
+    }
+}
+
+impl Layer {
     /// Optical depth along a ray at `cos θ` to the normal.
     fn depth(&self, cos: f64) -> f64 {
         self.mu.per_metre() * self.thickness / cos
     }
 }
 
-/// Detector-side terms at one energy; an absent term weighs 1.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct DetectorPath {
+/// Detector-side terms; an absent term weighs 1. `A` gives each μ;
+/// [`DetectorPath::at`] fixes them at one energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DetectorPath<A = PerMetre> {
     /// Air or He between the sample and the pixel.
-    pub air: Option<PerMetre>,
+    pub air: Option<A>,
     /// Window or filter, transmitted.
-    pub window: Option<Layer>,
+    pub window: Option<Layer<A>>,
     /// Sensor, absorbed.
-    pub sensor: Option<Layer>,
+    pub sensor: Option<Layer<A>>,
+}
+
+impl<A> Default for DetectorPath<A> {
+    fn default() -> Self {
+        Self {
+            air: None,
+            window: None,
+            sensor: None,
+        }
+    }
+}
+
+impl<A: Attenuation> DetectorPath<A> {
+    /// The path at `energy`, each μ evaluated once.
+    pub fn at(&self, energy: Energy) -> DetectorPath {
+        DetectorPath {
+            air: self.air.as_ref().map(|air| air.mu(energy)),
+            window: self.window.as_ref().map(|w| w.at(energy)),
+            sensor: self.sensor.as_ref().map(|s| s.at(energy)),
+        }
+    }
 }
 
 impl DetectorPath {
-    /// Weight of the pixel at `p` from the sample, on a detector with
-    /// `normal` of either sense, lab frame. Fails only when `p` is zero.
+    /// Weight of the pixel in direction `kf` at `distance` metres from the
+    /// sample, on a detector with `normal` of either sense, lab frame.
     pub fn weight(
         &self,
-        p: &Vector3<f64>,
+        kf: &Unit<Vector3<f64>>,
+        distance: f64,
         normal: &Unit<Vector3<f64>>,
-    ) -> Result<Result<Weight, Masked>, Error> {
-        let (kf, distance) = Unit::try_new_and_get(*p, 0.0).ok_or(Error::DetectorAtSample)?;
+    ) -> Result<Weight, Masked> {
         let cos = kf.dot(normal).abs();
         let air = self
             .air
             .map_or(1.0, |mu| (-mu.per_metre() * distance).exp());
         let window = self.window.map_or(1.0, |w| (-w.depth(cos)).exp());
         let sensor = self.sensor.map_or(1.0, |s| -(-s.depth(cos)).exp_m1());
-        Ok(Weight::new(air * window * sensor))
+        Weight::new(air * window * sensor, Masked::Opaque)
     }
+}
+
+/// What absorbs, at any energy: the sample slab lit by `beam`, and the path
+/// to the detector. `A` gives each μ, for example `&dyn Attenuation` for
+/// mixed materials.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Absorber<A> {
+    pub slab: Slab,
+    pub beam: Beam,
+    pub sample: A,
+    pub detector: DetectorPath<A>,
 }
 
 /// φ(x) = expm1(x)/x with φ(0) = 1, so t φ(−at) = ∫₀ᵗ e^(−az) dz holds at
@@ -773,12 +830,12 @@ mod tests {
     #[test]
     fn weight_masks_what_is_not_a_positive_finite_number() {
         for v in [0.0, -0.0, -1.0, f64::INFINITY, f64::NAN] {
-            assert_eq!(Weight::new(v), Err(Masked::Opaque), "{v}");
+            assert_eq!(Weight::new(v, Masked::Opaque), Err(Masked::Opaque), "{v}");
         }
         for v in [f64::from_bits(1), 1.0, f64::MAX] {
-            assert_eq!(Weight::new(v).map(Weight::get), Ok(v));
+            assert_eq!(Weight::new(v, Masked::Opaque).map(Weight::get), Ok(v));
         }
-        let small = Weight::new(1e-200).unwrap();
+        let small = Weight::new(1e-200, Masked::Opaque).unwrap();
         assert_eq!(small.times(small), Err(Masked::Opaque));
     }
 
@@ -831,10 +888,15 @@ mod tests {
         Layer::new(mu(m), t).unwrap()
     }
 
+    /// k̂f and |p| of the pixel at `p`.
+    fn ray(p: Vector3<f64>) -> (Unit<Vector3<f64>>, f64) {
+        Unit::try_new_and_get(p, 0.0).unwrap()
+    }
+
     #[test]
     fn detector_terms_at_normal_incidence() {
-        let (p, n) = (Vector3::new(0.0, 0.0, 0.5), Vector3::z_axis());
-        let alone = |path: DetectorPath| path.weight(&p, &n).unwrap().unwrap().get();
+        let ((kf, d), n) = (ray(Vector3::new(0.0, 0.0, 0.5)), Vector3::z_axis());
+        let alone = |path: DetectorPath| path.weight(&kf, d, &n).unwrap().get();
         assert_eq!(alone(DetectorPath::default()), 1.0);
         let air = alone(DetectorPath {
             air: Some(mu(1.2)),
@@ -862,7 +924,7 @@ mod tests {
             window: Some(layer(1e4, 25e-6)),
             sensor: Some(layer(3e3, 450e-6)),
         };
-        let w = all.weight(&p, &n).unwrap().unwrap().get();
+        let w = all.weight(&kf, d, &n).unwrap().get();
         assert!(close(w, air * window * sensor, 2.0 * f64::EPSILON), "{w}");
     }
 
@@ -870,7 +932,7 @@ mod tests {
     /// twice their thickness; the air path is |p| at any angle.
     #[test]
     fn detector_layers_at_60_degrees_double_the_path() {
-        let p = Vector3::new(3f64.sqrt(), 0.0, 1.0) * 0.25;
+        let (kf, d) = ray(Vector3::new(3f64.sqrt(), 0.0, 1.0) * 0.25);
         let path = DetectorPath {
             air: Some(mu(1.2)),
             window: Some(layer(1e4, 25e-6)),
@@ -878,7 +940,7 @@ mod tests {
         };
         let want = (-0.6f64).exp() * (-0.5f64).exp() * -(-2.7f64).exp_m1();
         for n in [Vector3::z_axis(), -Vector3::z_axis()] {
-            let w = path.weight(&p, &n).unwrap().unwrap().get();
+            let w = path.weight(&kf, d, &n).unwrap().get();
             assert!(close(w, want, 1e-15), "{n:?}: {w}");
         }
     }
@@ -891,8 +953,7 @@ mod tests {
             ..Default::default()
         };
         let w = path
-            .weight(&Vector3::z(), &Vector3::z_axis())
-            .unwrap()
+            .weight(&Vector3::z_axis(), 1.0, &Vector3::z_axis())
             .unwrap()
             .get();
         assert!(close(w, 1e-20, 4.0 * f64::EPSILON), "{w}");
@@ -902,24 +963,21 @@ mod tests {
     /// sensor absorbs everything.
     #[test]
     fn mask_opaque_when_the_detector_ray_runs_along_a_window() {
-        let (p, n) = (Vector3::x(), Vector3::z_axis());
+        let (kf, n) = (Vector3::x_axis(), Vector3::z_axis());
         let window = DetectorPath {
             window: Some(layer(1e4, 25e-6)),
             ..Default::default()
         };
-        assert_eq!(window.weight(&p, &n).unwrap(), Err(Masked::Opaque));
+        assert_eq!(window.weight(&kf, 1.0, &n), Err(Masked::Opaque));
         let sensor = DetectorPath {
             sensor: Some(layer(3e3, 450e-6)),
             ..Default::default()
         };
-        assert_eq!(sensor.weight(&p, &n).unwrap().map(Weight::get), Ok(1.0));
+        assert_eq!(sensor.weight(&kf, 1.0, &n).map(Weight::get), Ok(1.0));
     }
 
     #[test]
-    fn detector_path_rejects_bad_input() {
-        let path = DetectorPath::default();
-        let got = path.weight(&Vector3::zeros(), &Vector3::z_axis());
-        assert!(matches!(got, Err(Error::DetectorAtSample)), "{got:?}");
+    fn layer_rejects_a_bad_thickness() {
         for t in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
             assert!(Layer::new(mu(1.0), t).is_err(), "{t}");
         }
