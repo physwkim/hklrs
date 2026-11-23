@@ -548,6 +548,10 @@ impl PoniFile {
         }
     }
 
+    /// The generic detector as `Detector.__init__` builds it, then the
+    /// factory's binning by `Detector.binning`'s setter: the pitch times
+    /// the binning and `max_shape` floor divided by it, refused where the
+    /// setter raises (no pitch, no `max_shape`, a 0 in the binning).
     fn generic(&self) -> Result<Poni, PoniError> {
         let d = &self.detector;
         if d.splinefile.is_some() {
@@ -556,14 +560,21 @@ impl PoniFile {
         if self.parallax {
             return Err(PoniError::Unsupported("parallax correction"));
         }
-        if d.binning.is_some_and(|b| b != (1, 1)) {
-            return Err(PoniError::Unsupported("binning"));
-        }
         // Detector.__init__ takes a 0 pitch as none; version 1 sets it as given
-        let pitch = |key, p: Option<f64>| {
-            p.filter(|&p| self.version == 1.0 || p != 0.0)
-                .ok_or(PoniError::Missing(key))
-        };
+        let given = |p: Option<f64>| p.filter(|&p| self.version == 1.0 || p != 0.0);
+        let (mut pixel1, mut pixel2, mut shape) = (given(d.pixel1), given(d.pixel2), d.max_shape);
+        if let Some((b1, b2)) = d.binning.filter(|&b| b != (1, 1)) {
+            let (Some(p1), Some(p2), Some((n1, n2))) = (pixel1, pixel2, shape) else {
+                return Err(PoniError::Raises { class: "Detector" });
+            };
+            if b1 == 0 || b2 == 0 {
+                return Err(PoniError::Raises { class: "Detector" });
+            }
+            pixel1 = Some(p1 * b1 as f64);
+            pixel2 = Some(p2 * b2 as f64);
+            shape = Some(((n1 as u64 / b1) as usize, (n2 as u64 / b2) as usize));
+        }
+        let pitch = |key, p: Option<f64>| p.ok_or(PoniError::Missing(key));
         Ok(Poni {
             dist: self.dist,
             poni1: self.poni1,
@@ -571,9 +582,9 @@ impl PoniFile {
             rot1: self.rot1,
             rot2: self.rot2,
             rot3: self.rot3,
-            pixel1: pitch("pixel1", d.pixel1)?,
-            pixel2: pitch("pixel2", d.pixel2)?,
-            shape: d.max_shape.ok_or(PoniError::Missing("max_shape"))?,
+            pixel1: pitch("pixel1", pixel1)?,
+            pixel2: pitch("pixel2", pixel2)?,
+            shape: shape.ok_or(PoniError::Missing("max_shape"))?,
             orientation: d.orientation.unwrap_or(Orientation::BottomRight),
         })
     }
@@ -1029,7 +1040,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f.detector.binning, Some((2, 2)));
-        assert_eq!(f.poni(), Err(PoniError::Unsupported("binning")));
+        let poni = f.poni().unwrap();
+        assert_eq!(
+            (poni.pixel1, poni.pixel2, poni.shape),
+            (2e-4, 4e-4, (5, 10))
+        );
+        // Detector.binning's setter multiplies a None pitch, floor divides a
+        // None max_shape and divides by a 0
+        for config in [
+            r#"{"pixel2": 2e-4, "max_shape": [10, 20], "binning": [2, 2]}"#,
+            r#"{"pixel1": 0, "pixel2": 2e-4, "max_shape": [10, 20], "binning": [2, 2]}"#,
+            r#"{"pixel1": 1e-4, "pixel2": 2e-4, "binning": [2, 2]}"#,
+            r#"{"pixel1": 1e-4, "pixel2": 2e-4, "max_shape": [10, 20], "binning": [2, 0]}"#,
+        ] {
+            let f = parse(&format!(
+                "poni_version: 2\nDetector: Detector\nDetector_config: {config}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                f.poni(),
+                Err(PoniError::Raises { class: "Detector" }),
+                "{config}"
+            );
+        }
     }
 
     #[test]

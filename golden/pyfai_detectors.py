@@ -26,7 +26,8 @@ positions, for a uniform class, are asserted to be the generic Detector's of
 that pitch, shape and orientation. "round_trip" is, at each of BINNINGS, the
 factory's binning key on the default instance, PoniFile.write of a Geometry
 of it and Geometry.load of that, with what the load builds, its mask and
-calc_pos_zyx at some pixels. "probes" are names put to detector_factory and
+calc_pos_zyx at some pixels; the generic Detector's are of GENERIC with a
+binning (generic_files). "probes" are names put to detector_factory and
 the class it returns; "cases" are a PONI file pyFAI writes for a modelled
 class, default or binned by the binning key where that binning gives the
 class's own pitch and the mask, and, after Geometry.load, calc_pos_zyx of
@@ -422,6 +423,68 @@ def round_trip(doc, tmp, masks):
     return out
 
 
+# the generic Detector's: binned 2 and 3 floors max_shape, and the binned
+# pitch is a float product other than the decimal one
+GENERIC = {"pixel1": 1.72e-4, "pixel2": 7.5e-5, "max_shape": [11, 20]}
+
+
+def generic_heads():
+    """Detector_config of the generic Detector with a binning: each of
+    BINNINGS, a 0, a scalar, one past max_shape, one that does not divide it,
+    in each orientation, and with no pitch, a 0, null or negative pitch, or
+    no max_shape"""
+    configs = [{**GENERIC, "binning": list(b)} for b in BINNINGS]
+    configs += [{**GENERIC, "binning": b} for b in ([0, 0], [2, 0], 2, 0, [12, 1], [3, 7])]
+    configs += [{**GENERIC, "binning": [2, 1], "orientation": o} for o in (1, 2, 3, 4)]
+    one = {k: v for k, v in GENERIC.items() if k != "pixel1"}
+    configs += [{**one, "binning": [2, 2]}, {**GENERIC, "pixel1": 0, "binning": [2, 2]},
+                {**GENERIC, "pixel2": None, "binning": [2, 2]},
+                {**GENERIC, "pixel1": -1.72e-4, "binning": [2, 2]},
+                {"pixel1": 1.72e-4, "pixel2": 7.5e-5, "binning": [2, 2]}]
+    return [f"poni_version: 2.1\nDetector: Detector\nDetector_config: {json.dumps(c)}\n"
+            for c in configs]
+
+
+def generic_files(doc, tmp):
+    """the generic Detector: Geometry.load of generic_heads, and, at each of
+    BINNINGS, PoniFile.write of a Geometry of the factory's GENERIC binned by
+    the binning key and Geometry.load of that; calc_pos_zyx of some pixels of
+    each instance of a positive pitch and shape"""
+
+    def positions(entry, geo):
+        det = geo.detector
+        if (all(p is not None and 0 < p < numpy.inf for p in (det.pixel1, det.pixel2))
+                and det.shape is not None and min(det.shape) >= 1):
+            pixels = sample(doc, det.shape)
+            entry["pixels"] = [list(p) for p in pixels]
+            entry["zyx"] = zyx_at(geo, doc, pixels)[0]
+            assert det.mask is None, entry
+
+    reads = []
+    for head in generic_heads():
+        geo, err = load(head + GEOMETRY, tmp)
+        if geo is None:
+            reads.append({"head": head, "raises": err})
+            continue
+        entry = {"head": head, **facts(geo.detector)}
+        positions(entry, geo)
+        reads.append(entry)
+    trips = []
+    for b in BINNINGS:
+        det = detector_factory("Detector", {**GENERIC, "binning": list(b)})
+        n0, n1 = det.shape
+        geo = Geometry(dist=0.31, poni1=0.37 * n0 * det.pixel1, poni2=0.61 * n1 * det.pixel2,
+                       rot1=0.1, rot2=-0.2, rot3=0.3, detector=det, wavelength=1e-10)
+        text = written(geo, tmp)
+        entry = {"binning": list(b), "written": facts(det), "poni": text}
+        back, err = load(text, tmp)
+        assert back is not None, err
+        entry["read"] = facts(back.detector)
+        positions(entry, back)
+        trips.append(entry)
+    return reads, trips
+
+
 def describe(name, cls, rng):
     args = [a for a in inspect.getfullargspec(cls).args if a != "self"]
     doc = {"class": name, "args": args, "force_pixel": bool(cls.force_pixel)}
@@ -672,6 +735,8 @@ def main():
         finally:
             os.chdir(cwd)
         modelled = [c for c in described if c["layout"] in ("uniform", "edges")]
+        generic = next(c for c in described if c["layout"] == "generic")
+        generic["reads"], generic["round_trip"] = generic_files(generic, tmp)
         masks, seen = {}, set()
         for c in modelled:
             c["reads"] = reads(c, tmp, masks, rng, seen)
@@ -710,6 +775,11 @@ def main():
                                                    and e["read"]["binning"] != e["binning"]}))
     print("round trip raises:", sorted({(c["class"], tuple(e["binning"]), e["raises"])
                                         for c in modelled for e in c["round_trip"] if "raises" in e}))
+    print("generic reads raise:", [(e["head"].split("config: ")[1].strip(), e["raises"])
+                                   for e in generic["reads"] if "raises" in e])
+    print("generic round trip:", [(e["binning"], e["written"]["pixel"], e["written"]["shape"],
+                                   e["read"]["pixel"], e["read"]["shape"])
+                                  for e in generic["round_trip"]])
 
 
 if __name__ == "__main__":

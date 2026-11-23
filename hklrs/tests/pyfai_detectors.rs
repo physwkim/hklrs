@@ -367,7 +367,7 @@ fn reads_are_pyfai_s_instance_or_refused() {
     let lab = lab();
     let mut seen = std::collections::BTreeMap::new();
     for c in g["classes"].as_array().unwrap() {
-        let Some(reads) = c["reads"].as_array() else {
+        let Some(reads) = c["reads"].as_array().filter(|_| c["layout"] != "generic") else {
             continue;
         };
         for e in reads {
@@ -447,7 +447,10 @@ fn round_trips_are_pyfai_s_read_or_refused() {
     let g = load("pyfai_detectors.json");
     let mut seen = std::collections::BTreeMap::new();
     for c in g["classes"].as_array().unwrap() {
-        let Some(trips) = c["round_trip"].as_array() else {
+        let Some(trips) = c["round_trip"]
+            .as_array()
+            .filter(|_| c["layout"] != "generic")
+        else {
             continue;
         };
         let name = c["class"].as_str().unwrap();
@@ -487,6 +490,81 @@ fn round_trips_are_pyfai_s_read_or_refused() {
     }
     eprintln!("round trips: {seen:?}");
     for outcome in ["kept", "read otherwise", "Inconsistent", "MaskBinning"] {
+        assert!(seen.contains_key(outcome), "{outcome}: {seen:?}");
+    }
+}
+
+/// The generic Detector with a binning key (the golden's generic_files):
+/// pyFAI's pitch times the binning over `max_shape` floor divided, at its
+/// `calc_pos_zyx`, refused where `Detector.binning`'s setter raises (no
+/// pitch, no `max_shape`, a 0) and as the core refuses an empty image or a
+/// negative pitch. A round trip reads back as pyFAI reads it: the binned
+/// pitch over the unbinned `max_shape` `PoniFile.write` gives.
+#[test]
+fn generic_binnings_are_pyfai_s() {
+    let g = load("pyfai_detectors.json");
+    let classes = g["classes"].as_array().unwrap();
+    let c = classes.iter().find(|c| c["layout"] == "generic").unwrap();
+    let geometry = "Distance: 0.3\nPoni1: 0.01\nPoni2: 0.02\nRot1: 0.1\nRot2: -0.2\n\
+                    Rot3: 0.3\nWavelength: 1e-10\n";
+    let reads = c["reads"].as_array().unwrap().iter();
+    let reads = reads.map(|e| (format!("{}{geometry}", e["head"].as_str().unwrap()), e, e));
+    let trips = c["round_trip"].as_array().unwrap().iter();
+    let trips = trips.map(|e| (e["poni"].as_str().unwrap().to_string(), &e["read"], e));
+    let mut seen = std::collections::BTreeMap::new();
+    for (text, facts, outcome) in reads.chain(trips) {
+        let pf = PoniFile::parse(&text).unwrap();
+        let (n0, n1) = if facts["shape"].is_array() {
+            pair(&facts["shape"])
+        } else {
+            (0, 0)
+        };
+        let want = if outcome["raises"].is_string() {
+            Some(PoniError::Raises { class: "Detector" })
+        } else if n0 == 0 || n1 == 0 {
+            Some(PoniError::Core(hklrs::Error::DetectorShape {
+                slow: n0,
+                fast: n1,
+            }))
+        } else {
+            let p = (pitch(&facts["pixel"][0]), pitch(&facts["pixel"][1]));
+            (p.0 <= 0.0).then_some(PoniError::Core(hklrs::Error::NotPositive {
+                what: "pixel1",
+                value: p.0,
+            }))
+        };
+        if let Some(want) = want {
+            assert_eq!(pf.detector(&lab()).err(), Some(want.clone()), "{text}");
+            let outcome = format!("{want:?}")
+                .split([' ', '('])
+                .next()
+                .unwrap()
+                .to_string();
+            *seen.entry(outcome).or_insert(0) += 1;
+            continue;
+        }
+        let poni = pf.poni().unwrap();
+        let p = (pitch(&facts["pixel"][0]), pitch(&facts["pixel"][1]));
+        assert_eq!(
+            (poni.pixel1, poni.pixel2, poni.shape),
+            (p.0, p.1, (n0, n1)),
+            "{text}"
+        );
+        for (lab_name, lab, [a1, a2, a3]) in labs() {
+            let det = pf.detector(&lab).unwrap();
+            assert_eq!(det.mask(), None, "{text}");
+            let pixels = outcome["pixels"].as_array().unwrap();
+            for (px, zyx) in pixels.iter().zip(outcome["zyx"].as_array().unwrap()) {
+                let want = a1 * f(&zyx[1]) + a2 * f(&zyx[2]) + a3 * f(&zyx[0]);
+                let ix = |k: usize| px[k].as_u64().unwrap() as usize;
+                let d = (det.pixel(ix(0), ix(1)).unwrap().coords - want).norm();
+                assert!(d <= TOL, "{text}, {lab_name} lab, pixel {px}: {d} m");
+            }
+        }
+        *seen.entry("built".to_string()).or_insert(0) += 1;
+    }
+    eprintln!("generic: {seen:?}");
+    for outcome in ["built", "Raises", "Core"] {
         assert!(seen.contains_key(outcome), "{outcome}: {seen:?}");
     }
 }

@@ -142,3 +142,34 @@ def test_round_trips_are_pyfai_s_read(c, lab):
         assert fingerprint(det) == (e.get("mask") or [0, 0, 0]), e["binning"]
         np.testing.assert_allclose(positions(det, e["pixels"]),
                                    pyfai_positions(lab, e["zyx"]), rtol=0, atol=TOL)
+
+
+GENERIC = next(c for c in G["classes"] if c["layout"] == "generic")
+
+
+@pytest.mark.parametrize("e", GENERIC["reads"] + GENERIC["round_trip"],
+                         ids=lambda e: e.get("head", "").split("config: ")[-1].strip()
+                         or f"round trip {e['binning']}")
+def test_generic_binnings_are_pyfai_s(e, lab):
+    """the generic Detector with a binning key: pyFAI's binned pitch and shape
+    at its calc_pos_zyx, a ValueError where its setter raises or the core
+    refuses the instance; a round trip reads back as pyFAI reads it"""
+    f = hklrs.poni.parse(e["poni"] if "poni" in e else e["head"] + GEOMETRY)[0]
+    facts = e.get("read", e)
+    if "raises" in e:
+        want = "pyFAI raises building detector Detector from the file"
+    elif 0 in facts["shape"]:
+        want = "detector shape must be non-zero"
+    elif float(facts["pixel"][0]) <= 0:
+        want = "pixel1"
+    else:
+        want = None
+    if want is not None:
+        with pytest.raises(ValueError, match=want):
+            f.detector(*lab)
+        return
+    det = f.detector(*lab)
+    assert det.shape == tuple(facts["shape"])
+    assert det.mask is None
+    np.testing.assert_allclose(positions(det, e["pixels"]),
+                               pyfai_positions(lab, e["zyx"]), rtol=0, atol=TOL)
