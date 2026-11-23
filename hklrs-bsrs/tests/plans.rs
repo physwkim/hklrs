@@ -226,6 +226,48 @@ async fn a_reader_given_twice_is_read_once() {
     assert_eq!(run.events().len(), 2);
 }
 
+/// Picked closest to the readbacks, the solution changes branch part way
+/// along this line (tth changes sign); the scan, each point seeded by the
+/// one before, stays on its first branch (design §8.3 step 1).
+#[tokio::test]
+async fn hkl_scan_stays_on_one_branch_across_a_branch_boundary() {
+    let dx = e4cv();
+    let (start, stop, num) = ([-1.0, 0.3, -0.3], [-0.2, 0.3, -1.0], 7);
+    let point = |i: usize| {
+        let f = i as f64 / (num - 1) as f64;
+        [0, 1, 2].map(|j| start[j] + (stop[j] - start[j]) * f)
+    };
+    let wavelength = dx.wavelength().await.unwrap();
+    let fresh: Vec<Vec<f64>> = (0..num)
+        .map(|i| dx.inverse(point(i), &AT_001, wavelength).unwrap())
+        .collect();
+    assert!(
+        fresh
+            .windows(2)
+            .any(|w| w[0][3].signum() != w[1][3].signum()),
+        "{fresh:?}"
+    );
+
+    let run = run(hkl_scan(dx.clone(), start, stop, num, [])).await;
+    run.succeeded();
+    let events = run.events();
+    let path: Vec<[f64; 4]> = events
+        .iter()
+        .map(|e| AXES.map(|a| e.data[a].as_f64().unwrap()))
+        .collect();
+    assert_eq!(path.len(), num);
+    assert_close(&path[0], &fresh[0], 1e-9);
+    for (i, step) in path.windows(2).enumerate() {
+        let largest = (0..4)
+            .map(|j| (step[1][j] - step[0][j]).abs())
+            .fold(0.0, f64::max);
+        assert!(largest < 15.0, "step {i}: {path:?}");
+    }
+    for (i, event) in events.iter().enumerate() {
+        assert_close(&hkl_of(event), &point(i), 1e-9);
+    }
+}
+
 #[tokio::test]
 async fn mv_hkl_moves_the_reals_and_sets_the_setpoint() {
     let dx = e4cv();
