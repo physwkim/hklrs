@@ -83,15 +83,6 @@ impl From<Hdf5Error> for Hdf5FrameError {
             Hdf5Error::Format(FormatError::ChecksumMismatch { .. }) => {
                 Self::ChecksumMismatch(e.to_string())
             }
-            // rust-hdf5's I/O-layer error type is private (`pub(crate) mod
-            // io`), so a mismatch it raises is known by its text.
-            Hdf5Error::IoLayer(ref io)
-                if io
-                    .to_string()
-                    .starts_with("format error: checksum mismatch") =>
-            {
-                Self::ChecksumMismatch(e.to_string())
-            }
             e => Self::Hdf5(e.to_string()),
         }
     }
