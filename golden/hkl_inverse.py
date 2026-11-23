@@ -14,7 +14,7 @@ SOLEIL MARS), -e6c.c, -k4c.c,
 -k6c.c, -zaxis.c, -aps-04id-polar.c, -petra3-p09-eh2.c, -petra3-p23-4c.c,
 -petra3-p23-6c.c, hkl-pseudoaxis-common-hkl.c (_double_diffraction,
 _psi_constant_*, _emergence_fixed_func), -soleil-sixs-med.c; the ESRF BM28
-and ID01 PSIC modes only hold axes. SOLEIL SIXS MED2+3, and MED2+3 v2 with
+and ID01 PSIC and SOLEIL SIRIUS TURRET modes only hold axes. SOLEIL SIXS MED2+3, and MED2+3 v2 with
 its engine-list parameter eta_a_rotation = 1, refit eta_a after the solve
 (the list's multiply, soleil-sixs-med.c:294); those cases name it in
 fitted_axes. Only hkl's own GError is recorded as a case error; a failure of
@@ -46,7 +46,7 @@ GEOMETRIES = ["E4CV", "E4CH", "E6C", "K4CV", "K6C", "ESRF BM28 PSIC", "ZAXIS",
               "ESRF ID01 PSIC", "SOLEIL SIXS MED2+2", "SOLEIL SIXS MED1+2",
               "SOLEIL SIXS MED2+3", "SOLEIL SIXS MED2+3 v2", "SOLEIL MARS",
               "APS POLAR", "PETRA3 P09 EH2", "PETRA3 P23 4C",
-              "PETRA3 P23 6C"]
+              "PETRA3 P23 6C", "SOLEIL SIRIUS TURRET"]
 # Engine-list parameter sets run per geometry; [] where the list has none.
 LIST_PARAMS = {"SOLEIL SIXS MED2+3 v2": [[0.0], [1.0]]}
 PARAM_MODES = ("double_diffraction", "psi_constant", "psi constant",
