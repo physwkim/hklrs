@@ -14,9 +14,10 @@
 use std::collections::BTreeMap;
 
 use hklrs::inverse::analytic::{self, Constraints, Error};
+use hklrs::inverse::e6c;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::presets::preset;
-use hklrs::{Geometry, Wavelength, scattering};
+use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength, scattering};
 use serde_json::Value;
 
 /// A diffcalc or numeric solution matches a returned one within this (rad).
@@ -359,6 +360,114 @@ fn naz_2samp() {
 #[test]
 fn naz_bisect() {
     run("naz+bisect");
+}
+
+/// The numeric E6C mode that writes the circles `case` leaves free, if its
+/// constraints are three held circles or μ, ν and ψ.
+fn numeric_mode<'g>(geo: &'g Geometry, case: &Value) -> Option<Mode<'g>> {
+    let names = case["constraints"].as_object().unwrap();
+    let mut held: Vec<&str> = names.keys().map(String::as_str).collect();
+    held.sort_unstable();
+    let mode = match held[..] {
+        ["eta", "mu", "nu"] => e6c::constant_omega_vertical(geo),
+        ["chi", "mu", "nu"] => e6c::constant_chi_vertical(geo),
+        ["mu", "nu", "phi"] => e6c::constant_phi_vertical(geo),
+        ["chi", "eta", "mu"] => e6c::lifting_detector_phi(geo),
+        ["chi", "mu", "phi"] => e6c::lifting_detector_omega(geo),
+        ["chi", "eta", "phi"] => e6c::lifting_detector_mu(geo),
+        ["delta", "eta", "mu"] => e6c::constant_mu_horizontal(geo),
+        ["mu", "nu", "psi"] => {
+            let reference = mat(&case["UB"]).lu().solve(&vec3(&case["n_phi"])).unwrap();
+            e6c::psi_constant_vertical(geo, reference, f(&names["psi"]).to_radians())
+        }
+        _ => return None,
+    };
+    let mode = mode.unwrap();
+    let written: Vec<&str> = mode.written().iter().map(|&i| ORDER[i]).collect();
+    assert!(
+        ORDER
+            .iter()
+            .all(|n| held.contains(n) != written.contains(n)),
+        "{held:?} vs {written:?}"
+    );
+    Some(mode)
+}
+
+/// Every case a numeric E6C mode can pose, solved by both: the same
+/// positions within MATCH, or the same error. At |Q| = 2k the two
+/// reachability gates still differ until e6c runs behind the solver's;
+/// such a case is listed, not judged.
+#[test]
+fn analytic_agrees_with_numeric() {
+    let geo = preset("E6C").unwrap();
+    let r = analytic::frame();
+    let (mut positions, mut pending, mut failed) = (0, Vec::new(), Vec::new());
+    let mut agreed: BTreeMap<&str, usize> = BTreeMap::new();
+    for case in load()["cases"].as_array().unwrap() {
+        let Some(mode) = numeric_mode(&geo, case) else {
+            continue;
+        };
+        let id = &case["id"];
+        let ub = r.transpose() * mat(&case["UB"]);
+        let hkl = vec3(&case["hkl"]);
+        let wavelength = Wavelength::new(f(&case["wavelength"])).unwrap();
+        let q_max = 4.0 * std::f64::consts::PI / f(&case["wavelength"]);
+        if ((ub * hkl).norm() / q_max - 1.0).abs() < 1e-9 {
+            pending.push(id.clone());
+            continue;
+        }
+        let mut current = [0.0; 6];
+        for (name, value) in case["constraints"].as_object().unwrap() {
+            if let Some(i) = ORDER.iter().position(|o| o == name) {
+                current[i] = f(value).to_radians();
+            }
+        }
+        let numeric = InverseRequest {
+            mode: &mode,
+            ub,
+            wavelength,
+            target: Target::Hkl(hkl),
+            current: &current,
+        }
+        .solve();
+        let ours = analytic::e6c(
+            &constraints(case).unwrap(),
+            &(ub * hkl),
+            wavelength,
+            &(r.transpose() * vec3(&case["n_phi"])),
+            &(r.transpose() * vec3(&case["surf_nphi"])),
+        );
+        let kind = match (&ours, &numeric) {
+            (Ok(a), Ok(n)) => {
+                let n: Vec<[f64; 6]> = n.iter().map(|v| v[..].try_into().unwrap()).collect();
+                let within = |xs: &[[f64; 6]], ys: &[[f64; 6]]| {
+                    xs.iter().all(|x| ys.iter().any(|y| distance(x, y) < MATCH))
+                };
+                if a.len() != n.len() || !within(a, &n) || !within(&n, a) {
+                    failed.push(format!("{id}: analytic {a:?}\nnumeric {n:?}"));
+                    continue;
+                }
+                positions += a.len();
+                "positions"
+            }
+            (Ok(a), Err(InverseError::NoSolution)) if a.is_empty() => "none",
+            (Err(Error::Degenerate { .. }), Err(InverseError::Degenerate)) => "degenerate",
+            (Err(Error::Unreachable { .. }), Err(InverseError::Unreachable { .. })) => {
+                "unreachable"
+            }
+            _ => {
+                failed.push(format!("{id}: analytic {ours:?}, numeric {numeric:?}"));
+                continue;
+            }
+        };
+        *agreed.entry(kind).or_default() += 1;
+    }
+    eprintln!(
+        "analytic vs numeric: cases agreeing {agreed:?} ({positions} positions), failed {}, pending the reach gate {pending:?}",
+        failed.len()
+    );
+    assert!(agreed["positions"] > 0);
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
 /// The golden cases citing defect `id`, each checked; `count` of them.
