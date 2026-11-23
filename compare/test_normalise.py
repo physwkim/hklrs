@@ -3,11 +3,13 @@
 hklrs returns (counts, weight, reasons) per pixel; counts / weight is compared with xu's corrected
 intensity where xu is correct, and each place xu is wrong is asserted by its upstream-defects ID."""
 import functools
+import re
 
 import numpy as np
 import pytest
 
 import hklrs
+from hklrs import frame_map as fm
 from hklrs import normalise as nm
 
 xu = pytest.importorskip("xrayutilities")
@@ -56,15 +58,15 @@ def hkl_run(raw, mon=None, time=None, absf=None, dark=None, flat=None, av_mon=No
     n, h, w = raw.shape
     ref = av_mon if av_mon is not None else (None if mon is None else float(np.mean(mon)))
     fields = nm.PixelFields((h, w), dark, flat)
-    norm = nm.Normaliser(fields)
     _, red = nm.Region((0, h), (0, w), (1, 1)).apply(detector((h, w)))
+    norm = nm.Normaliser(fields, red)
     out = []
     for k in range(n):
         s = nm.FrameScalars(
             None if mon is None else mon[k], ref,
             time[k] if isinstance(time, np.ndarray) else time,
             None if absf is None else 1.0 / absf[k])
-        out.append(norm.normalise(raw[k], s, red))
+        out.append(norm.normalise(raw[k], s))
     return [np.stack(a) for a in zip(*out)]
 
 
@@ -151,7 +153,7 @@ def test_xu11_any_callable_is_an_absorber():
         arg = d if t is not None else 0.0625
         s = nm.FrameScalars().absorber(f, arg)
         _, red = nm.Region((0, 1), (0, 1), (1, 1)).apply(detector((1, 1)))
-        c, w, _ = nm.Normaliser(nm.PixelFields((1, 1))).normalise(np.ones((1, 1)), s, red)
+        c, w, _ = nm.Normaliser(nm.PixelFields((1, 1)), red).normalise(np.ones((1, 1)), s)
         assert w[0, 0] == pytest.approx(t if t is not None else 0.25, rel=1e-15)
     with pytest.raises(ValueError):
         nm.FrameScalars().absorber(lambda d: 0.0, d)
@@ -217,7 +219,7 @@ def test_shapes_dtypes_and_nan_where_masked():
     _, red = nm.Region((0, h), (0, w), (1, 1)).apply(det)
     raw = np.ones((h, w))
     raw[0, 3] = np.inf
-    c, wt, r = nm.Normaliser(nm.PixelFields((h, w))).normalise(raw, nm.FrameScalars(), red)
+    c, wt, r = nm.Normaliser(nm.PixelFields((h, w)), red).normalise(raw, nm.FrameScalars())
     assert (c.dtype, wt.dtype, r.dtype) == (np.float64, np.float64, np.uint8)
     assert c.shape == wt.shape == r.shape == (h, w) == red.shape
     assert (r[np.eye(h, w, dtype=bool)] == DETECTOR).all()  # the mask wins over the count
@@ -236,8 +238,8 @@ def test_precedence_with_geometric_weights():
     sr[0, [0, 1]] = hklrs.Masked.EdgeOn
     flat = np.array([[1.0, 1.0, 0.0, 1.0, 1.0]])
     raw = np.array([[1.0, 1.0, 1.0, np.nan, 1.0]])
-    c, wt, r = nm.Normaliser(nm.PixelFields((1, 5), flat=flat)).normalise(
-        raw, nm.FrameScalars(), red, [(sa, sr)])
+    c, wt, r = nm.Normaliser(nm.PixelFields((1, 5), flat=flat), red).normalise(
+        raw, nm.FrameScalars(), [(sa, sr)])
     assert list(r[0]) == [DETECTOR, int(hklrs.Masked.EdgeOn), BAD_FLAT, BAD_COUNT, 0]
     # the weight is the solid angle times the flat gain over its mean
     np.testing.assert_allclose(wt[0, 4], sa[0, 4] / flat[0, [0, 1, 3, 4]].mean(), rtol=TOL)
@@ -251,7 +253,7 @@ def test_xu13_a_bin_holds_the_block_it_is_placed_at():
     for slow, fast, bn in [((0, 7), (0, 11), (3, 3)), ((0, 6), (1, 10), (3, 3)),
                            ((1, 7), (4, 11), (2, 3)), ((2, 7), (5, 11), (5, 4))]:
         binned, red = nm.Region(slow, fast, bn).apply(raw_det)
-        c, wt, r = nm.Normaliser(nm.PixelFields((7, 11))).normalise(raw, nm.FrameScalars(), red)
+        c, wt, r = nm.Normaliser(nm.PixelFields((7, 11)), red).normalise(raw, nm.FrameScalars())
         assert not r.any() and c.shape == binned.shape
         for i in range(c.shape[0]):
             for j in range(c.shape[1]):
@@ -261,13 +263,28 @@ def test_xu13_a_bin_holds_the_block_it_is_placed_at():
 
 def test_dark_needs_a_count_time_and_shapes_must_agree():
     _, red = nm.Region((0, 1), (0, 3), (1, 1)).apply(detector((1, 3)))
-    n = nm.Normaliser(nm.PixelFields((1, 3), dark_rate=np.zeros((1, 3))))
+    n = nm.Normaliser(nm.PixelFields((1, 3), dark_rate=np.zeros((1, 3))), red)
     with pytest.raises(ValueError, match="count time"):
-        n.normalise(np.ones((1, 3)), nm.FrameScalars(), red)
+        n.normalise(np.ones((1, 3)), nm.FrameScalars())
     with pytest.raises(ValueError):
         nm.PixelFields((1, 3), flat=np.ones((1, 2)))
-    with pytest.raises(ValueError):
-        nm.Normaliser(nm.PixelFields((1, 3))).normalise(np.ones((1, 2)), nm.FrameScalars(), red)
+    n = nm.Normaliser(nm.PixelFields((1, 3)), red)
+    for raw in [np.ones((1, 2)), np.ones((3, 1))]:
+        with pytest.raises(ValueError, match="raw shape"):
+            n.normalise(raw, nm.FrameScalars())
     with pytest.raises(ValueError, match="reason code"):
-        nm.Normaliser(nm.PixelFields((1, 3))).normalise(
-            np.ones((1, 3)), nm.FrameScalars(), red, [(np.ones((1, 3)), np.full((1, 3), 99, np.uint8))])
+        n.normalise(np.ones((1, 3)), nm.FrameScalars(),
+                    [(np.ones((1, 3)), np.full((1, 3), 99, np.uint8))])
+
+
+def test_fields_of_another_raw_shape_are_refused_at_setup():
+    """Where fields meet a region (Normaliser, FrameMap), not at the first frame."""
+    det = detector((1, 3))
+    _, red = nm.Region((0, 1), (0, 3), (1, 1)).apply(det)
+    for shape in [(2, 3), (3, 1)]:
+        msg = re.escape(f"pixel fields shape {shape} does not match (1, 3)")
+        with pytest.raises(ValueError, match=msg):
+            nm.Normaliser(nm.PixelFields(shape), red)
+        with pytest.raises(ValueError, match=msg):
+            fm.FrameMap(hklrs.Geometry.preset("E4CV"), det, [(0.01, 0.0)] * 3,
+                        fields=nm.PixelFields(shape))

@@ -10,6 +10,7 @@ mod detector;
 mod detector_table;
 mod error;
 mod forward;
+pub mod frame_map;
 mod geometry;
 pub mod grid;
 pub mod inverse;
