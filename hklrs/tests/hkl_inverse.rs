@@ -1,6 +1,6 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
-//! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C and the SOLEIL SIXS MED
-//! presets.
+//! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C, the SOLEIL SIXS MED
+//! presets and SOLEIL MARS.
 //!
 //! Per case: the mode writes hkl's axes, its slits hkl's fitted axis; every
 //! hkl solution within VIOLATION
@@ -458,4 +458,10 @@ golden! {
     med23v2_mu_fixed_slits: "SOLEIL SIXS MED2+3 v2" "mu_fixed" eta_a_rotation 1.0,
     med23v2_gamma_fixed_slits: "SOLEIL SIXS MED2+3 v2" "gamma_fixed" eta_a_rotation 1.0,
     med23v2_emergence_fixed_slits: "SOLEIL SIXS MED2+3 v2" "emergence_fixed" eta_a_rotation 1.0,
+    mars_bissector: "SOLEIL MARS" "bissector",
+    mars_constant_omega: "SOLEIL MARS" "constant_omega",
+    mars_constant_chi: "SOLEIL MARS" "constant_chi",
+    mars_constant_phi: "SOLEIL MARS" "constant_phi",
+    mars_double_diffraction: "SOLEIL MARS" "double_diffraction",
+    mars_psi_constant: "SOLEIL MARS" "psi_constant",
 }
