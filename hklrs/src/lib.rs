@@ -10,6 +10,7 @@ mod geometry;
 pub mod inverse;
 mod lattice;
 pub mod presets;
+pub mod pseudo;
 mod sample;
 mod units;
 
