@@ -12,6 +12,7 @@ pub mod e6c;
 pub mod esrf_bm28_psic;
 pub mod esrf_id01_psic;
 mod jet;
+pub mod kappa;
 mod mode;
 mod solve;
 mod system;
@@ -76,6 +77,10 @@ pub enum InverseError {
     EquationCount { written: usize, equations: usize },
     #[error("psi is undefined: Q, k̂f × k̂i or the reference projected normal to Q is null")]
     PsiUndefined,
+    #[error("kappa arm tilt alpha = {alpha} rad is outside (0, π/2]")]
+    KappaAlpha { alpha: f64 },
+    #[error("|chi| = {} rad exceeds the kappa reach 2·alpha = {reach} rad", chi.abs())]
+    ChiOutOfReach { chi: f64, reach: f64 },
     #[error(transparent)]
     Geometry(#[from] Error),
     #[error(
