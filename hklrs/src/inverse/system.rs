@@ -25,6 +25,12 @@ pub(super) enum Goal {
     Q(Vector3<f64>),
     /// No rows: the extra equations alone place the detector.
     Detector,
+    /// The kappa arm's own rotation, komega·kappa·kphi, is `rotation`, that
+    /// of hkl's `eulerians`: three rows.
+    Arm {
+        eulerians: [f64; 3],
+        rotation: UnitQuaternion<f64>,
+    },
 }
 
 pub(super) struct System<'a> {
@@ -307,6 +313,8 @@ impl<'a> System<'a> {
                 (0..3).map(|i| hkl.component(i)).collect()
             }
             Goal::Detector => Vec::new(),
+            // Mode::new_kappa is the only way to an Arm goal.
+            Goal::Arm { rotation, .. } => self.arm(self.kappa?, rotation, values),
         };
         for e in self.extra {
             rows.push(match e {
@@ -488,6 +496,29 @@ impl<'a> System<'a> {
             v: wrap(terms.iter().map(|&(axis, c)| c * values[axis]).sum()),
             d,
         }
+    }
+
+    /// 2s·v of D = R_target⁻¹·R_arm = (w, v), s the sign of w: the rotation
+    /// vector of D for small turns. Column i is s·(w·uᵢ + uᵢ × v), uᵢ the
+    /// direction of written axis i in the arm, turned by R_target⁻¹.
+    fn arm(&self, kappa: &KappaAxes, target: &UnitQuaternion<f64>, values: &[f64]) -> Vec<Scalar> {
+        let stack = kappa.axes();
+        let arm = stack.iter().fold(UnitQuaternion::identity(), |r, &i| {
+            r * self.axis(i).transform(values[i]).rotation
+        });
+        let d = target.inverse() * arm;
+        let (w, v) = (d.w, d.imag());
+        let s = if w < 0.0 { -1.0 } else { 1.0 };
+        let u: Vec<Vector3<f64>> = lab_axes(self.geometry, self.written, &stack, values)
+            .iter()
+            .map(|a| target.inverse() * a)
+            .collect();
+        (0..3)
+            .map(|r| Scalar {
+                v: 2.0 * s * v[r],
+                d: u.iter().map(|u| s * (u * w + u.cross(&v))[r]).collect(),
+            })
+            .collect()
     }
 
     /// Residual of `held` at `values` and its gradient over the written
@@ -672,16 +703,24 @@ mod tests {
         }
     }
 
-    /// Modes of a detector goal, k = 1 Å⁻¹; "E6C" adds the Q-component rows
-    /// written on a sample axis.
-    fn detector_modes<'g>(name: &str, geo: &'g Geometry) -> Vec<Mode<'g>> {
+    /// Modes of the goals without Q: a detector goal, k = 1 Å⁻¹ ("E6C" adds
+    /// the Q-component rows written on a sample axis), and the arm goal.
+    fn other_goals<'g>(name: &str, geo: &'g Geometry) -> Vec<(Goal, Mode<'g>)> {
         let surface = Vector3::new(0.3, 1.0, -0.4);
         let gamma_delta =
             |extra: Vec<Equation>| Mode::named(geo, "m", &["gamma", "delta"], |_| extra).unwrap();
-        match name {
+        let detector = match name {
             "E4CV" | "E4CH" => [Equation::QSigned { q: -1.3 }, Equation::QNorm { q: 0.7 }]
                 .map(|e| Mode::named(geo, "m", &["tth"], |_| vec![e]).unwrap())
                 .into(),
+            "K4CV" | "K6C" => {
+                let arm = Goal::Arm {
+                    eulerians: [0.0; 3],
+                    rotation: UnitQuaternion::from_euler_angles(0.3, -0.5, 1.1),
+                };
+                let axes = ["komega", "kappa", "kphi"];
+                return vec![(arm, Mode::named_kappa(geo, "m", &axes, |_| vec![]).unwrap())];
+            }
             "E6C" => vec![
                 gamma_delta(vec![Equation::QNorm { q: 1.1 }, Equation::Qaz { qaz: 0.4 }]),
                 gamma_delta(vec![
@@ -705,7 +744,8 @@ mod tests {
                 .unwrap(),
             ],
             _ => Vec::new(),
-        }
+        };
+        detector.into_iter().map(|m| (Goal::Detector, m)).collect()
     }
 
     /// ψ of `reference` with k̂f at 2θ from k̂i about z, k̂f and k̂i scaled
@@ -760,9 +800,10 @@ mod tests {
     /// ZAXIS modes (mu in both stacks), the SIXS MED ones (pitch in both
     /// stacks), APS POLAR ones writing tau and PETRA3 P09 EH2 ones writing mu
     /// (in both stacks), PETRA3 P23 4C ones (two sample axes), every kappa
-    /// eulerian row on K4CV, the surface rows on K6C and the detector goals'
-    /// rows, at points away from the wrap cuts of the angular rows, from
-    /// kappa = 0 and from the sign changes of a signed q or qpar.
+    /// eulerian row on K4CV, the surface rows on K6C, the detector goals'
+    /// rows and the arm goal's on K4CV and K6C, at points away from the wrap
+    /// cuts of the angular rows, from kappa = 0 and from the sign changes of
+    /// a signed q, a qpar or the arm's quaternion.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
@@ -792,10 +833,7 @@ mod tests {
             for point in &points {
                 let values = &point[..n];
                 let q_modes = modes(name, &geo).into_iter().map(|m| (Goal::Q(q), m));
-                let detector = detector_modes(name, &geo)
-                    .into_iter()
-                    .map(|m| (Goal::Detector, m));
-                for (goal, mode) in &q_modes.chain(detector).collect::<Vec<_>>() {
+                for (goal, mode) in &q_modes.chain(other_goals(name, &geo)).collect::<Vec<_>>() {
                     let s = System::new(mode, ub, *goal, 1.0, values);
                     let x = s.written_values(values);
                     let j = s.eval(values).unwrap().j;

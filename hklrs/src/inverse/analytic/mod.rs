@@ -19,6 +19,7 @@ mod you;
 use nalgebra::{Matrix3, Vector3};
 
 use super::Equation;
+use super::kappa::Branch;
 use super::system::{Goal, System};
 use super::validate::SolutionSet;
 use crate::{AxisKind, Geometry};
@@ -189,7 +190,36 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> Option<SolutionSet<'a>> {
     match system.goal() {
         Goal::Q(q) => you_search(system, q),
         Goal::Detector => detector::search(system),
+        Goal::Arm { eulerians, .. } => arm_search(system, eulerians),
     }
+}
+
+/// [`search`] where the mode writes the kappa arm alone: both kappa images
+/// of `eulerians`.
+fn arm_search<'a>(system: &'a System<'a>, eulerians: &[f64; 3]) -> Option<SolutionSet<'a>> {
+    let kappa = system.kappa()?;
+    let axes = kappa.axes();
+    let mut written = system.written().to_vec();
+    written.sort_unstable();
+    let mut sorted = axes;
+    sorted.sort_unstable();
+    if written != sorted || !system.extra().is_empty() {
+        return None;
+    }
+    let mut set = SolutionSet::new(system);
+    for branch in [Branch::Same, Branch::Opposite] {
+        let mut values = system.current().to_vec();
+        for (&i, v) in axes
+            .iter()
+            .zip(kappa.arm().to_kappa(*eulerians, branch).ok()?)
+        {
+            values[i] = v;
+        }
+        for image in system.slit_images(values) {
+            set.offer(&image);
+        }
+    }
+    Some(set)
 }
 
 /// [`search`] by You's solution, where the geometry and the mode are
@@ -282,6 +312,47 @@ mod tests {
                 "{}",
                 mode.name()
             );
+        }
+    }
+
+    /// On the four eulerians presets, from a held position with every axis
+    /// turned, the two kappa images are the numeric search's set; at chi = 0
+    /// komega and kphi are one axis and both find the set degenerate.
+    #[test]
+    fn arm_agrees_with_numeric() {
+        for name in ["K4CV", "K6C", "SOLEIL SIRIUS KAPPA", "SOLEIL CRISTAL K4C"] {
+            let geometry = preset(name).unwrap();
+            let arm = ["komega", "kappa", "kphi"];
+            let mode = Mode::named_kappa(&geometry, "eulerians", &arm, |_| vec![]).unwrap();
+            let current: Vec<f64> = (0..geometry.axes().len())
+                .map(|i| 0.3 - 0.17 * i as f64)
+                .collect();
+            for eulerians in [[0.4, 0.9, -1.2], [-2.0, -1.5, 3.0], [0.1, 0.0, 0.2]] {
+                let request = InverseRequest {
+                    mode: &mode,
+                    ub: Matrix3::identity(),
+                    wavelength: Wavelength::new(1.54).unwrap(),
+                    target: Target::Eulerians(eulerians),
+                    current: &current,
+                };
+                let system = request.system().unwrap();
+                let ours = search(&system).unwrap().into_sorted();
+                let theirs = numeric::search(&system).into_sorted();
+                if eulerians[1] == 0.0 {
+                    assert!(matches!(ours, Err(InverseError::Degenerate)), "{name}");
+                    assert!(matches!(theirs, Err(InverseError::Degenerate)), "{name}");
+                    continue;
+                }
+                let (a, b) = (ours.unwrap().solutions, theirs.unwrap().solutions);
+                assert_eq!(a.len(), 2, "{name} {eulerians:?}: {a:?}");
+                assert!(
+                    a.len() == b.len()
+                        && a.iter().zip(&b).all(|(x, y)| {
+                            x.iter().zip(y).all(|(u, v)| wrap(u - v).abs() < 1e-9)
+                        }),
+                    "{name} {eulerians:?}: analytic {a:?}\nnumeric {b:?}"
+                );
+            }
         }
     }
 

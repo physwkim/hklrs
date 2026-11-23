@@ -2,8 +2,8 @@
 //!
 //! A Q target gives the three hkl equations R_sample·q = k̂f − k̂i, with q in
 //! units of k = 2π/λ and k̂f the detector rotation applied to the beam
-//! direction (a detector at infinity, as in hkl); [`Target::Detector`] gives
-//! none. The mode's extra [`Equation`]s close the system over its written
+//! direction (a detector at infinity, as in hkl); [`Target::Eulerians`]
+//! three equations of the kappa arm's rotation; [`Target::Detector`] none. The mode's extra [`Equation`]s close the system over its written
 //! axes, and its [`Slits`], if any, are turned into the surface after. Other
 //! axes stay at `current`.
 
@@ -31,7 +31,7 @@ pub mod zaxis;
 
 use std::f64::consts::{PI, TAU};
 
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 
 use crate::{Error, Geometry, Wavelength};
 
@@ -51,13 +51,18 @@ pub enum Target {
     /// No Q: the mode's equations alone place the detector, as hkl's `q`,
     /// `q2`, `tth2` and `qper_qpar` engines do.
     Detector,
+    /// (omega, chi, phi), rad: the kappa arm of a [`Mode::new_kappa`] mode
+    /// turns to the rotation of this eulerian cradle, chi modulo 2π
+    /// ([`kappa::KappaArm::to_kappa`]), at either kappa image, as hkl's
+    /// `eulerians` engine does.
+    Eulerians([f64; 3]),
 }
 
 impl Target {
     /// How many equations the target itself gives.
     fn rows(&self) -> usize {
         match self {
-            Target::Hkl(_) | Target::QSample(_) => 3,
+            Target::Hkl(_) | Target::QSample(_) | Target::Eulerians(_) => 3,
             Target::Detector => 0,
         }
     }
@@ -203,6 +208,21 @@ impl<'a> InverseRequest<'a> {
                 q_goal(q, q_max)?
             }
             Target::Detector => system::Goal::Detector,
+            Target::Eulerians(eulerians) => {
+                let kappa = self.mode.kappa().ok_or(InverseError::NoKappaArm)?;
+                let at = kappa.arm().to_kappa(eulerians, kappa::Branch::Same)?;
+                let rotation = kappa
+                    .axes()
+                    .iter()
+                    .zip(at)
+                    .fold(UnitQuaternion::identity(), |r, (&i, v)| {
+                        r * geometry.axes()[i].transform(v).rotation
+                    });
+                system::Goal::Arm {
+                    eulerians,
+                    rotation,
+                }
+            }
         };
         Ok(system::System::new(
             self.mode,
