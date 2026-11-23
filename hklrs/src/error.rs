@@ -104,6 +104,8 @@ pub enum Error {
         left: Vec<(String, f64, f64)>,
         right: Vec<(String, f64, f64)>,
     },
+    #[error("a dark field is a rate per second: the frame needs a count time")]
+    DarkNeedsTime,
     #[error("the cube's bin count does not fit in memory")]
     CubeSize,
     #[error("the ray meets no detector module within its pixels")]
