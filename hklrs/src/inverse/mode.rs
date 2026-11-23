@@ -13,6 +13,8 @@ pub enum Equation {
     DoubleDiffraction { hkl2: Vector3<f64> },
     /// ψ of `reference`, as [`super::psi`] defines it, equals `psi`.
     PsiConstant { reference: Vector3<f64>, psi: f64 },
+    /// axis ≡ 0 (mod π), axis index: parked at 0 or π.
+    ZeroModPi { axis: usize },
 }
 
 /// Which axes the inverse writes and the equations that fix them, checked
@@ -79,6 +81,7 @@ impl Equation {
                 reference(r, "psi reference")?;
                 finite(&[*psi], "psi")
             }
+            Self::ZeroModPi { axis } => rotation(geometry, *axis).map(|_| ()),
         }
     }
 }
@@ -115,6 +118,21 @@ impl<'g> Mode<'g> {
             written: written.to_vec(),
             extra,
         })
+    }
+
+    /// [`Mode::new`] with the written axes by name; `extra` gets their
+    /// indices.
+    pub(super) fn named(
+        geometry: &'g Geometry,
+        name: &str,
+        written: &[&str],
+        extra: impl FnOnce(&[usize]) -> Vec<Equation>,
+    ) -> Result<Self, InverseError> {
+        let w = written
+            .iter()
+            .map(|n| geometry.axis_index(n))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(geometry, name, &w, extra(&w))
     }
 
     pub fn geometry(&self) -> &'g Geometry {

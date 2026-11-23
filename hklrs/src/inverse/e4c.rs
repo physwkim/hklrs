@@ -9,22 +9,9 @@ use crate::Geometry;
 
 const ALL: [&str; 4] = ["omega", "chi", "phi", "tth"];
 
-fn mode<'g>(
-    geometry: &'g Geometry,
-    name: &str,
-    written: &[&str],
-    extra: impl FnOnce(&[usize]) -> Vec<Equation>,
-) -> Result<Mode<'g>, InverseError> {
-    let w = written
-        .iter()
-        .map(|n| geometry.axis_index(n))
-        .collect::<Result<Vec<_>, _>>()?;
-    Mode::new(geometry, name, &w, extra(&w))
-}
-
 /// tth ≡ 2·omega (mod 2π).
 pub fn bissector(geometry: &Geometry) -> Result<Mode<'_>, InverseError> {
-    mode(geometry, "bissector", &ALL, |w| {
+    Mode::named(geometry, "bissector", &ALL, |w| {
         vec![Equation::Bisector {
             sample: w[0],
             detector: w[3],
@@ -33,7 +20,7 @@ pub fn bissector(geometry: &Geometry) -> Result<Mode<'_>, InverseError> {
 }
 
 pub fn constant_omega(geometry: &Geometry) -> Result<Mode<'_>, InverseError> {
-    mode(
+    Mode::named(
         geometry,
         "constant_omega",
         &["chi", "phi", "tth"],
@@ -42,7 +29,7 @@ pub fn constant_omega(geometry: &Geometry) -> Result<Mode<'_>, InverseError> {
 }
 
 pub fn constant_chi(geometry: &Geometry) -> Result<Mode<'_>, InverseError> {
-    mode(
+    Mode::named(
         geometry,
         "constant_chi",
         &["omega", "phi", "tth"],
@@ -51,7 +38,7 @@ pub fn constant_chi(geometry: &Geometry) -> Result<Mode<'_>, InverseError> {
 }
 
 pub fn constant_phi(geometry: &Geometry) -> Result<Mode<'_>, InverseError> {
-    mode(
+    Mode::named(
         geometry,
         "constant_phi",
         &["omega", "chi", "tth"],
@@ -64,7 +51,7 @@ pub fn double_diffraction(
     geometry: &Geometry,
     hkl2: Vector3<f64>,
 ) -> Result<Mode<'_>, InverseError> {
-    mode(geometry, "double_diffraction", &ALL, |_| {
+    Mode::named(geometry, "double_diffraction", &ALL, |_| {
         vec![Equation::DoubleDiffraction { hkl2 }]
     })
 }
@@ -76,7 +63,7 @@ pub fn psi_constant(
     reference: Vector3<f64>,
     psi: f64,
 ) -> Result<Mode<'_>, InverseError> {
-    mode(geometry, "psi_constant", &ALL, |_| {
+    Mode::named(geometry, "psi_constant", &ALL, |_| {
         vec![Equation::PsiConstant { reference, psi }]
     })
 }

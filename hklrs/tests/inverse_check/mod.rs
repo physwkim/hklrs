@@ -79,6 +79,7 @@ pub fn check(
             Equation::PsiConstant { reference, psi } => {
                 wrap(psi_frame(geo, ub, reference, values) - psi).abs()
             }
+            Equation::ZeroModPi { axis } => values[*axis].sin().abs(),
         };
         within(miss, || format!("{values:?} misses {e:?} by {miss:e}"))?;
     }

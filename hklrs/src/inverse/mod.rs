@@ -8,6 +8,7 @@
 //! stay at `current`.
 
 pub mod e4c;
+pub mod e6c;
 mod jet;
 mod mode;
 mod solve;

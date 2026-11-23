@@ -172,6 +172,10 @@ impl<'a> System<'a> {
                         d: p.d,
                     }
                 }
+                Equation::ZeroModPi { axis } => Scalar {
+                    v: wrap(2.0 * values[*axis]) / 2.0,
+                    d: self.written.iter().map(|w| f64::from(w == axis)).collect(),
+                },
             });
         }
         Some(Eval {
@@ -184,35 +188,56 @@ impl<'a> System<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inverse::e4c;
+    use crate::inverse::{e4c, e6c};
     use crate::presets::preset;
 
+    fn modes(geo: &Geometry) -> Vec<Mode<'_>> {
+        let hkl2 = Vector3::new(1.0, -1.0, 0.5);
+        let reference = Vector3::new(0.2, 0.0, 1.0);
+        if geo.axes().len() == 4 {
+            vec![
+                e4c::bissector(geo).unwrap(),
+                e4c::constant_omega(geo).unwrap(),
+                e4c::constant_chi(geo).unwrap(),
+                e4c::constant_phi(geo).unwrap(),
+                e4c::double_diffraction(geo, hkl2).unwrap(),
+                e4c::psi_constant(geo, reference, 0.4).unwrap(),
+            ]
+        } else {
+            vec![
+                e6c::bissector_vertical(geo).unwrap(),
+                e6c::lifting_detector_phi(geo).unwrap(),
+                e6c::lifting_detector_mu(geo).unwrap(),
+                e6c::double_diffraction_vertical(geo, hkl2).unwrap(),
+                e6c::bissector_horizontal(geo).unwrap(),
+                e6c::double_diffraction_horizontal(geo, hkl2).unwrap(),
+                e6c::psi_constant_horizontal(geo, reference, 0.4).unwrap(),
+            ]
+        }
+    }
+
     /// Analytic Jacobian against a central difference of the residual, for
-    /// every E4C mode, at points away from the wrap cut of the angular rows.
+    /// every E4C mode and every kind of E6C mode, at points away from the
+    /// wrap cut of the angular rows.
     #[test]
     fn jacobian_matches_central_difference() {
         let ub = Matrix3::new(0.9, 0.1, -0.2, 0.05, 1.1, 0.3, -0.1, 0.2, 0.8);
         let q = Vector3::new(0.3, -0.5, 0.7);
         let h = 1e-6;
-        for name in ["E4CV", "E4CH"] {
+        let points = [
+            [0.3, -0.4, 1.2, 0.9, -0.6, 0.2],
+            [-2.0, 1.1, -0.7, -1.4, 0.8, -1.3],
+            [1.0, 2.5, 3.0, 2.2, 2.9, 0.7],
+        ];
+        for name in ["E4CV", "E4CH", "E6C"] {
             let geo = preset(name).unwrap();
-            let modes = [
-                e4c::bissector(&geo).unwrap(),
-                e4c::constant_omega(&geo).unwrap(),
-                e4c::constant_chi(&geo).unwrap(),
-                e4c::constant_phi(&geo).unwrap(),
-                e4c::double_diffraction(&geo, Vector3::new(1.0, -1.0, 0.5)).unwrap(),
-                e4c::psi_constant(&geo, Vector3::new(0.2, 0.0, 1.0), 0.4).unwrap(),
-            ];
-            for values in [
-                [0.3, -0.4, 1.2, 0.9],
-                [-2.0, 1.1, -0.7, -1.4],
-                [1.0, 2.5, 3.0, 2.2],
-            ] {
-                for mode in &modes {
-                    let s = System::new(mode, ub, q, &values);
-                    let x = s.written_values(&values);
-                    let j = s.eval(&values).unwrap().j;
+            let n = geo.axes().len();
+            for point in &points {
+                let values = &point[..n];
+                for mode in &modes(&geo) {
+                    let s = System::new(mode, ub, q, values);
+                    let x = s.written_values(values);
+                    let j = s.eval(values).unwrap().j;
                     for c in 0..x.len() {
                         let at = |d: f64| {
                             let mut y = x.clone();
