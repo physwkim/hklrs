@@ -2,7 +2,7 @@
 //! Å⁻¹; every angle (the coordinate along an angular cut, the window of an
 //! angular integration direction, the bin step and anchor, the footprint
 //! width) is in degrees here and radians in the core. A result holds the
-//! sums only; the estimator is the caller's.
+//! sums and their ratio per bin.
 
 use hklrs::absorption::{Masked, Weight};
 use hklrs::cut::{Cut, CutKind, CutResult, Footprint, IntDir};
@@ -266,9 +266,8 @@ impl PyCut {
     }
 }
 
-/// The sums of a cut per bin that received anything, ascending: no
-/// estimator (counts / weight or a mean of corrected pixels is for the
-/// caller to choose).
+/// The sums of a cut per bin that received anything, ascending, and
+/// `intensity`, their ratio.
 #[pyclass(name = "CutResult", frozen)]
 struct PyCutResult {
     result: CutResult,
@@ -315,6 +314,18 @@ impl PyCutResult {
     #[getter]
     fn contributions<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u64>> {
         self.column(py, |_, b| b.contributions)
+    }
+
+    /// Σcounts / Σweight per bin; NaN where Σweight is 0.
+    #[getter]
+    fn intensity<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(
+            py,
+            self.result
+                .intensity()
+                .map(|(_, v)| v.unwrap_or(f64::NAN))
+                .collect(),
+        )
     }
 
     /// Pixels not accumulated, by cause: every `Masked` name, then
