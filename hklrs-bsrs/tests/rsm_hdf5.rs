@@ -19,10 +19,10 @@ use bsrs::event_model::{
 use hklrs::frame_map::FrameMap;
 use hklrs::grid::{Binning, Cube};
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, PixelFields, RawFrame, Region};
+use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
-use hklrs::{PixelDetector, Wavelength};
+use hklrs::{Image, PixelDetector, Wavelength};
 use hklrs_bsrs::{
     FailedFrame, FrameFailure, FrameReader, Hdf5FrameError, Hdf5FrameReader, ReadError,
     RsmCallback, RsmConfig, RsmValue,
@@ -76,7 +76,7 @@ fn direct(n: usize) -> Cube {
     let mut cube = Cube::default();
     for (i, &komega) in KOMEGA[..n].iter().enumerate() {
         let data = pixels(i).into_iter().map(f64::from).collect();
-        let raw = RawFrame::new(SHAPE, data).unwrap();
+        let raw = Image::new(SHAPE, data).unwrap();
         let frame = map
             .map(&readbacks(komega), wavelength, &raw, &FrameScalars::new())
             .unwrap();
@@ -307,7 +307,7 @@ type Read = (u64, Instant, bool);
 struct Watched(Sender<Read>);
 
 impl FrameReader for Watched {
-    fn read(&self, resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError> {
+    fn read(&self, resource: &StreamResource, index: u64) -> Result<Image<f64>, ReadError> {
         let at = Instant::now();
         let read = Hdf5FrameReader.read(resource, index);
         if let Err(e) = &read {

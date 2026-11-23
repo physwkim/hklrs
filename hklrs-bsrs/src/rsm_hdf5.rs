@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use bsrs::event_model::StreamResource;
-use hklrs::normalise::RawFrame;
+use hklrs::Image;
 use rust_hdf5::format::FormatError;
 use rust_hdf5::format::messages::filter::{
     BSHUF_COMPRESS_LZ4, FILTER_BITGROOM, FILTER_BITROUND, FILTER_BLOSC, FILTER_BLOSC2,
@@ -132,7 +132,11 @@ fn undecodable(pipeline: &[Filter]) -> Option<Hdf5FrameError> {
 impl Hdf5FrameReader {
     /// Frame `index` in the dataset's own (slow, fast) shape. Integer
     /// pixels are converted exactly or refused; float pixels are widened.
-    pub fn frame(&self, resource: &StreamResource, index: u64) -> Result<RawFrame, Hdf5FrameError> {
+    pub fn frame(
+        &self,
+        resource: &StreamResource,
+        index: u64,
+    ) -> Result<Image<f64>, Hdf5FrameError> {
         let dataset = match resource.parameters.get("dataset") {
             Some(serde_json::Value::String(d)) if resource.mimetype == MIMETYPE => d,
             _ => {
@@ -186,7 +190,7 @@ impl Hdf5FrameReader {
                 })
                 .collect::<Result<_, _>>()?,
         };
-        RawFrame::new((slow, fast), data).map_err(|e| Hdf5FrameError::Hdf5(e.to_string()))
+        Image::new((slow, fast), data).map_err(|e| Hdf5FrameError::Hdf5(e.to_string()))
     }
 }
 
@@ -195,7 +199,7 @@ impl Hdf5FrameReader {
 /// those flushed, as when the datum is sent after a failed flush
 /// (`host/areadetector.rs:1933`); and metadata read mid-rewrite.
 impl FrameReader for Hdf5FrameReader {
-    fn read(&self, resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError> {
+    fn read(&self, resource: &StreamResource, index: u64) -> Result<Image<f64>, ReadError> {
         self.frame(resource, index).map_err(|e| match e {
             Hdf5FrameError::MissingFile { .. }
             | Hdf5FrameError::IndexOutOfRange { .. }

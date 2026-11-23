@@ -5,9 +5,9 @@
 //! them.
 
 use crate::grid::{Binning, Cube, Projected};
-use crate::normalise::{FrameScalars, NormalisedFrame, Normaliser, PixelFields, RawFrame, Region};
+use crate::normalise::{FrameScalars, NormalisedFrame, Normaliser, PixelFields, Region};
 use crate::projection::Projection;
-use crate::{Error, Geometry, PixelDetector, Wavelength};
+use crate::{Error, Geometry, Image, PixelDetector, Wavelength};
 
 /// What every frame of one scan shares.
 #[derive(Clone, Debug, PartialEq)]
@@ -95,7 +95,7 @@ impl FrameMap {
         &self,
         readbacks: &[f64],
         wavelength: Wavelength,
-        raw: &RawFrame,
+        raw: &Image<f64>,
         scalars: &FrameScalars,
     ) -> Result<MappedFrame, Error> {
         let values = self.geometry.values_from_degrees(readbacks)?;
@@ -184,7 +184,7 @@ mod tests {
             .map(
                 &READBACKS,
                 wavelength,
-                &RawFrame::new((4, 6), raw.clone()).unwrap(),
+                &Image::new((4, 6), raw.clone()).unwrap(),
                 &FrameScalars::new(),
             )
             .unwrap();
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(map.raw_shape(), (4, 6));
         let wavelength = Wavelength::new(1.54).unwrap();
         let scalars = FrameScalars::new();
-        let frame = |shape: (usize, usize)| RawFrame::new(shape, vec![0.0; 24]).unwrap();
+        let frame = |shape: (usize, usize)| Image::new(shape, vec![0.0; 24]).unwrap();
         let e = map
             .map(&READBACKS[..5], wavelength, &frame((4, 6)), &scalars)
             .unwrap_err();

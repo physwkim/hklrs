@@ -8,13 +8,13 @@
 pub mod common;
 
 use common::{f, load};
-use hklrs::PixelDetector;
 use hklrs::Wavelength;
 use hklrs::absorption::Masked;
 use hklrs::cut::{Cut, CutError, CutKind, CutResult, Footprint, IntDir};
 use hklrs::grid::Binning;
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, RawFrame, Region};
+use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, Region};
+use hklrs::{Image, PixelDetector};
 use serde_json::Value;
 
 const NPOINTS: f64 = 40.0;
@@ -98,7 +98,7 @@ fn unit_pixels(counts: &[f64]) -> Vec<Result<Normalised, Masked>> {
     let frame = Normaliser::new(PixelFields::new((1, n)), r)
         .unwrap()
         .normalise(
-            &RawFrame::new((1, n), counts.to_vec()).unwrap(),
+            &Image::new((1, n), counts.to_vec()).unwrap(),
             &FrameScalars::new(),
             &[],
         )

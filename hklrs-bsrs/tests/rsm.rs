@@ -19,10 +19,10 @@ use bsrs::event_model::{
 use hklrs::frame_map::FrameMap;
 use hklrs::grid::{Binning, Cube};
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, PixelFields, RawFrame, Region};
+use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
-use hklrs::{PixelDetector, Wavelength};
+use hklrs::{Image, PixelDetector, Wavelength};
 use hklrs_bsrs::{
     FailedFrame, FrameFailure, FrameReader, ReadError, RsmCallback, RsmConfig, RsmError, RsmValue,
 };
@@ -50,8 +50,8 @@ fn pixels(index: u64) -> Vec<f64> {
 }
 
 /// Frame `index`'s raw image.
-fn raw(index: u64) -> RawFrame {
-    RawFrame::new(SHAPE, pixels(index)).unwrap()
+fn raw(index: u64) -> Image<f64> {
+    Image::new(SHAPE, pixels(index)).unwrap()
 }
 
 fn frame_map() -> FrameMap {
@@ -107,7 +107,7 @@ struct Frames {
 }
 
 impl FrameReader for Frames {
-    fn read(&self, _resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError> {
+    fn read(&self, _resource: &StreamResource, index: u64) -> Result<Image<f64>, ReadError> {
         self.reads.lock().unwrap().push((index, Instant::now()));
         if self.slow == Some(index) {
             std::thread::sleep(Duration::from_millis(50));
@@ -123,7 +123,7 @@ impl FrameReader for Frames {
             ));
         }
         if self.transposed == Some(index) {
-            return Ok(RawFrame::new((SHAPE.1, SHAPE.0), pixels(index)).unwrap());
+            return Ok(Image::new((SHAPE.1, SHAPE.0), pixels(index)).unwrap());
         }
         Ok(raw(index))
     }
