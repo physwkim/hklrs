@@ -1,7 +1,9 @@
 //! hkl 5.1.9 inverse golden (golden/hkl_inverse.py), E4CV, E4CH, E6C,
-//! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV and K6C.
+//! ESRF BM28 PSIC, ZAXIS, ESRF ID01 PSIC, K4CV, K6C and the SOLEIL SIXS MED
+//! presets.
 //!
-//! Per case: the mode writes hkl's axes; every hkl solution within VIOLATION
+//! Per case: the mode writes hkl's axes, its slits hkl's fitted axis; every
+//! hkl solution within VIOLATION
 //! of hkl's own mode equations is in the hklrs set within MATCH rad, directly
 //! or after one Newton step on the independent residuals where hkl's own
 //! precision is coarser (counted); one beyond it (HKL-18: the Ewald step of
@@ -17,7 +19,7 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, k4c, k6c, zaxis};
+use hklrs::inverse::{e4c, e6c, esrf_bm28_psic, k4c, k6c, soleil_sixs_med, zaxis};
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength};
@@ -48,9 +50,11 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
     let rad = |n: &str| param(n).to_radians();
     let hkl2 = || Vector3::new(param("h2"), param("k2"), param("l2"));
     let psi = || param("psi").to_radians();
+    let surface = || Vector3::new(param("x"), param("y"), param("z"));
+    let emergence = || param("emergence").to_radians();
     let kappa = case["geometry"] == "K4CV";
     let k6c = case["geometry"] == "K6C";
-    match case["mode"].as_str().unwrap() {
+    let mode = match case["mode"].as_str().unwrap() {
         "bissector_vertical" if k6c => k6c::bissector_vertical(geo),
         "constant_omega_vertical" if k6c => k6c::constant_omega_vertical(geo, rad("omega")),
         "constant_chi_vertical" if k6c => k6c::constant_chi_vertical(geo, rad("chi")),
@@ -101,30 +105,53 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
         "constant_delta_coplanar" => esrf_bm28_psic::constant_delta_coplanar(geo),
         "constant_eta_noncoplanar" => esrf_bm28_psic::constant_eta_noncoplanar(geo),
         "zaxis" => zaxis::zaxis(geo),
-        "reflectivity" => zaxis::reflectivity(geo),
+        "reflectivity" if case["geometry"] == "ZAXIS" => zaxis::reflectivity(geo),
+        "reflectivity" => soleil_sixs_med::reflectivity(geo),
+        "mu_fixed" => soleil_sixs_med::mu_fixed(geo),
+        "emergence_fixed" => soleil_sixs_med::emergence_fixed(geo, surface(), emergence()),
+        "pitch_fixed" => soleil_sixs_med::pitch_fixed(geo),
+        "delta_fixed" => soleil_sixs_med::delta_fixed(geo),
+        "gamma_fixed" => soleil_sixs_med::gamma_fixed(geo),
         m => panic!("mode {m}"),
     }
-    .unwrap()
+    .unwrap();
+    match case.get("fitted_axes") {
+        Some(fitted) => {
+            let mode = soleil_sixs_med::slits(mode).unwrap();
+            let axis = mode.slits().unwrap().axis();
+            assert_eq!(fitted, &serde_json::json!([geo.axes()[axis].name()]));
+            mode
+        }
+        None => mode,
+    }
 }
 
-/// Jacobian of [`inverse_check::residuals`] over the written axes by
-/// central differences.
+/// The written axes then the slits axis: what the solve moves.
+fn moved(mode: &Mode) -> Vec<usize> {
+    let slits = mode.slits().map(|s| s.axis());
+    mode.written().iter().copied().chain(slits).collect()
+}
+
+/// Jacobian of the first `axes.len()` of [`inverse_check::residuals`] over
+/// `axes` by central differences: over the written axes, that of the mode's
+/// equations; over [`moved`], with the slit equation too.
 fn jacobian(
     mode: &Mode,
+    axes: &[usize],
     ub: &Matrix3<f64>,
     wavelength: Wavelength,
     hkl: &Vector3<f64>,
     values: &[f64],
 ) -> DMatrix<f64> {
     const H: f64 = 1e-6;
-    let n = mode.written().len();
+    let n = axes.len();
     let at = |axis: usize, d: f64| {
         let mut v = values.to_vec();
         v[axis] += d;
         inverse_check::residuals(mode, ub, wavelength, hkl, &v).unwrap()
     };
     let mut j = DMatrix::zeros(n, n);
-    for (c, &axis) in mode.written().iter().enumerate() {
+    for (c, &axis) in axes.iter().enumerate() {
         let (plus, minus) = (at(axis, H), at(axis, -H));
         for r in 0..n {
             j[(r, c)] = (plus[r] - minus[r]) / (2.0 * H);
@@ -143,11 +170,12 @@ fn newton(
     values: &[f64],
 ) -> Option<Vec<f64>> {
     let r = inverse_check::residuals(mode, ub, wavelength, hkl, values).unwrap();
-    let step = jacobian(mode, ub, wavelength, hkl, values)
+    let moved = moved(mode);
+    let step = jacobian(mode, &moved, ub, wavelength, hkl, values)
         .lu()
         .solve(&DVector::from_vec(r))?;
     let mut x = values.to_vec();
-    for (d, &axis) in step.iter().zip(mode.written()) {
+    for (d, &axis) in step.iter().zip(&moved) {
         x[axis] = wrap(x[axis] - d);
     }
     Some(x)
@@ -180,7 +208,9 @@ struct Counts {
     hkl_miss_solutions: usize,
 }
 
-fn run(geometry: &str, mode_name: &str) {
+/// The cases of `geometry` and `mode_name`, with the engine list parameter
+/// eta_a_rotation at `eta_a_rotation` (MED2+3 v2) or unset.
+fn run(geometry: &str, mode_name: &str, eta_a_rotation: Option<f64>) {
     let golden = common::load("hkl_inverse.json");
     let geo = preset(geometry).unwrap();
     let mut n = Counts::default();
@@ -190,7 +220,13 @@ fn run(geometry: &str, mode_name: &str) {
         .unwrap()
         .iter()
         .enumerate()
-        .filter(|(_, c)| c["geometry"] == geometry && c["mode"] == mode_name)
+        .filter(|(_, c)| {
+            c["geometry"] == geometry
+                && c["mode"] == mode_name
+                && c.get("engine_list_parameters")
+                    .map(|p| common::f(&p["eta_a_rotation"]))
+                    == eta_a_rotation
+        })
     {
         n.cases += 1;
         let mode = mode(&geo, case);
@@ -261,7 +297,7 @@ fn run(geometry: &str, mode_name: &str) {
                     fail("Degenerate, no hkl solution to confirm it".into());
                 }
                 for t in &theirs {
-                    let sigma = jacobian(&mode, &ub, wavelength, &hkl, t)
+                    let sigma = jacobian(&mode, mode.written(), &ub, wavelength, &hkl, t)
                         .singular_values()
                         .min();
                     if sigma > SINGULAR {
@@ -321,8 +357,9 @@ fn run(geometry: &str, mode_name: &str) {
             n.hkl_miss_solutions += verified;
         }
     }
+    let rotation = eta_a_rotation.map_or(String::new(), |r| format!(" eta_a_rotation {r}"));
     println!(
-        "{geometry} {mode_name}: {} cases, {} unreachable, {} degenerate (hkl's {} solutions \
+        "{geometry} {mode_name}{rotation}: {} cases, {} unreachable, {} degenerate (hkl's {} solutions \
          there singular); hkl {} solutions elsewhere, all found ({} after a Newton step), {} \
          moving a held axis (HKL-16) and {} violating an equation (HKL-18); hklrs {} solutions, {} beyond hkl's; hkl failed {} cases with \
          |Q| <= 2k, {} of them hkl misses (hklrs {} verified solutions there)",
@@ -345,10 +382,10 @@ fn run(geometry: &str, mode_name: &str) {
 }
 
 macro_rules! golden {
-    ($($test:ident: $geometry:literal $mode:literal,)*) => {
+    ($($test:ident: $geometry:literal $mode:literal $(eta_a_rotation $rotation:literal)?,)*) => {
         $(#[test]
         fn $test() {
-            run($geometry, $mode);
+            run($geometry, $mode, None$(.or(Some($rotation)))?);
         })*
     };
 }
@@ -407,4 +444,18 @@ golden! {
     k6c_constant_chi_vertical: "K6C" "constant_chi_vertical",
     k6c_lifting_detector_kphi: "K6C" "lifting_detector_kphi",
     k6c_lifting_detector_mu: "K6C" "lifting_detector_mu",
+    med22_mu_fixed: "SOLEIL SIXS MED2+2" "mu_fixed",
+    med22_reflectivity: "SOLEIL SIXS MED2+2" "reflectivity",
+    med22_emergence_fixed: "SOLEIL SIXS MED2+2" "emergence_fixed",
+    med12_pitch_fixed: "SOLEIL SIXS MED1+2" "pitch_fixed",
+    med12_delta_fixed: "SOLEIL SIXS MED1+2" "delta_fixed",
+    med23_mu_fixed: "SOLEIL SIXS MED2+3" "mu_fixed",
+    med23_gamma_fixed: "SOLEIL SIXS MED2+3" "gamma_fixed",
+    med23_emergence_fixed: "SOLEIL SIXS MED2+3" "emergence_fixed",
+    med23v2_mu_fixed: "SOLEIL SIXS MED2+3 v2" "mu_fixed" eta_a_rotation 0.0,
+    med23v2_gamma_fixed: "SOLEIL SIXS MED2+3 v2" "gamma_fixed" eta_a_rotation 0.0,
+    med23v2_emergence_fixed: "SOLEIL SIXS MED2+3 v2" "emergence_fixed" eta_a_rotation 0.0,
+    med23v2_mu_fixed_slits: "SOLEIL SIXS MED2+3 v2" "mu_fixed" eta_a_rotation 1.0,
+    med23v2_gamma_fixed_slits: "SOLEIL SIXS MED2+3 v2" "gamma_fixed" eta_a_rotation 1.0,
+    med23v2_emergence_fixed_slits: "SOLEIL SIXS MED2+3 v2" "emergence_fixed" eta_a_rotation 1.0,
 }
