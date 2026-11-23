@@ -12,9 +12,12 @@ use nalgebra::{DMatrix, Vector3};
 
 use crate::xu::Direction;
 
+mod fit;
 pub mod lm;
+mod model;
 pub mod peak;
 
+pub use fit::{AreaModel, AreaStart, LinearModel, LinearStart, calibrate_area, calibrate_linear};
 pub use lm::{Failure, Stop};
 pub use peak::{Peak, Peak1, Reject};
 
@@ -32,6 +35,16 @@ pub enum ParamId {
     Detrot,
     /// Zero offset of the outer detector circle.
     AngleOffset,
+    /// Wavelength in Å, fitted when reflection frames fix the scale (XU-7).
+    Wavelength,
+}
+
+impl ParamId {
+    pub(crate) const COUNT: usize = 10;
+
+    pub(crate) fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// A start value, fitted or held.
@@ -155,10 +168,11 @@ pub enum CalibError {
         have: usize,
         need: usize,
     },
-    /// Two direction pairs fit within 10 % of each other.
+    /// Two direction sets (two directions for an area detector, one for a
+    /// linear one) fit within 10 % of each other.
     AmbiguousDirections {
-        best: (Direction, Direction),
-        runner_up: (Direction, Direction),
+        best: Vec<Direction>,
+        runner_up: Vec<Direction>,
         best_cost: f64,
         runner_up_cost: f64,
     },
@@ -172,6 +186,11 @@ pub enum CalibError {
     },
     /// No free parameters, or fewer residuals than free parameters.
     BadProblem,
+    /// The geometry has no such axis, or the detector parameters do not
+    /// build a detector.
+    Model(crate::Error),
+    /// The axis the angle offset shifts is a translation or a parameter.
+    OffsetAxisNotRotation(String),
 }
 
 impl std::fmt::Display for CalibError {
@@ -208,6 +227,10 @@ impl std::fmt::Display for CalibError {
             ),
             Self::BadStart { id, value } => write!(f, "start value of {id:?} is {value}"),
             Self::BadFrame { index, what } => write!(f, "frame {index}: {what}"),
+            Self::Model(e) => write!(f, "{e}"),
+            Self::OffsetAxisNotRotation(name) => {
+                write!(f, "angle offset axis {name} is not a rotation")
+            }
             Self::BadProblem => write!(
                 f,
                 "no free parameters, or fewer residuals than free parameters"

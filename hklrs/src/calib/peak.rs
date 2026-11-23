@@ -34,7 +34,7 @@ pub struct Peak1 {
     pub sigma: f64,
 }
 
-/// Why a frame yields no peak. These are findings about the frame, not
+/// Why a frame is left out: it yields no peak, or its peak cannot be located. These are findings about the frame, not
 /// failures of the caller's input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
@@ -51,6 +51,14 @@ pub enum Reject {
     /// The pseudo-Voigt fit did not converge, left its window, or has an
     /// unidentifiable position.
     FitFailed,
+    /// The frame's ray misses every detector module within its pixels.
+    RayOutside,
+    /// The frame's ray meets the detector only behind the sample.
+    RayBehind,
+    /// The frame's ray is parallel to the detector.
+    RayParallel,
+    /// The frame defines no ray: its direction is zero or not finite.
+    NoRay,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
