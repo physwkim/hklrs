@@ -17,19 +17,11 @@ type Pixels<'py> = (
     Bound<'py, PyArray2<u8>>,
 );
 
-/// Row-major values of `a`, which must have `shape`.
-pub(crate) fn plane(
-    what: &str,
-    a: &PyReadonlyArray2<'_, f64>,
-    shape: (usize, usize),
-) -> PyResult<Vec<f64>> {
-    if a.shape() != [shape.0, shape.1] {
-        return Err(PyValueError::new_err(format!(
-            "{what} shape {:?} does not match {shape:?}",
-            a.shape()
-        )));
-    }
-    Ok(a.as_array().iter().copied().collect())
+/// `a` as a raw image of its own shape, which the core compares with the
+/// raw shape wherever the two meet.
+pub(crate) fn raw_frame(a: &PyReadonlyArray2<'_, f64>) -> PyResult<core::RawFrame> {
+    let shape = (a.shape()[0], a.shape()[1]);
+    core::RawFrame::new(shape, a.as_array().iter().copied().collect()).map_err(err)
 }
 
 /// What one frame contributes to every pixel's weight. A monitor needs its
@@ -103,10 +95,10 @@ impl PyPixelFields {
     ) -> PyResult<Self> {
         let mut f = core::PixelFields::new(shape);
         if let Some(d) = dark_rate {
-            f = f.dark_rate(plane("dark_rate", &d, shape)?).map_err(err)?;
+            f = f.dark_rate(raw_frame(&d)?).map_err(err)?;
         }
         if let Some(g) = flat {
-            f = f.flat(plane("flat", &g, shape)?).map_err(err)?;
+            f = f.flat(raw_frame(&g)?).map_err(err)?;
         }
         Ok(Self(f))
     }
@@ -161,7 +153,7 @@ fn geometric(
                 .ok_or_else(|| PyValueError::new_err(format!("{c} is not a reason code"))),
         })
         .collect::<PyResult<Vec<Option<Masked>>>>()?;
-    let values = plane("weights", &values, shape)?;
+    let values: Vec<f64> = values.as_array().iter().copied().collect();
     Weights::from_values(shape, &values, &reasons).map_err(err)
 }
 
@@ -206,7 +198,7 @@ impl PyNormaliser {
         scalars: &PyFrameScalars,
         weights: Vec<(PyReadonlyArray2<'_, f64>, PyReadonlyArray2<'_, u8>)>,
     ) -> PyResult<Pixels<'py>> {
-        let raw = plane("raw", &raw, self.0.raw_shape())?;
+        let raw = raw_frame(&raw)?;
         let weights = weights
             .into_iter()
             .map(geometric)

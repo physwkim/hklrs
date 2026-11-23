@@ -270,7 +270,8 @@ def test_dark_needs_a_count_time_and_shapes_must_agree():
         nm.PixelFields((1, 3), flat=np.ones((1, 2)))
     n = nm.Normaliser(nm.PixelFields((1, 3)), red)
     for raw in [np.ones((1, 2)), np.ones((3, 1))]:
-        with pytest.raises(ValueError, match="raw shape"):
+        msg = re.escape(f"raw frame shape {raw.shape} does not match (1, 3)")
+        with pytest.raises(ValueError, match=msg):
             n.normalise(raw, nm.FrameScalars())
     with pytest.raises(ValueError, match="reason code"):
         n.normalise(np.ones((1, 3)), nm.FrameScalars(),
@@ -288,3 +289,25 @@ def test_fields_of_another_raw_shape_are_refused_at_setup():
         with pytest.raises(ValueError, match=msg):
             fm.FrameMap(hklrs.Geometry.preset("E4CV"), det, [(0.01, 0.0)] * 3,
                         fields=nm.PixelFields(shape))
+
+
+def test_a_transposed_raw_image_is_refused():
+    """A frame, dark field or flat field is taken in its own numpy shape, so
+    the transposed shape of the raw (2, 3) is refused, not read row-major."""
+    det = detector((2, 3))
+    _, red = nm.Region((0, 2), (0, 3), (1, 1)).apply(det)
+    t = np.arange(6.0).reshape(3, 2)
+    msg = lambda what: re.escape(f"{what} shape (3, 2) does not match (2, 3)")  # noqa: E731
+    with pytest.raises(ValueError, match=msg("raw frame")):
+        nm.Normaliser(nm.PixelFields((2, 3)), red).normalise(t, nm.FrameScalars())
+    m = fm.FrameMap(hklrs.Geometry.preset("E4CV"), det, [(0.01, 0.0)] * 3)
+    cube = fm.Cube()
+    m.add(cube, [10.0, 0.0, 0.0, 20.0], 1.54, t.T.copy())
+    before = cube.photons
+    with pytest.raises(ValueError, match=msg("raw frame")):
+        m.add(cube, [10.0, 0.0, 0.0, 20.0], 1.54, t)
+    np.testing.assert_array_equal(cube.photons, before)
+    with pytest.raises(ValueError, match=msg("dark field")):
+        nm.PixelFields((2, 3), dark_rate=t)
+    with pytest.raises(ValueError, match=msg("flat field")):
+        nm.PixelFields((2, 3), flat=t + 1.0)

@@ -6,7 +6,7 @@
 
 use crate::absorption::Masked;
 use crate::grid::{Binning, Cube, Projected};
-use crate::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, Region};
+use crate::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, RawFrame, Region};
 use crate::projection::Projection;
 use crate::{Error, Geometry, PixelDetector, Wavelength};
 
@@ -90,13 +90,13 @@ impl FrameMap {
     }
 
     /// One frame: `readbacks` in the geometry's axis order, degrees for
-    /// rotations and metres for translations; `raw` the whole raw image,
-    /// row-major.
+    /// rotations and metres for translations; `raw` the whole raw image, of
+    /// the raw shape.
     pub fn map(
         &self,
         readbacks: &[f64],
         wavelength: Wavelength,
-        raw: &[f64],
+        raw: &RawFrame,
         scalars: &FrameScalars,
     ) -> Result<MappedFrame, Error> {
         let values = self.geometry.values_from_degrees(readbacks)?;
@@ -182,7 +182,12 @@ mod tests {
         .unwrap();
         let raw: Vec<f64> = (0..24).map(f64::from).collect();
         let frame = map
-            .map(&READBACKS, wavelength, &raw, &FrameScalars::new())
+            .map(
+                &READBACKS,
+                wavelength,
+                &RawFrame::new((4, 6), raw.clone()).unwrap(),
+                &FrameScalars::new(),
+            )
             .unwrap();
 
         let (binned, _) = region.apply(&raw_detector()).unwrap();
@@ -232,6 +237,9 @@ mod tests {
         }
     }
 
+    /// One readback per axis, and a raw frame of the raw shape: the
+    /// transposed shape of the same pixel count is refused as much as
+    /// another count.
     #[test]
     fn readbacks_are_one_per_axis_and_raw_the_whole_frame() {
         let map = FrameMap::new(
@@ -246,8 +254,9 @@ mod tests {
         assert_eq!(map.raw_shape(), (4, 6));
         let wavelength = Wavelength::new(1.54).unwrap();
         let scalars = FrameScalars::new();
+        let frame = |shape: (usize, usize)| RawFrame::new(shape, vec![0.0; 24]).unwrap();
         let e = map
-            .map(&READBACKS[..5], wavelength, &[0.0; 24], &scalars)
+            .map(&READBACKS[..5], wavelength, &frame((4, 6)), &scalars)
             .unwrap_err();
         assert!(
             matches!(
@@ -259,19 +268,22 @@ mod tests {
             ),
             "{e:?}"
         );
-        let e = map
-            .map(&READBACKS, wavelength, &[0.0; 23], &scalars)
-            .unwrap_err();
         assert!(
-            matches!(
-                e,
-                Error::PixelCount {
-                    len: 23,
-                    expected: 24,
-                    ..
-                }
-            ),
-            "{e:?}"
+            map.map(&READBACKS, wavelength, &frame((4, 6)), &scalars)
+                .is_ok()
         );
+        for shape in [(6, 4), (2, 12)] {
+            let e = map
+                .map(&READBACKS, wavelength, &frame(shape), &scalars)
+                .unwrap_err();
+            assert_eq!(
+                e,
+                Error::ShapeMismatch {
+                    what: "raw frame",
+                    shape,
+                    expected: (4, 6)
+                }
+            );
+        }
     }
 }

@@ -14,7 +14,7 @@ use hklrs::absorption::Masked;
 use hklrs::cut::{Cut, CutError, CutKind, CutResult, Footprint, IntDir};
 use hklrs::grid::Binning;
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, Region};
+use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, RawFrame, Region};
 use serde_json::Value;
 
 const NPOINTS: f64 = 40.0;
@@ -97,7 +97,11 @@ fn unit_pixels(counts: &[f64]) -> Vec<Result<Normalised, Masked>> {
     let (_, r) = Region::new(0..1, 0..n, (1, 1)).apply(&det).unwrap();
     let frame = Normaliser::new(PixelFields::new((1, n)), r)
         .unwrap()
-        .normalise(counts, &FrameScalars::new(), &[])
+        .normalise(
+            &RawFrame::new((1, n), counts.to_vec()).unwrap(),
+            &FrameScalars::new(),
+            &[],
+        )
         .unwrap();
     frame.data
 }

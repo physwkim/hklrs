@@ -10,7 +10,7 @@ pub mod common;
 use common::{f, load};
 use hklrs::PixelDetector;
 use hklrs::nalgebra::Vector3;
-use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, Region};
+use hklrs::normalise::{FrameScalars, Normalised, Normaliser, PixelFields, RawFrame, Region};
 use hklrs::{Error, absorption::Masked};
 use serde_json::Value;
 
@@ -60,7 +60,7 @@ fn detector((h, w): (usize, usize)) -> PixelDetector {
 /// What xu is given, rebuilt for hklrs: per frame, `(raw, scalars)` and
 /// the normaliser. `Err` is the first frame-level error.
 struct Case {
-    frames: Vec<Vec<f64>>,
+    frames: Vec<RawFrame>,
     scalars: Vec<Result<FrameScalars, Error>>,
     normaliser: Normaliser,
 }
@@ -69,7 +69,10 @@ fn build(case: &Value) -> Case {
     let shape = shape(case);
     let size = shape.0 * shape.1;
     let raw = flat(&case["raw"]);
-    let frames: Vec<Vec<f64>> = raw.chunks(size).map(<[f64]>::to_vec).collect();
+    let frames: Vec<RawFrame> = raw
+        .chunks(size)
+        .map(|f| RawFrame::new(shape, f.to_vec()).unwrap())
+        .collect();
     let n = frames.len();
     let per_frame = |key: &str| case[key].as_array().map(|_| flat(&case[key]));
     let mon = per_frame("mon");
@@ -101,10 +104,14 @@ fn build(case: &Value) -> Case {
         .collect();
     let mut fields = PixelFields::new(shape);
     if case["dark"].is_array() {
-        fields = fields.dark_rate(flat(&case["dark"])).unwrap();
+        fields = fields
+            .dark_rate(RawFrame::new(shape, flat(&case["dark"])).unwrap())
+            .unwrap();
     }
     if case["flat"].is_array() {
-        fields = fields.flat(flat(&case["flat"])).unwrap();
+        fields = fields
+            .flat(RawFrame::new(shape, flat(&case["flat"])).unwrap())
+            .unwrap();
     }
     let (_, r) = Region::new(0..shape.0, 0..shape.1, (1, 1))
         .apply(&detector(shape))
@@ -166,8 +173,8 @@ fn xu9_flat_and_dark_apply_without_a_monitor() {
     let div = cases(&doc, "divergence");
     let case = &div["xu9_psd_flat_no_monitor"];
     let c = build(case);
-    let raw = &c.frames[0];
-    assert_eq!(xu(case), *raw, "xu skips the flat field");
+    let raw = c.frames[0].data();
+    assert_eq!(xu(case), raw, "xu skips the flat field");
     let gain = flat(&case["flat"]);
     let mean = gain.iter().sum::<f64>() / gain.len() as f64;
     for (i, p) in c.pixels(0).iter().enumerate() {
@@ -177,7 +184,7 @@ fn xu9_flat_and_dark_apply_without_a_monitor() {
 
     let case = &div["xu9_psd_dark_flat_time_float"];
     let c = build(case);
-    let raw = &c.frames[0];
+    let raw = c.frames[0].data();
     for (x, r) in xu(case).iter().zip(raw) {
         assert!(close(*x, r / 2.5), "xu applies the time only");
     }
@@ -199,7 +206,7 @@ fn xu10_ccd_without_a_monitor_normalises() {
     for k in 0..c.frames.len() {
         for (i, p) in c.pixels(k).iter().enumerate() {
             let p = p.as_ref().unwrap();
-            assert_eq!((p.counts(), p.weight().get()), (c.frames[k][i], 1.0));
+            assert_eq!((p.counts(), p.weight().get()), (c.frames[k].data()[i], 1.0));
         }
     }
 }
@@ -256,7 +263,7 @@ fn xu22_dark_subtraction_is_signed() {
     for k in 0..c.frames.len() {
         for (i, p) in c.pixels(k).iter().enumerate() {
             let p = p.as_ref().unwrap();
-            let sub = c.frames[k][i] - dark[i] * t[k];
+            let sub = c.frames[k].data()[i] - dark[i] * t[k];
             assert!(close(p.counts(), sub));
             if sub < 0.0 {
                 negative += 1;
