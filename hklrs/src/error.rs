@@ -70,7 +70,7 @@ pub enum Error {
     #[error("axis {name:?} is not a rotation and has no cut point")]
     NoCutPoint { name: String },
     #[error(
-        "a detector module has a point axis, so its pixels span no area and have no solid angle"
+        "a detector module has a point axis, so its pixels span no area: no solid angle, and no normal for a window or sensor"
     )]
     NoPixelArea,
     #[error("polarisation factor must be in [-1, 1], got {value}")]
