@@ -92,3 +92,19 @@ def stacks_from_angles(name, angles_deg):
     names = [n for n, _ in s] + [n for n, _ in d]
     val = dict(zip(names, (math.radians(a) for a in angles_deg)))
     return ([(ax, val[n]) for n, ax in s], [(ax, val[n]) for n, ax in d])
+
+
+def triad(a, b):
+    """Right-handed orthonormal triad from two non-parallel vectors."""
+    t1 = a / np.linalg.norm(a)
+    t3 = np.cross(a, b)
+    t3 = t3 / np.linalg.norm(t3)
+    return np.column_stack([t1, np.cross(t3, t1), t3])
+
+
+def busing_levy_ub(b, hkls, qs):
+    """Busing-Levy U and UB: hkl[0] matched exactly, hkl[1] in plane.
+    `qs` are measured Q in the sample frame, `b` the B with 2 pi."""
+    u = triad(np.asarray(qs[0], float), np.asarray(qs[1], float)) @ triad(
+        b @ np.asarray(hkls[0], float), b @ np.asarray(hkls[1], float)).T
+    return u, u @ b
