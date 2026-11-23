@@ -332,6 +332,67 @@ fn binned_instances_are_pyfai_s() {
     assert!(built > 0 && raises > 0 && empty > 0 && refused > 0);
 }
 
+/// A 0 or null pitch, by `Detector_config` or as version 1's pixel sizes:
+/// the default instance where pyFAI's constructor gives it, else refused,
+/// as pyFAI's raises or leaves the detector without a pitch; version 1
+/// gives a class that does not force its pitch the generic detector, which
+/// has no shape.
+#[test]
+fn zero_pitches_are_pyfai_s() {
+    let g = load("pyfai_detectors.json");
+    let lab = lab();
+    let (mut default, mut refused, mut generic) = (0, 0, 0);
+    for c in g["classes"].as_array().unwrap() {
+        let name = c["class"].as_str().unwrap();
+        if c["layout"] != "uniform" && c["layout"] != "edges" {
+            continue;
+        }
+        let version_1 = format!(
+            "Detector: {name}\nPixelSize1: 0\nPixelSize2: 0\nDistance: 0.3\n\
+             Poni1: 0.01\nPoni2: 0.02\nRot1: 0\nRot2: 0\nRot3: 0\nWavelength: 1e-10\n"
+        );
+        for (form, outcome) in c["zero_pitch"].as_object().unwrap() {
+            let (config, key) = match form.as_str() {
+                "version 1" => (None, "pixel1"),
+                "both" => (Some(r#"{"pixel1": 0, "pixel2": 0}"#.to_string()), "pixel1"),
+                form => {
+                    let (key, value) = form
+                        .split_once(' ')
+                        .map_or((form, "0"), |(k, _)| (k, "null"));
+                    (Some(format!(r#"{{"{key}": {value}}}"#)), key)
+                }
+            };
+            let got = match config {
+                None => PoniFile::parse(&version_1).unwrap().detector(&lab),
+                Some(config) => file(name, &config).detector(&lab),
+            };
+            match outcome.as_str().unwrap() {
+                "default" => {
+                    assert_eq!(got.unwrap().shape(), pair(&c["shape"]), "{name} {form}");
+                    default += 1;
+                }
+                "generic" => {
+                    assert_eq!(
+                        got.err(),
+                        Some(PoniError::Missing("max_shape")),
+                        "{name} {form}"
+                    );
+                    generic += 1;
+                }
+                _ => {
+                    let Err(PoniError::DetectorConfig { class, key: k }) = &got else {
+                        panic!("{name} {form}: {got:?}");
+                    };
+                    assert_eq!((*class, k.as_str()), (name, key), "{form}");
+                    refused += 1;
+                }
+            }
+        }
+    }
+    eprintln!("zero pitches: {default} default, {refused} refused, {generic} generic");
+    assert!(default > 0 && refused > 0 && generic > 0);
+}
+
 /// FAI-2: `ImXPadS10.calc_cartesian_positions(d1, d2)` reverses the
 /// indices and then interpolates the edges `calc_pixels_edges` has already
 /// reversed, so pyFAI's by-index positions are those of orientation 3 in

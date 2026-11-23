@@ -30,6 +30,9 @@ pub(super) struct Grid {
     /// `Detector.binning`'s setter gives the class's other binnings:
     /// [`Grid::binned`].
     pub(super) binnable: bool,
+    /// The constructor takes a 0 or null pitch as the default's, as
+    /// `Detector.__init__` does; the others raise or leave no pitch.
+    pub(super) zero_pitch_default: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -283,6 +286,7 @@ mod tests {
             orientation: c["orientation"].as_u64().unwrap() as u32,
             module_size: (!c["module_size"].is_null()).then(|| pair(&c["module_size"])),
             binnable: c["binnable"].as_bool().unwrap(),
+            zero_pitch_default: c["zero_pitch_default"].as_bool().unwrap(),
         }
     }
 

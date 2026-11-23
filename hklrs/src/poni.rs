@@ -308,6 +308,7 @@ pub struct PoniFile {
 pub struct DetectorConfig {
     /// pyFAI detector name; `Detector` is the generic flat one.
     pub name: String,
+    /// 0 for a null, which pyFAI's constructors take as they take a 0.
     pub pixel1: Option<f64>,
     pub pixel2: Option<f64>,
     /// Never in a version 1 file, nor for a named detector of the shape
@@ -374,13 +375,10 @@ impl DetectorConfig {
             Some(_) => return Err(syntax("detector_config", json.unwrap_or_default())),
         };
         let get = |key: &str| config.get(key).filter(|v| !v.is_null());
-        // Detector.__init__: a zero pitch is no pitch
-        let pixel = |key: &str| match get(key) {
+        let pixel = |key: &str| match config.get(key) {
             None => Ok(None),
-            Some(v) => match v.as_f64() {
-                Some(x) => Ok((x != 0.0).then_some(x)),
-                None => Err(syntax(key, v)),
-            },
+            Some(Value::Null) => Ok(Some(0.0)),
+            Some(v) => v.as_f64().map(Some).ok_or_else(|| syntax(key, v)),
         };
         let max_shape = match get("max_shape") {
             None => None,
@@ -548,6 +546,11 @@ impl PoniFile {
         if d.binning.is_some_and(|b| b != (1, 1)) {
             return Err(PoniError::Unsupported("binning"));
         }
+        // Detector.__init__ takes a 0 pitch as none; version 1 sets it as given
+        let pitch = |key, p: Option<f64>| {
+            p.filter(|&p| self.version == 1.0 || p != 0.0)
+                .ok_or(PoniError::Missing(key))
+        };
         Ok(Poni {
             dist: self.dist,
             poni1: self.poni1,
@@ -555,8 +558,8 @@ impl PoniFile {
             rot1: self.rot1,
             rot2: self.rot2,
             rot3: self.rot3,
-            pixel1: d.pixel1.ok_or(PoniError::Missing("pixel1"))?,
-            pixel2: d.pixel2.ok_or(PoniError::Missing("pixel2"))?,
+            pixel1: pitch("pixel1", d.pixel1)?,
+            pixel2: pitch("pixel2", d.pixel2)?,
             shape: d.max_shape.ok_or(PoniError::Missing("max_shape"))?,
             orientation: d.orientation.unwrap_or(Orientation::BottomRight),
         })
@@ -620,10 +623,11 @@ impl PoniFile {
 
     /// The grid and orientation of the class `Detector.factory` builds from
     /// the file's `Detector_config` on the default instance `grid`: each
-    /// other entry the constructor takes must be the default's own, pyFAI's
-    /// choice for a 0 pitch or a null, or a `sensor`, which only parallax
-    /// reads, and a binning other than the default's is one the class bins
-    /// by `Detector.binning`'s rule.
+    /// other entry the constructor takes must be the default's own, a 0 or
+    /// null pitch where the class takes it as the default's, pyFAI's choice
+    /// for another null, or a `sensor`, which only parallax reads, and a
+    /// binning other than the default's is one the class bins by
+    /// `Detector.binning`'s rule.
     fn instance(&self, class: &Class, grid: Grid) -> Result<(Grid, Orientation), PoniError> {
         let d = &self.detector;
         let takes = |key: &str| class.args.contains(&key);
@@ -639,8 +643,12 @@ impl PoniFile {
             ("pixel1", d.pixel1, grid.pixel.0),
             ("pixel2", d.pixel2, grid.pixel.1),
         ] {
-            // Detector.__init__: a zero pitch is the class's
-            if takes(key) && given.is_some_and(|p| p != 0.0 && p != own) {
+            let own = match given {
+                None => true,
+                Some(0.0) => grid.zero_pitch_default,
+                Some(p) => p == own,
+            };
+            if takes(key) && !own {
                 return Err(differs(key));
             }
         }

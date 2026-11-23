@@ -17,7 +17,12 @@ divided, positions those of the generic Detector of that pitch and shape, and
 Detector.mask the mask rule's, drawn over max_shape and summed over binning
 blocks for a gap rule or Lambda9M's empty array (pyFAI raises where the
 binning does not divide max_shape) or over the binned shape for the disc; "binned" keeps pyFAI's
-instances either way, "unbinned" its 1x1 one. "probes" are names put to
+instances either way, "unbinned" its 1x1 one. "zero_pitch" is what the
+factory makes of a 0 or null pixel1, pixel2 or both, and Geometry.load of a
+version 1 file with PixelSize1 and PixelSize2 0: the default instance, an
+exception, an instance with no pitch, or, for version 1, the generic Detector;
+"zero_pitch_default" holds when it is
+the default instance for every factory form. "probes" are names put to
 detector_factory and the class it returns; "cases" are a PONI file pyFAI writes for a modelled class
 and, after Geometry.load, calc_pos_zyx of some of its pixels where the image
 is flipped once per orientation: by index for a uniform class, whose index
@@ -254,6 +259,58 @@ def binned(cls, doc, rule, rng):
     return binnable, {"pixel": unbinned["pixel"], "shape": unbinned["shape"]}, out
 
 
+ZERO_FORMS = {"pixel1": {"pixel1": 0}, "pixel2": {"pixel2": 0},
+              "both": {"pixel1": 0, "pixel2": 0}, "pixel1 null": {"pixel1": None},
+              "pixel2 null": {"pixel2": None}}
+
+
+def instance_key(det):
+    return (type(det).__name__, det.pixel1, det.pixel2, det.shape, tuple(det.binning),
+            int(det.orientation))
+
+
+def zero_pitch(name, cls, tmp):
+    """the factory's instance for each of ZERO_FORMS and Geometry.load's for
+    a version 1 file of 0 pixel sizes, against the default instance"""
+    default = instance_key(cls())
+
+    def outcome(make):
+        try:
+            det = make()
+        except Exception as err:
+            return f"raises {type(err).__name__}"
+        if instance_key(det) == default:
+            return "default"
+        assert det.pixel1 is None or det.pixel2 is None, (name, instance_key(det))
+        return "no pitch"
+
+    out = {k: outcome(lambda c=c: detector_factory(name, c)) for k, c in ZERO_FORMS.items()}
+    path = os.path.join(tmp, "zero.poni")
+    with open(path, "w") as f:
+        f.write(f"Detector: {name}\nPixelSize1: 0\nPixelSize2: 0\nDistance: 0.3\n"
+                "Poni1: 0.01\nPoni2: 0.02\nRot1: 0\nRot2: 0\nRot3: 0\nWavelength: 1e-10\n")
+
+    def load():
+        geo = Geometry()
+        geo.load(path)
+        return geo.detector
+    # PoniFile.read_from_dict: a NexusDetector kept, the class's constructor
+    # where it forces the pitch, else the generic Detector with the pitches set
+    if issubclass(cls, pyFAI.detectors.NexusDetector):
+        out["version 1"] = outcome(load)
+    elif cls.force_pixel:
+        out["version 1"] = outcome(load)
+        assert out["version 1"] == out["both"], (name, out)
+    else:
+        det = load()
+        assert type(det) is Detector and (det.pixel1, det.pixel2, det.shape) == (0.0, 0.0, None)
+        out["version 1"] = "generic"
+    # a null is a 0 to every constructor
+    for k in ("pixel1", "pixel2"):
+        assert (out[k] == "default") == (out[f"{k} null"] == "default"), (name, out)
+    return out
+
+
 def describe(name, cls, rng):
     args = [a for a in inspect.getfullargspec(cls).args if a != "self"]
     doc = {"class": name, "args": args, "force_pixel": bool(cls.force_pixel)}
@@ -273,6 +330,10 @@ def describe(name, cls, rng):
         "orientation": int(det.orientation),
         "module_size": module,
     })
+    with tempfile.TemporaryDirectory() as tmp:
+        zero = zero_pitch(name, cls, tmp)
+    doc["zero_pitch"] = zero
+    doc["zero_pitch_default"] = all(zero[k] == "default" for k in ZERO_FORMS)
     if cls is Detector:
         return {**doc, "layout": "generic", "mask": None}
     if shape is None or det.pixel1 is None:
@@ -403,7 +464,8 @@ def rust_grid(c):
             f"binning: ({c['binning'][0]}, {c['binning'][1]}), "
             f"orientation: {c['orientation']}, "
             f"module_size: {rust_pair(c['module_size'])}, "
-            f"binnable: {'true' if c['binnable'] else 'false'} }}")
+            f"binnable: {'true' if c['binnable'] else 'false'}, "
+            f"zero_pitch_default: {'true' if c['zero_pitch_default'] else 'false'} }}")
 
 
 def rust_class(c):
@@ -502,6 +564,8 @@ def main():
         counts[c["layout"]] = counts.get(c["layout"], 0) + 1
     print(counts)
     print("not binnable:", [c["class"] for c in described if c.get("binnable") is False])
+    print("zero pitch not default:", [(c["class"], c["zero_pitch"]["both"]) for c in described
+                                      if c.get("zero_pitch_default") is False])
     print("mask raises:", [(c["class"], e["binning"]) for c in described
                            for e in c.get("binned", []) if e["mask_error"]])
 
