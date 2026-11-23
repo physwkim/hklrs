@@ -179,6 +179,41 @@ fn unreachable_target_is_err_for_every_mode() {
     }
 }
 
+/// |Q| within 1e-12 of 2k, relative, is solved as |Q| = 2k: a double root
+/// in the detector angle there, so Degenerate; beyond it is Unreachable.
+#[test]
+fn backscatter_limit_has_a_relative_tolerance() {
+    let geo = preset("E4CV").unwrap();
+    let current = current(&geo);
+    let k = wavelength().wavenumber();
+    let direction = Vector3::new(0.3, -0.5, 0.8).normalize();
+    for mode in [
+        e4c::bissector(&geo).unwrap(),
+        e4c::constant_phi(&geo).unwrap(),
+    ] {
+        let at = |excess: f64| {
+            InverseRequest {
+                target: Target::QSample(direction * (2.0 * k * (1.0 + excess))),
+                ..request(&mode, Vector3::zeros(), &current)
+            }
+            .solve()
+        };
+        for excess in [0.0, 1e-15, 1e-13] {
+            assert_eq!(
+                at(excess),
+                Err(InverseError::Degenerate),
+                "{} {excess}",
+                mode.name()
+            );
+        }
+        assert!(
+            matches!(at(1e-11), Err(InverseError::Unreachable { .. })),
+            "{}",
+            mode.name()
+        );
+    }
+}
+
 #[test]
 fn q_sample_target_matches_hkl_target() {
     let geo = preset("E4CV").unwrap();

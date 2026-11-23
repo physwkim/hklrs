@@ -29,6 +29,11 @@ use crate::{Error, Geometry, Wavelength};
 
 pub use mode::{Equation, Eulerian, Mode};
 
+/// Relative excess of |Q| over 2k still solved, pulled onto 2k: UB·h alone
+/// rounds by ~1e-15, so a strict test would turn exact backscatter targets
+/// Unreachable or not by rounding.
+const REACH: f64 = 1e-12;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
     /// Miller indices; Q = UB·h in the sample frame.
@@ -154,13 +159,18 @@ impl InverseRequest<'_> {
         };
         let k = self.wavelength.wavenumber();
         let (q_norm, q_max) = (q.norm(), 2.0 * k);
-        if q_norm > q_max {
+        if q_norm > q_max * (1.0 + REACH) {
             return Err(InverseError::Unreachable { q: q_norm, q_max });
         }
         // k̂f = k̂i then, which leaves the sample rotation free in any mode.
         if q_norm == 0.0 {
             return Err(InverseError::Degenerate);
         }
+        let q = if q_norm > q_max {
+            q * (q_max / q_norm)
+        } else {
+            q
+        };
         let system = system::System::new(self.mode, self.ub / k, q / k, self.current);
         solve::search(&system).into_sorted()
     }

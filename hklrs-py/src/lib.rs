@@ -339,7 +339,7 @@ fn request<'a>(
 
 /// Every solution for `hkl`, nearest to `current` first. `current` and the
 /// results are all axes in geometry order, degrees / metres; held axes are
-/// returned as given. Raises `Unreachable` when |Q| > 4π/λ, `NoSolution`
+/// returned as given. Raises `Unreachable` when |Q| > 4π/λ·(1 + 1e-12), `NoSolution`
 /// when the mode has none.
 #[pyfunction]
 fn solve(
