@@ -1,10 +1,11 @@
 //! pyFAI 2026.9.0's named detector classes from a PONI file against the
-//! instances `Detector.factory` builds (golden/pyfai_detectors.py), default
-//! or binned by the `binning` key: `calc_pos_zyx` at pixels of each
-//! supported class, `Detector.mask`, and a typed error for every other
-//! class and where pyFAI's binned mask raises. An ImXPad image is flipped once, as
-//! pyFAI's whole-image `calc_cartesian_positions` flips it; pyFAI's
-//! by-index path flips it twice (upstream defect FAI-2).
+//! instances `Geometry.load` builds (golden/pyfai_detectors.py) from the
+//! files pyFAI writes and from files of other pitches and binnings:
+//! `calc_pos_zyx` at pixels of each supported class, `Detector.mask`, and a
+//! typed error for every other class, where pyFAI raises, and where its
+//! instance's pitch, binning and shape disagree. An ImXPad image is flipped
+//! once, as pyFAI's whole-image `calc_cartesian_positions` flips it;
+//! pyFAI's by-index path flips it twice (upstream defect FAI-2).
 
 pub mod common;
 
@@ -27,11 +28,6 @@ fn labs() -> [(&'static str, LabAxes, [Vector3<f64>; 3]); 2] {
     })
 }
 
-fn class<'a>(g: &'a Value, name: &str) -> &'a Value {
-    let classes = g["classes"].as_array().unwrap();
-    classes.iter().find(|c| c["class"] == name).unwrap()
-}
-
 fn u64s(v: &Value) -> Vec<u64> {
     v.as_array()
         .unwrap()
@@ -45,10 +41,99 @@ fn pair(v: &Value) -> (usize, usize) {
     (n(0), n(1))
 }
 
-/// The class's instance binned `b` as the golden gives it.
-fn binned<'a>(c: &'a Value, b: &Value) -> &'a Value {
-    let binned = c["binned"].as_array().unwrap();
-    binned.iter().find(|e| e["binning"] == *b).unwrap()
+fn ints(v: &Value) -> (i64, i64) {
+    (v[0].as_i64().unwrap(), v[1].as_i64().unwrap())
+}
+
+/// A pitch from its repr.
+fn pitch(v: &Value) -> f64 {
+    v.as_str().unwrap().parse().unwrap()
+}
+
+/// The golden's mask fingerprint, none for no mask.
+fn mask_of(e: &Value) -> Vec<u64> {
+    e["mask"]
+        .as_array()
+        .map_or(vec![0; 3], |_| u64s(&e["mask"]))
+}
+
+/// pyFAI's instance `e` of class `c` has the class's pitch at its binning
+/// and, for ImXPad, the default binning: a Rayonix's
+/// table pitch, a Mar345 plate within the class's `max_shape`, else the
+/// default instance's pitch scaled by the binning, to a relative 1e-9.
+fn agrees(c: &Value, e: &Value) -> bool {
+    let rule = &c["pitch"];
+    (0..2).all(|k| {
+        let Some(p) = e["pixel"][k].as_str().map(|p| p.parse::<f64>().unwrap()) else {
+            return false;
+        };
+        let b = e["binning"][k].as_i64().unwrap();
+        let own_b = c["binning"][k].as_i64().unwrap();
+        let want = match rule["rule"].as_str().unwrap() {
+            "table" => rule["table"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t[0].as_i64() == Some(b))
+                .map(|t| t[1].as_f64().unwrap()),
+            "plate" => {
+                let max = e["max_shape"][k].as_i64().unwrap();
+                (1..=rule["max_shape"][k].as_i64().unwrap())
+                    .contains(&max)
+                    .then_some(p)
+            }
+            _ => Some(pitch(&c["pixel"][k]) * b as f64 / own_b as f64),
+        };
+        b >= 1
+            && p.is_finite()
+            && p > 0.0
+            && want.is_some_and(|w| (p - w).abs() <= 1e-9 * w)
+            && (c["layout"] != "edges" || b == own_b)
+    })
+}
+
+/// What hklrs makes of a file of class `c` that pyFAI reads as `e`, its
+/// instance's facts, with `outcome` the exception the read or the mask
+/// raises: the refusal, or None for a detector.
+fn refusal(c: &Value, e: &Value, outcome: &Value) -> Option<PoniError> {
+    let name: &'static str = c["class"].as_str().unwrap().to_string().leak();
+    if outcome["raises"].is_string() {
+        return Some(PoniError::Raises { class: name });
+    }
+    if e["class"] == "Detector" {
+        // version 1 of one pitch or of a class without force_pixel: the
+        // generic detector, which has no shape
+        return Some(PoniError::Missing("max_shape"));
+    }
+    if let Some(k) = (0..2).find(|&k| e["pixel"][k].is_null()) {
+        let key = ["pixel1", "pixel2"][k];
+        return Some(PoniError::NoPitch { class: name, key });
+    }
+    if !agrees(c, e) {
+        return Some(PoniError::Inconsistent {
+            class: name,
+            pixel: (pitch(&e["pixel"][0]), pitch(&e["pixel"][1])),
+            binning: ints(&e["binning"]),
+            shape: ints(&e["shape"]),
+        });
+    }
+    let (n0, n1) = pair(&e["shape"]);
+    if n0 == 0 || n1 == 0 {
+        // the binning setter floors max_shape to an empty image
+        return Some(PoniError::Core(hklrs::Error::DetectorShape {
+            slow: n0,
+            fast: n1,
+        }));
+    }
+    if outcome["mask_error"].is_string() {
+        let (b0, b1) = ints(&e["binning"]);
+        return Some(PoniError::MaskBinning {
+            class: name,
+            binning: (b0 as u64, b1 as u64),
+            max_shape: pair(&e["max_shape"]),
+        });
+    }
+    None
 }
 
 /// count, sum and sum of squares (mod 2^64) of the masked row-major indices.
@@ -97,21 +182,9 @@ fn named_classes_match_pyfai_calc_pos_zyx() {
     let mut built = std::collections::BTreeSet::new();
     for case in g["cases"].as_array().unwrap() {
         let name = case["class"].as_str().unwrap();
-        let c = class(&g, name);
         let pf = PoniFile::parse(case["poni"].as_str().unwrap()).unwrap();
         assert_eq!(pf.poni(), Err(PoniError::NamedDetector(name.to_string())));
-        let (shape, mask) = match &case["binning"] {
-            Value::Null => (pair(&c["shape"]), u64s(&c["fingerprint"])),
-            b => {
-                let e = binned(c, b);
-                (
-                    pair(&e["shape"]),
-                    e["mask"]
-                        .as_array()
-                        .map_or(vec![0; 3], |_| u64s(&e["mask"])),
-                )
-            }
-        };
+        let (shape, mask) = (pair(&case["shape"]), u64s(&case["fingerprint"]));
         for (lab_name, lab, [a1, a2, a3]) in labs() {
             let det = pf.detector(&lab).unwrap();
             assert_eq!(det.shape(), shape, "{name}");
@@ -207,15 +280,10 @@ fn config_other_than_the_default_instance_is_refused() {
         }
         other => panic!("{name} {config}: {other:?}"),
     };
-    assert_eq!(refused("Pilatus1M", r#"{"pixel1": 1e-4}"#), "pixel1");
     assert_eq!(
         refused("Pilatus1M", r#"{"max_shape": [1043, 980]}"#),
         "max_shape"
     );
-    // pyFAI's binning setter is not theirs: Rayonix bins by a pitch table,
-    // ImXPad's edges span max_shape whatever the binning
-    assert_eq!(refused("Rayonix133", r#"{"binning": [1, 1]}"#), "binning");
-    assert_eq!(refused("ImXPadS10", r#"{"binning": [2, 2]}"#), "binning");
     assert_eq!(
         refused("Pilatus1M", r#"{"module_size": [97, 487]}"#),
         "module_size"
@@ -235,11 +303,43 @@ fn config_other_than_the_default_instance_is_refused() {
         let det = file("Pilatus1M", config).detector(&lab).unwrap();
         assert_eq!(det.shape(), (1043, 981), "{config}");
     }
-    // Perkin's default instance is binned 2x2
-    for (b, shape) in [("[2, 2]", (2048, 2048)), ("[1, 1]", (4096, 4096))] {
+    // Perkin's default instance is binned 2x2; a Rayonix bins by its table
+    for (name, b, shape) in [
+        ("Perkin", "[2, 2]", (2048, 2048)),
+        ("Perkin", "[1, 1]", (4096, 4096)),
+        ("Rayonix133", "[1, 1]", (4096, 4096)),
+        ("Rayonix133", "[2, 2]", (2048, 2048)),
+    ] {
         let config = format!(r#"{{"binning": {b}}}"#);
-        let det = file("Perkin", &config).detector(&lab).unwrap();
-        assert_eq!(det.shape(), shape, "{b}");
+        let det = file(name, &config).detector(&lab).unwrap();
+        assert_eq!(det.shape(), shape, "{name} {b}");
+    }
+    // Detector.__init__ keeps a pitch Pilatus1M's is not, unbinned
+    assert_eq!(
+        file("Pilatus1M", r#"{"pixel1": 1e-4}"#).detector(&lab),
+        Err(PoniError::Inconsistent {
+            class: "Pilatus1M",
+            pixel: (1e-4, 172e-6),
+            binning: (1, 1),
+            shape: (1043, 981)
+        })
+    );
+    // ImXPad's chip edges span max_shape whatever the binning
+    assert!(matches!(
+        file("ImXPadS10", r#"{"binning": [2, 2]}"#).detector(&lab),
+        Err(PoniError::Inconsistent {
+            class: "ImXPadS10",
+            binning: (2, 2),
+            shape: (60, 40),
+            ..
+        })
+    ));
+    // the binning setter divides by the binning, and Rayonix's by 0.0
+    for name in ["Pilatus1M", "Rayonix133"] {
+        assert_eq!(
+            file(name, r#"{"binning": [0, 0]}"#).detector(&lab),
+            Err(PoniError::Raises { class: name })
+        );
     }
     // 1043 x 981 does not bin 2x2, so pyFAI's Detector.mask raises
     assert_eq!(
@@ -251,146 +351,144 @@ fn config_other_than_the_default_instance_is_refused() {
         })
     );
     assert_eq!(
-        file("Rayonix133", r#"{"binning": [2, 2]}"#)
-            .detector(&lab)
-            .unwrap()
-            .shape(),
-        (2048, 2048)
-    );
-    assert_eq!(
         file("Mythen", r#"{"splinefile": "a.spline"}"#).detector(&lab),
         Err(PoniError::Unsupported("spline file"))
     );
 }
 
-/// Every binning of the golden on every class pyFAI bins by its setter's
-/// rule: the binned shape and `Detector.mask`, a typed error where pyFAI's
-/// mask raises (the binning does not divide `max_shape`) or the binned
-/// image is empty; the binning key on another class is refused.
+/// Every file the golden reads (Detector_config pitches and binnings,
+/// version 1 pixel sizes): pyFAI's instance where its pitch, binning and
+/// shape agree, at the pixels of the generic detector of that pitch, shape
+/// and the class's orientation (the golden checks pyFAI's are), with
+/// `Detector.mask`; else the typed refusal of what pyFAI does.
 #[test]
-fn binned_instances_are_pyfai_s() {
+fn reads_are_pyfai_s_instance_or_refused() {
     let g = load("pyfai_detectors.json");
     let lab = lab();
-    let (mut built, mut raises, mut empty, mut refused) = (0, 0, 0, 0);
+    let mut seen = std::collections::BTreeMap::new();
     for c in g["classes"].as_array().unwrap() {
-        let name = c["class"].as_str().unwrap();
-        if c["layout"] != "uniform" && c["layout"] != "edges" {
+        let Some(reads) = c["reads"].as_array() else {
             continue;
-        }
-        let default = pair(&c["binning"]);
-        let instances = c["binned"].as_array().map_or(&[][..], |v| v.as_slice());
-        for e in instances {
-            let b = pair(&e["binning"]);
-            let config = format!(r#"{{"binning": {}}}"#, e["binning"]);
-            let got = file(name, &config).detector(&lab);
-            if c["binnable"] == false {
-                if b == default {
-                    assert_eq!(got.unwrap().shape(), pair(&c["shape"]), "{name}");
-                } else {
-                    assert!(
-                        matches!(&got, Err(PoniError::DetectorConfig { key, .. }) if key == "binning"),
-                        "{name} {b:?}: {got:?}"
-                    );
-                    refused += 1;
+        };
+        for e in reads {
+            let head = e["head"].as_str().unwrap();
+            let text = format!(
+                "{head}Distance: 0.3\nPoni1: 0.01\nPoni2: 0.02\nRot1: 0.1\nRot2: -0.2\n\
+                 Rot3: 0.3\nWavelength: 1e-10\n"
+            );
+            let pf = PoniFile::parse(&text).unwrap();
+            let got = pf.detector(&lab);
+            let outcome = match (refusal(c, e, e), got) {
+                (Some(want), got) => {
+                    assert_eq!(got.err(), Some(want.clone()), "{head}");
+                    format!("{want:?}")
+                        .split([' ', '('])
+                        .next()
+                        .unwrap()
+                        .to_string()
                 }
-                continue;
-            }
-            let shape = pair(&e["shape"]);
-            if shape.0 == 0 || shape.1 == 0 {
-                assert!(
-                    matches!(
-                        got,
-                        Err(PoniError::Core(hklrs::Error::DetectorShape { .. }))
-                    ),
-                    "{name} {b:?}: {got:?}"
-                );
-                empty += 1;
-            } else if e["mask_error"].is_string() {
-                let Err(PoniError::MaskBinning {
-                    class,
-                    binning,
-                    max_shape,
-                }) = got
-                else {
-                    panic!("{name} {b:?}: {got:?}");
-                };
-                let want = (name, (b.0 as u64, b.1 as u64), pair(&c["max_shape"]));
-                assert_eq!((class, binning, max_shape), want);
-                raises += 1;
-            } else {
-                let det = got.unwrap();
-                assert_eq!(det.shape(), shape, "{name} {b:?}");
-                let mask = e["mask"]
-                    .as_array()
-                    .map_or(vec![0; 3], |_| u64s(&e["mask"]));
-                assert_eq!(fingerprint(&det), mask, "{name} {b:?}");
-                built += 1;
-            }
+                (None, got) => {
+                    let det = got.unwrap_or_else(|err| panic!("{head}: {err:?}"));
+                    assert_eq!(det.shape(), pair(&e["shape"]), "{head}");
+                    assert_eq!(fingerprint(&det), mask_of(e), "{head}");
+                    if c["layout"] == "uniform" {
+                        let generic = format!(
+                            "poni_version: 2.1\nDetector: Detector\nDetector_config: \
+                             {{\"pixel1\": {}, \"pixel2\": {}, \"max_shape\": {}, \
+                             \"orientation\": {}}}\n{}",
+                            e["pixel"][0].as_str().unwrap(),
+                            e["pixel"][1].as_str().unwrap(),
+                            e["shape"],
+                            c["orientation"],
+                            &text[head.len()..]
+                        );
+                        let want = PoniFile::parse(&generic).unwrap().detector(&lab).unwrap();
+                        let (n0, n1) = det.shape();
+                        for (i, j) in [
+                            (0, 0),
+                            (n0 - 1, 0),
+                            (0, n1 - 1),
+                            (n0 - 1, n1 - 1),
+                            (n0 / 3, n1 / 2),
+                        ] {
+                            let d = (det.pixel(i, j).unwrap() - want.pixel(i, j).unwrap()).norm();
+                            assert!(d <= TOL, "{head} pixel ({i}, {j}): {d} m");
+                        }
+                    }
+                    "built".to_string()
+                }
+            };
+            *seen.entry(outcome).or_insert(0) += 1;
         }
     }
-    eprintln!("binned: {built} built, {raises} mask raises, {empty} empty, {refused} refused");
-    assert!(built > 0 && raises > 0 && empty > 0 && refused > 0);
+    eprintln!("reads: {seen:?}");
+    for outcome in [
+        "built",
+        "Core",
+        "Raises",
+        "NoPitch",
+        "Inconsistent",
+        "MaskBinning",
+        "Missing",
+    ] {
+        assert!(seen.contains_key(outcome), "{outcome}: {seen:?}");
+    }
 }
 
-/// A 0 or null pitch, by `Detector_config` or as version 1's pixel sizes:
-/// the default instance where pyFAI's constructor gives it, else refused,
-/// as pyFAI's raises or leaves the detector without a pitch; version 1
-/// gives a class that does not force its pitch the generic detector, which
-/// has no shape.
+/// PoniFile.write of each modelled class binned by the factory at each
+/// binning of the golden, read back: pyFAI's `calc_pos_zyx` and
+/// `Detector.mask` of what `Geometry.load` builds, or the refusal where
+/// that instance's pitch, binning and shape disagree (Mar555's pitch is
+/// kept on the unbinned shape, a Rayonix's off-table binning divides its
+/// pitch) or its mask raises. FReLoN, which takes no pitch, reads back as
+/// the default instance, as pyFAI reads it.
 #[test]
-fn zero_pitches_are_pyfai_s() {
+fn round_trips_are_pyfai_s_read_or_refused() {
     let g = load("pyfai_detectors.json");
-    let lab = lab();
-    let (mut default, mut refused, mut generic) = (0, 0, 0);
+    let mut seen = std::collections::BTreeMap::new();
     for c in g["classes"].as_array().unwrap() {
-        let name = c["class"].as_str().unwrap();
-        if c["layout"] != "uniform" && c["layout"] != "edges" {
+        let Some(trips) = c["round_trip"].as_array() else {
             continue;
-        }
-        let version_1 = format!(
-            "Detector: {name}\nPixelSize1: 0\nPixelSize2: 0\nDistance: 0.3\n\
-             Poni1: 0.01\nPoni2: 0.02\nRot1: 0\nRot2: 0\nRot3: 0\nWavelength: 1e-10\n"
-        );
-        for (form, outcome) in c["zero_pitch"].as_object().unwrap() {
-            let (config, key) = match form.as_str() {
-                "version 1" => (None, "pixel1"),
-                "both" => (Some(r#"{"pixel1": 0, "pixel2": 0}"#.to_string()), "pixel1"),
-                form => {
-                    let (key, value) = form
-                        .split_once(' ')
-                        .map_or((form, "0"), |(k, _)| (k, "null"));
-                    (Some(format!(r#"{{"{key}": {value}}}"#)), key)
-                }
-            };
-            let got = match config {
-                None => PoniFile::parse(&version_1).unwrap().detector(&lab),
-                Some(config) => file(name, &config).detector(&lab),
-            };
-            match outcome.as_str().unwrap() {
-                "default" => {
-                    assert_eq!(got.unwrap().shape(), pair(&c["shape"]), "{name} {form}");
-                    default += 1;
-                }
-                "generic" => {
-                    assert_eq!(
-                        got.err(),
-                        Some(PoniError::Missing("max_shape")),
-                        "{name} {form}"
-                    );
-                    generic += 1;
-                }
-                _ => {
-                    let Err(PoniError::DetectorConfig { class, key: k }) = &got else {
-                        panic!("{name} {form}: {got:?}");
-                    };
-                    assert_eq!((*class, k.as_str()), (name, key), "{form}");
-                    refused += 1;
+        };
+        let name = c["class"].as_str().unwrap();
+        for e in trips {
+            let pf = PoniFile::parse(e["poni"].as_str().unwrap()).unwrap();
+            let at = format!("{name} binned {}", e["binning"]);
+            let read = if e["read"].is_object() { &e["read"] } else { e };
+            if let Some(want) = refusal(c, read, e) {
+                assert_eq!(pf.detector(&lab()).err(), Some(want.clone()), "{at}");
+                let outcome = format!("{want:?}")
+                    .split([' ', '('])
+                    .next()
+                    .unwrap()
+                    .to_string();
+                *seen.entry(outcome).or_insert(0) += 1;
+                continue;
+            }
+            for (lab_name, lab, [a1, a2, a3]) in labs() {
+                let det = pf
+                    .detector(&lab)
+                    .unwrap_or_else(|err| panic!("{at}: {err:?}"));
+                assert_eq!(det.shape(), pair(&read["shape"]), "{at}");
+                assert_eq!(fingerprint(&det), mask_of(e), "{at}");
+                let pixels = e["pixels"].as_array().unwrap();
+                for (px, zyx) in pixels.iter().zip(e["zyx"].as_array().unwrap()) {
+                    let want = a1 * f(&zyx[1]) + a2 * f(&zyx[2]) + a3 * f(&zyx[0]);
+                    let ix = |k: usize| px[k].as_u64().unwrap() as usize;
+                    let d = (det.pixel(ix(0), ix(1)).unwrap().coords - want).norm();
+                    assert!(d <= TOL, "{at}, {lab_name} lab, pixel {px}: {d} m");
                 }
             }
+            let kept = e["written"] == *read;
+            *seen
+                .entry(if kept { "kept" } else { "read otherwise" }.to_string())
+                .or_insert(0) += 1;
         }
     }
-    eprintln!("zero pitches: {default} default, {refused} refused, {generic} generic");
-    assert!(default > 0 && refused > 0 && generic > 0);
+    eprintln!("round trips: {seen:?}");
+    for outcome in ["kept", "read otherwise", "Inconsistent", "MaskBinning"] {
+        assert!(seen.contains_key(outcome), "{outcome}: {seen:?}");
+    }
 }
 
 /// FAI-2: `ImXPadS10.calc_cartesian_positions(d1, d2)` reverses the

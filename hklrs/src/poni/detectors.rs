@@ -27,26 +27,267 @@ pub(super) struct Grid {
     /// pyFAI's orientation number.
     pub(super) orientation: u32,
     pub(super) module_size: Option<(usize, usize)>,
-    /// `Detector.binning`'s setter gives the class's other binnings:
-    /// [`Grid::binned`].
-    pub(super) binnable: bool,
-    /// The constructor takes a 0 or null pitch as the default's, as
-    /// `Detector.__init__` does; the others raise or leave no pitch.
-    pub(super) zero_pitch_default: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Layout {
     /// pyFAI's generic `Detector`, which the file lays out.
     Generic,
-    /// The pixels of the generic detector of the grid's pitch, shape and
-    /// orientation, with the class's mask.
-    Uniform(Grid, Option<Rule>),
+    /// The pixels of the generic detector of the instance's pitch, shape
+    /// and orientation, with the class's mask; the grid is the default
+    /// instance's.
+    Uniform(Grid, Pitch, Option<Rule>),
     /// The ImXPad chips, the pixels of the grid's shape and orientation at
     /// the chips' edges.
-    Edges(Grid, Chips),
+    Edges(Grid, Pitch, Chips),
     /// Why hklrs has no model of the class.
     Unsupported(&'static str),
+}
+
+/// How the class's constructor takes the pitch (pixel1, pixel2) a file
+/// gives, by the class that defines `__init__`; a pitch the file omits is
+/// the default instance's, the constructor's default argument.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Pitch {
+    /// The constructor takes none, and the factory drops a given one.
+    Fixed,
+    /// `Detector.__init__`: as given, a 0 or null pitch none.
+    AsGiven,
+    /// `Detector.__init__` with `force_pixel`: a 0 or null pitch is `size`;
+    /// one over `size` bins its axis by the ratio, rounded, and is kept.
+    Rounded { size: (f64, f64) },
+    /// `Apex2`, `Pixium`: [`Pitch::Rounded`], then a given pitch other than
+    /// `unit` on either axis bins both by the ratio to `unit`, rounded.
+    Rebinned { size: (f64, f64), unit: (f64, f64) },
+    /// `Perkin`: [`Pitch::Rounded`], then a given pitch other than `size` on
+    /// either axis bins both by twice the ratio to `unit`, truncated; `size`
+    /// itself gives the default instance.
+    Perkin { size: (f64, f64), unit: (f64, f64) },
+    /// `_Rayonix`: as given, binned by the last binning of the table whose
+    /// pitch it is exactly; the binning setter takes the table's pitch of a
+    /// binning, else binning 1's divided by the binning.
+    Table(&'static [(u64, f64)]),
+    /// `Mar345`: as given, `max_shape` the plate's `max_shape` of pitch
+    /// `unit` scaled by `unit` over the pitch and truncated.
+    Plate {
+        max_shape: (usize, usize),
+        unit: f64,
+    },
+}
+
+/// pyFAI's instance as its constructor and the factory's binning key leave
+/// it; Python's integers as i64, an unset pitch None.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Built {
+    pub(super) pixel: [Option<f64>; 2],
+    pub(super) shape: [i64; 2],
+    pub(super) max_shape: [i64; 2],
+    pub(super) binning: [i64; 2],
+}
+
+/// Why hklrs refuses pyFAI's instance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Fault {
+    /// pyFAI leaves the pitch of this axis unset.
+    NoPitch(usize),
+    /// The pitch, binning and shape disagree as the class's do not.
+    Inconsistent,
+}
+
+// Python's float to int conversions; a value beyond i64 saturates, which
+// only changes how far out of range a refused instance is.
+
+/// `round(x)`, ties to even; None where it raises.
+fn py_round(x: f64) -> Option<i64> {
+    x.is_finite().then(|| x.round_ties_even() as i64)
+}
+
+/// `int(x)`, truncated; None where it raises.
+fn py_int(x: f64) -> Option<i64> {
+    x.is_finite().then(|| x.trunc() as i64)
+}
+
+/// `a // b`, rounded down; None where it raises.
+fn floor_div(a: i64, b: i64) -> Option<i64> {
+    let q = a.checked_div(b)?;
+    Some(if a % b != 0 && (a < 0) != (b < 0) {
+        q - 1
+    } else {
+        q
+    })
+}
+
+/// Relative tolerance of a pitch to the class's own: a file's decimal
+/// pitch is a rounding of the product pyFAI computes.
+const PITCH_REL: f64 = 1e-9;
+
+impl Pitch {
+    /// pyFAI's instance of the class of default instance `grid`: its
+    /// constructor given `pixel` (0 for a 0 or null), then the factory's
+    /// `binning` by the class's setter; None where pyFAI raises.
+    pub(super) fn build(
+        self,
+        grid: &Grid,
+        pixel: [Option<f64>; 2],
+        binning: Option<(u64, u64)>,
+    ) -> Option<Built> {
+        let own = [grid.pixel.0, grid.pixel.1];
+        let raw = [0, 1].map(|k| pixel[k].unwrap_or(own[k]));
+        let max = [grid.max_shape.0 as i64, grid.max_shape.1 as i64];
+        let mut b = Built {
+            // `float(p) if p else None`
+            pixel: raw.map(|p| (p != 0.0).then_some(p)),
+            shape: max,
+            max_shape: max,
+            binning: [1, 1],
+        };
+        match self {
+            Pitch::Fixed => {
+                b = Built {
+                    pixel: own.map(Some),
+                    shape: [grid.shape.0 as i64, grid.shape.1 as i64],
+                    max_shape: max,
+                    binning: [grid.binning.0 as i64, grid.binning.1 as i64],
+                }
+            }
+            Pitch::AsGiven => {}
+            Pitch::Rounded { size } => b.rounded(size)?,
+            Pitch::Rebinned { size, unit } => {
+                b.rounded(size)?;
+                let unit = [unit.0, unit.1];
+                if raw != unit {
+                    b.rebin([0, 1].map(|k| py_round(raw[k] / unit[k])))?;
+                }
+            }
+            Pitch::Perkin { size, unit } => {
+                b.rounded(size)?;
+                if raw != [size.0, size.1] {
+                    let unit = [unit.0, unit.1];
+                    b.rebin([0, 1].map(|k| py_int(2.0 * raw[k] / unit[k])))?;
+                } else {
+                    b.shape = [grid.shape.0 as i64, grid.shape.1 as i64];
+                    b.binning = [grid.binning.0 as i64, grid.binning.1 as i64];
+                }
+            }
+            Pitch::Table(table) => {
+                b.rebin(raw.map(|p| {
+                    let found = table.iter().rev().find(|&&(_, q)| q == p);
+                    Some(found.map_or(1, |&(n, _)| n as i64))
+                }))?;
+            }
+            Pitch::Plate { max_shape, unit } => {
+                for (k, n) in [max_shape.0, max_shape.1].into_iter().enumerate() {
+                    b.max_shape[k] = py_int(n as f64 * unit / b.pixel[k]?)?;
+                }
+                b.shape = b.max_shape;
+            }
+        }
+        match binning {
+            Some((b0, b1)) if [b0 as i64, b1 as i64] != b.binning => {
+                b.bin([b0 as i64, b1 as i64], self)?
+            }
+            _ => {}
+        }
+        Some(b)
+    }
+}
+
+impl Built {
+    /// `Detector.__init__`'s `force_pixel` branch.
+    fn rounded(&mut self, size: (f64, f64)) -> Option<()> {
+        for (k, size) in [(0, size.0), (1, size.1)] {
+            match self.pixel[k] {
+                None => self.pixel[k] = Some(size),
+                Some(p) if p / size > 1.0 => {
+                    self.binning[k] = py_round(p / size)?;
+                    self.shape[k] = floor_div(self.max_shape[k], self.binning[k])?;
+                }
+                Some(_) => {}
+            }
+        }
+        Some(())
+    }
+
+    /// Both axes binned `binning`, `max_shape` floor divided.
+    fn rebin(&mut self, binning: [Option<i64>; 2]) -> Option<()> {
+        self.binning = [binning[0]?, binning[1]?];
+        for k in 0..2 {
+            self.shape[k] = floor_div(self.max_shape[k], self.binning[k])?;
+        }
+        Some(())
+    }
+
+    /// The `binning` setter for a binning other than the instance's.
+    fn bin(&mut self, binning: [i64; 2], pitch: Pitch) -> Option<()> {
+        for k in 0..2 {
+            let p = match pitch {
+                Pitch::Table(table) => match table.iter().find(|&&(n, _)| n as i64 == binning[k]) {
+                    Some(&(_, p))
+                        if binning
+                            .iter()
+                            .all(|&b| table.iter().any(|&(n, _)| n as i64 == b)) =>
+                    {
+                        p
+                    }
+                    _ => {
+                        let one = table.iter().find(|&&(n, _)| n == 1)?.1;
+                        (binning[k] != 0).then(|| one / binning[k] as f64)?
+                    }
+                },
+                _ => {
+                    let ratio = (self.binning[k] != 0)
+                        .then(|| binning[k] as f64 / self.binning[k] as f64)?;
+                    self.pixel[k]? * ratio
+                }
+            };
+            self.pixel[k] = Some(p);
+        }
+        self.rebin(binning.map(Some))
+    }
+
+    /// The grid of this instance of the class of default instance `grid`,
+    /// where its pitch, binning and shape agree as the class's do: the
+    /// class's pitch at the binning (a Rayonix's table, the default's
+    /// scaled by the binning, any pitch of a Mar345 whose plate is at most
+    /// the class's `max_shape`). `edges`:
+    /// ImXPad's chip edges stay the default instance's whatever the pitch
+    /// and binning, so only its binning agrees.
+    pub(super) fn grid(&self, grid: &Grid, pitch: Pitch, edges: bool) -> Result<Grid, Fault> {
+        let px = [0, 1].map(|k| self.pixel[k].ok_or(Fault::NoPitch(k)));
+        let px = [px[0]?, px[1]?];
+        let own = [
+            (grid.pixel.0, grid.binning.0 as i64),
+            (grid.pixel.1, grid.binning.1 as i64),
+        ];
+        let agrees = (0..2).all(|k| {
+            let b = self.binning[k];
+            let want = match pitch {
+                Pitch::Table(table) => table.iter().find(|&&(n, _)| n as i64 == b).map(|&(_, p)| p),
+                // any pitch, the plate's max_shape scaled to it
+                Pitch::Plate { max_shape, .. } => {
+                    let plate = [max_shape.0, max_shape.1][k] as i64;
+                    (1..=plate).contains(&self.max_shape[k]).then_some(px[k])
+                }
+                _ => Some(own[k].0 * b as f64 / own[k].1 as f64),
+            };
+            b >= 1
+                && px[k].is_finite()
+                && px[k] > 0.0
+                && want.is_some_and(|w| (px[k] - w).abs() <= PITCH_REL * w)
+                && (!edges || b == own[k].1)
+        });
+        if !agrees {
+            return Err(Fault::Inconsistent);
+        }
+        let n = |v: i64| usize::try_from(v).map_err(|_| Fault::Inconsistent);
+        Ok(Grid {
+            pixel: (px[0], px[1]),
+            shape: (n(self.shape[0])?, n(self.shape[1])?),
+            max_shape: (n(self.max_shape[0])?, n(self.max_shape[1])?),
+            binning: (self.binning[0] as u64, self.binning[1] as u64),
+            ..*grid
+        })
+    }
 }
 
 /// The class's `calc_mask`, in image indices.
@@ -123,23 +364,6 @@ fn cross(rows: &[bool], cols: &[bool]) -> Vec<bool> {
     (0..rows.len() * n1)
         .map(|k| rows[k / n1] || cols[k % n1])
         .collect()
-}
-
-impl Grid {
-    /// `Detector.binning = b` on the default instance: each pitch times
-    /// the ratio to the default binning, `max_shape` floor divided.
-    pub(super) fn binned(self, b: (u64, u64)) -> Grid {
-        let (p, own, max) = (self.pixel, self.binning, self.max_shape);
-        Grid {
-            pixel: (
-                p.0 * (b.0 as f64 / own.0 as f64),
-                p.1 * (b.1 as f64 / own.1 as f64),
-            ),
-            shape: (max.0 / b.0 as usize, max.1 / b.1 as usize),
-            binning: b,
-            ..self
-        }
-    }
 }
 
 impl Chips {
@@ -239,7 +463,12 @@ impl Rule {
 mod tests {
     use serde_json::Value;
 
+    use super::super::PoniFile;
     use super::*;
+
+    /// The geometry lines of the files the golden reads.
+    const GEOMETRY: &str = "Distance: 0.3\nPoni1: 0.01\nPoni2: 0.02\nRot1: 0.1\nRot2: -0.2\nRot3: 0.3\n\
+                            Wavelength: 1e-10\n";
 
     fn golden() -> Value {
         let path = concat!(
@@ -285,8 +514,43 @@ mod tests {
             binning: pair(&c["binning"]),
             orientation: c["orientation"].as_u64().unwrap() as u32,
             module_size: (!c["module_size"].is_null()).then(|| pair(&c["module_size"])),
-            binnable: c["binnable"].as_bool().unwrap(),
-            zero_pitch_default: c["zero_pitch_default"].as_bool().unwrap(),
+        }
+    }
+
+    fn floats(v: &Value) -> (f64, f64) {
+        (v[0].as_f64().unwrap(), v[1].as_f64().unwrap())
+    }
+
+    /// The pitch rule as the golden gives it.
+    fn pitch_rule(p: &Value) -> Pitch {
+        match p["rule"].as_str().unwrap() {
+            "fixed" => Pitch::Fixed,
+            "as given" => Pitch::AsGiven,
+            "rounded" => Pitch::Rounded {
+                size: floats(&p["size"]),
+            },
+            "rebinned" => Pitch::Rebinned {
+                size: floats(&p["size"]),
+                unit: floats(&p["unit"]),
+            },
+            "perkin" => Pitch::Perkin {
+                size: floats(&p["size"]),
+                unit: floats(&p["unit"]),
+            },
+            "table" => {
+                let table: Vec<(u64, f64)> = p["table"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| (e[0].as_u64().unwrap(), e[1].as_f64().unwrap()))
+                    .collect();
+                Pitch::Table(Box::leak(table.into_boxed_slice()))
+            }
+            "plate" => Pitch::Plate {
+                max_shape: pair(&p["max_shape"]),
+                unit: p["unit"].as_f64().unwrap(),
+            },
+            other => panic!("pitch rule {other}"),
         }
     }
 
@@ -307,10 +571,14 @@ mod tests {
             assert_eq!(t.force_pixel, c["force_pixel"], "{}", t.name);
             match (c["layout"].as_str().unwrap(), t.layout) {
                 ("generic", Layout::Generic) => {}
-                ("uniform", Layout::Uniform(g, r)) => {
-                    assert_eq!((g, r), (grid(c), rule(&c["mask"])), "{}", t.name)
-                }
-                ("edges", Layout::Edges(g, chips)) => {
+                ("uniform", Layout::Uniform(g, p, r)) => assert_eq!(
+                    (g, p, r),
+                    (grid(c), pitch_rule(&c["pitch"]), rule(&c["mask"])),
+                    "{}",
+                    t.name
+                ),
+                ("edges", Layout::Edges(g, p, chips)) => {
+                    assert_eq!(p, pitch_rule(&c["pitch"]), "{}", t.name);
                     assert_eq!(c["mask"]["rule"], "chips", "{}", t.name);
                     let want = Chips {
                         module: pair(&c["mask"]["module"]),
@@ -374,8 +642,8 @@ mod tests {
             .zip(table::CLASSES)
         {
             let (grid, mask) = match t.layout {
-                Layout::Uniform(grid, rule) => (grid, rule.map(|r| r.mask(&grid).unwrap())),
-                Layout::Edges(grid, chips) => (grid, Some(chips.mask(grid.shape))),
+                Layout::Uniform(grid, _, rule) => (grid, rule.map(|r| r.mask(&grid).unwrap())),
+                Layout::Edges(grid, _, chips) => (grid, Some(chips.mask(grid.shape))),
                 _ => continue,
             };
             let (n0, n1) = grid.shape;
@@ -394,59 +662,114 @@ mod tests {
         assert!(ruled > 0);
     }
 
-    /// pyFAI's instances of the factory's binning key: the pitch, shape
-    /// and mask of [`Grid::binned`] where the class is binnable.
+    /// A pitch from its repr, None for pyFAI's None.
+    fn given(v: &Value) -> Option<f64> {
+        v.as_str().map(|p| p.parse().unwrap())
+    }
+
+    fn ints(v: &Value) -> [i64; 2] {
+        [v[0].as_i64().unwrap(), v[1].as_i64().unwrap()]
+    }
+
+    /// The instance pyFAI's `Geometry.load` builds from each file the golden
+    /// reads, and from each it writes of a binned instance: [`Pitch::build`]
+    /// gives its pitch, shape, max_shape and binning, or raises where pyFAI
+    /// raises, and the mask of [`Built::grid`], where the instance agrees
+    /// with its class, is pyFAI's `Detector.mask` or raises where it does.
     #[test]
-    fn binnings_are_pyfai_s() {
+    fn reads_build_pyfai_s_instance() {
         let doc = golden();
-        let (mut binnable, mut raises) = (0, 0);
+        let (mut raises, mut built, mut masked, mut mask_raises, mut generic) = (0, 0, 0, 0, 0);
         for (c, t) in doc["classes"]
             .as_array()
             .unwrap()
             .iter()
             .zip(table::CLASSES)
         {
-            let Layout::Uniform(grid, rule) = t.layout else {
-                continue;
+            let (grid, pitch, edges) = match t.layout {
+                Layout::Uniform(grid, pitch, _) => (grid, pitch, false),
+                Layout::Edges(grid, pitch, _) => (grid, pitch, true),
+                _ => continue,
             };
-            if !grid.binnable {
-                continue;
-            }
-            binnable += 1;
-            let unbinned = grid.binned((1, 1));
-            assert_eq!(
-                (unbinned.pixel, unbinned.shape),
-                (
-                    pitch(&c["unbinned"]["pixel"]),
-                    pair(&c["unbinned"]["shape"])
-                ),
-                "{}",
-                t.name
-            );
-            for e in c["binned"].as_array().unwrap() {
-                let b = pair(&e["binning"]);
-                let binned = grid.binned(b);
+            let trips = c["round_trip"].as_array().unwrap().iter();
+            let texts = c["reads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| (format!("{}{}", e["head"].as_str().unwrap(), GEOMETRY), e))
+                .chain(trips.map(|e| (e["poni"].as_str().unwrap().to_string(), e)));
+            for (text, e) in texts {
+                let at = format!("{}: {text:?}", t.name);
+                let f = PoniFile::parse(&text).expect(&at);
+                let class = f.class().unwrap();
+                let facts = if e["read"].is_object() { &e["read"] } else { e };
+                if class.name != t.name {
+                    // version 1 of one pitch, or of a class without force_pixel
+                    assert_eq!(
+                        (class.name, &facts["class"]),
+                        ("Detector", &Value::from("Detector")),
+                        "{at}"
+                    );
+                    generic += 1;
+                    continue;
+                }
+                let b = f.built(class, &grid, pitch);
+                if e["raises"].is_string() {
+                    assert_eq!(b, None, "{at}");
+                    raises += 1;
+                    continue;
+                }
+                let b = b.expect(&at);
+                assert_eq!(facts["class"], t.name, "{at}");
                 assert_eq!(
-                    (binned.pixel, binned.shape),
-                    (pitch(&e["pixel"]), pair(&e["shape"])),
-                    "{} {b:?}",
-                    t.name
+                    b.pixel,
+                    [given(&facts["pixel"][0]), given(&facts["pixel"][1])],
+                    "{at}"
                 );
-                let mask = rule.map(|r| r.mask(&binned));
+                assert_eq!(
+                    (b.shape, b.max_shape, b.binning),
+                    (
+                        ints(&facts["shape"]),
+                        ints(&facts["max_shape"]),
+                        ints(&facts["binning"])
+                    ),
+                    "{at}"
+                );
+                built += 1;
+                let Ok(g) = b.grid(&grid, pitch, edges) else {
+                    continue;
+                };
+                if g.shape.0 == 0 || g.shape.1 == 0 {
+                    // the core refuses an empty image; pyFAI's mask is not read
+                    assert!(
+                        !e["mask"].is_array() && !e["mask_error"].is_string(),
+                        "{at}"
+                    );
+                    continue;
+                }
+                // pyFAI's Detector.mask of every instance that agrees
+                let mask = match t.layout {
+                    Layout::Uniform(_, _, rule) => match rule {
+                        Some(r) => r.mask(&g),
+                        None => Some(vec![false; g.shape.0 * g.shape.1]),
+                    },
+                    Layout::Edges(_, _, chips) => Some(chips.mask(g.shape)),
+                    _ => unreachable!(),
+                };
                 match (mask, e["mask"].as_array()) {
-                    (Some(None), None) => {
-                        assert!(e["mask_error"].is_string(), "{} {b:?}", t.name);
-                        raises += 1;
+                    (None, None) => {
+                        assert!(e["mask_error"].is_string(), "{at}");
+                        mask_raises += 1;
                     }
-                    (Some(Some(m)), Some(want)) => {
+                    (Some(m), Some(want)) => {
                         let want: Vec<u64> = want.iter().map(|v| v.as_u64().unwrap()).collect();
-                        assert_eq!(fingerprint(&m).as_slice(), want, "{} {b:?}", t.name);
+                        assert_eq!(fingerprint(&m).as_slice(), want, "{at}");
+                        masked += 1;
                     }
-                    (None, None) => assert!(e["mask_error"].is_null(), "{} {b:?}", t.name),
-                    (mask, want) => panic!("{} {b:?}: {mask:?} vs {want:?}", t.name),
+                    (mask, _) => panic!("{at}: {:?} vs {}", mask.map(|m| m.len()), e),
                 }
             }
         }
-        assert!(binnable > 0 && raises > 0);
+        assert!(raises > 0 && built > 0 && masked > 0 && mask_raises > 0 && generic > 0);
     }
 }

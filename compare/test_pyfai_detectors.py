@@ -1,9 +1,10 @@
 """hklrs.poni.PoniFile.detector against pyFAI 2026.9.0's named detector
 classes (golden/pyfai_detectors.json): each file pyFAI wrote for a modelled
-class, default or binned, gives pyFAI's shape, Detector.mask and
-calc_pos_zyx; another class, a binning pyFAI's setter does not give the
-class, a binned mask pyFAI cannot make and a 0 pitch pyFAI's constructor
-does not take as the default's are ValueErrors."""
+class, default or binned, and each file of other pitches and binnings gives
+pyFAI's shape, Detector.mask and calc_pos_zyx where Geometry.load builds an
+instance whose pitch, binning and shape agree; another class, a file pyFAI
+raises on or builds without a pitch or with disagreeing values, and a binned
+mask pyFAI cannot make are ValueErrors."""
 import re
 
 import numpy as np
@@ -15,6 +16,8 @@ from test_poni import LABS, TOL, load, positions, pyfai_positions
 G = load("pyfai_detectors.json")
 CLASSES = {c["class"]: c for c in G["classes"]}
 MODELLED = [c for c in G["classes"] if c["layout"] in ("uniform", "edges")]
+GEOMETRY = ("Distance: 0.3\nPoni1: 0.01\nPoni2: 0.02\nRot1: 0.1\nRot2: -0.2\nRot3: 0.3\n"
+            "Wavelength: 1e-10\n")
 
 
 @pytest.fixture(params=sorted(LABS))
@@ -32,30 +35,62 @@ def fingerprint(det):
 
 def file(name, config):
     return hklrs.poni.parse(
-        f"poni_version: 2.1\nDetector: {name}\nDetector_config: {config}\n"
-        "Distance: 0.3\nPoni1: 0.01\nPoni2: 0.02\nRot1: 0.1\nRot2: -0.2\nRot3: 0.3\n"
-        "Wavelength: 1e-10\n")[0]
+        f"poni_version: 2.1\nDetector: {name}\nDetector_config: {config}\n{GEOMETRY}")[0]
 
 
-def binned(c, b):
-    return next(e for e in c["binned"] if e["binning"] == b)
+def agrees(c, e):
+    """pyFAI's instance e of class c has the class's pitch at its binning
+    and, for ImXPad, the default binning: a Rayonix's table
+    pitch, a Mar345 plate within the class's max_shape, else the default
+    instance's pitch scaled by the binning, to a relative 1e-9"""
+    rule = c["pitch"]
+    for k in range(2):
+        if e["pixel"][k] is None:
+            return False
+        p, b, own = float(e["pixel"][k]), e["binning"][k], c["binning"][k]
+        if rule["rule"] == "table":
+            want = dict((t[0], t[1]) for t in rule["table"]).get(b)
+        elif rule["rule"] == "plate":
+            want = p if 1 <= e["max_shape"][k] <= rule["max_shape"][k] else None
+        else:
+            want = float(c["pixel"][k]) * b / own
+        if not (b >= 1 and np.isfinite(p) and p > 0 and want is not None
+                and abs(p - want) <= 1e-9 * want and (c["layout"] != "edges" or b == own)):
+            return False
+    return True
+
+
+def refusal(c, e, outcome):
+    """the ValueError text of a file of class c that pyFAI reads as e, its
+    instance's facts, with outcome the exception the read or the mask
+    raises; None for a detector"""
+    name = c["class"]
+    if "raises" in outcome:
+        return f"pyFAI raises building detector {name} from the file"
+    if e["class"] == "Detector":
+        return "gives no max_shape"
+    for k in range(2):
+        if e["pixel"][k] is None:
+            return f"pyFAI builds detector {name} from the file with no pixel{k + 1}"
+    if not agrees(c, e):
+        return f"pyFAI builds detector {name} of pitch .* which disagree"
+    if 0 in e["shape"]:
+        return "detector shape must be non-zero"
+    if "mask_error" in outcome:
+        b = tuple(e["binning"])
+        return re.escape(f"pyFAI detector {name} binned {b}") + ".* does not bin"
+    return None
 
 
 @pytest.mark.parametrize("case", G["cases"],
                          ids=lambda c: f"{c['class']}-o{c['orientation']}-b{c['binning']}")
 def test_pyfai_s_files_give_its_pixels(case, lab):
-    c = CLASSES[case["class"]]
     f = hklrs.poni.parse(case["poni"])[0]
     with pytest.raises(ValueError, match=case["class"]):
         f.poni()
-    if case["binning"] is None:
-        shape, mask = c["shape"], c["fingerprint"]
-    else:
-        e = binned(c, case["binning"])
-        shape, mask = e["shape"], e["mask"] or [0, 0, 0]
     det = f.detector(*lab)
-    assert det.shape == tuple(shape)
-    assert fingerprint(det) == mask
+    assert det.shape == tuple(case["shape"])
+    assert fingerprint(det) == case["fingerprint"]
     np.testing.assert_allclose(positions(det, case["pixels"]),
                                pyfai_positions(lab, case["zyx"]), rtol=0, atol=TOL)
 
@@ -74,53 +109,36 @@ def test_other_classes_are_value_errors(c):
 
 
 @pytest.mark.parametrize("c", MODELLED, ids=lambda c: c["class"])
-def test_binnings_are_pyfai_s(c):
-    """each binning of the golden: pyFAI's binned shape and mask where its
-    setter bins the class, else a ValueError naming the cause"""
-    for e in c.get("binned", []):
-        f = file(c["class"], f'{{"binning": {e["binning"]}}}')
-        if not c["binnable"]:
-            if e["binning"] == c["binning"]:
-                assert f.detector(*LABS["hkl"]).shape == tuple(c["shape"])
-            else:
-                with pytest.raises(ValueError, match="binning is not the class's own"):
-                    f.detector(*LABS["hkl"])
-        elif 0 in e["shape"]:
-            with pytest.raises(ValueError, match="non-zero"):
-                f.detector(*LABS["hkl"])
-        elif e["mask_error"]:
-            with pytest.raises(ValueError, match="does not bin"):
-                f.detector(*LABS["hkl"])
-        else:
+def test_reads_are_pyfai_s_instance_or_value_errors(c):
+    """each file the golden reads for the class (Detector_config pitches and
+    binnings, version 1 pixel sizes): pyFAI's shape and mask, or the
+    ValueError of what pyFAI does"""
+    for e in c["reads"]:
+        f = hklrs.poni.parse(e["head"] + GEOMETRY)[0]
+        want = refusal(c, e, e)
+        if want is None:
             det = f.detector(*LABS["hkl"])
-            assert det.shape == tuple(e["shape"]), e["binning"]
-            assert fingerprint(det) == (e["mask"] or [0, 0, 0]), e["binning"]
-
-
-ZERO = {"pixel1": ('{"pixel1": 0}', "pixel1"), "pixel2": ('{"pixel2": 0}', "pixel2"),
-        "both": ('{"pixel1": 0, "pixel2": 0}', "pixel1"),
-        "pixel1 null": ('{"pixel1": null}', "pixel1"),
-        "pixel2 null": ('{"pixel2": null}', "pixel2"), "version 1": (None, "pixel1")}
+            assert det.shape == tuple(e["shape"]), e["head"]
+            assert fingerprint(det) == (e.get("mask") or [0, 0, 0]), e["head"]
+        else:
+            with pytest.raises(ValueError, match=want):
+                f.detector(*LABS["hkl"])
 
 
 @pytest.mark.parametrize("c", MODELLED, ids=lambda c: c["class"])
-def test_zero_pitches_are_pyfai_s(c):
-    """the default instance where pyFAI's constructor gives it for a 0 or null
-    pitch, else a ValueError on the key; version 1 gives a class that does
-    not force its pitch the generic detector, which has no shape"""
-    for form, outcome in c["zero_pitch"].items():
-        config, key = ZERO[form]
-        if config is None:
-            f = hklrs.poni.parse(
-                f"Detector: {c['class']}\nPixelSize1: 0\nPixelSize2: 0\nDistance: 0.3\n"
-                "Poni1: 0.01\nPoni2: 0.02\nRot1: 0\nRot2: 0\nRot3: 0\nWavelength: 1e-10\n")[0]
-        else:
-            f = file(c["class"], config)
-        if outcome == "default":
-            assert f.detector(*LABS["hkl"]).shape == tuple(c["shape"]), form
-        elif outcome == "generic":
-            with pytest.raises(ValueError, match="no max_shape"):
-                f.detector(*LABS["hkl"])
-        else:
-            with pytest.raises(ValueError, match=f"Detector_config {key} is not"):
-                f.detector(*LABS["hkl"])
+def test_round_trips_are_pyfai_s_read(c, lab):
+    """PoniFile.write of the class binned by the factory, read back: pyFAI's
+    calc_pos_zyx and mask of what Geometry.load builds, or its ValueError"""
+    for e in c["round_trip"]:
+        f = hklrs.poni.parse(e["poni"])[0]
+        read = e.get("read", e)
+        want = refusal(c, read, e)
+        if want is not None:
+            with pytest.raises(ValueError, match=want):
+                f.detector(*lab)
+            continue
+        det = f.detector(*lab)
+        assert det.shape == tuple(read["shape"]), e["binning"]
+        assert fingerprint(det) == (e.get("mask") or [0, 0, 0]), e["binning"]
+        np.testing.assert_allclose(positions(det, e["pixels"]),
+                                   pyfai_positions(lab, e["zyx"]), rtol=0, atol=TOL)
