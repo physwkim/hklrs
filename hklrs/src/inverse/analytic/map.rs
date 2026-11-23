@@ -4,20 +4,32 @@
 //! DELTA the same way (v = 0) or by two detector axes of its own. It is
 //! derived from the axes: every L, v ∈ {0, ±π/2, π} and σ = ±1 under which
 //! the rotations agree, the one with the fewest offsets and flipped senses
-//! kept, so a geometry that is You's maps onto itself.
+//! kept, so a geometry that is You's maps onto itself. A kappa arm counts
+//! as the eulerian cradle that turns the sample as it does.
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use nalgebra::{Matrix3, Vector3};
 
+use super::super::kappa::KappaAxes;
 use super::you::{self, DELTA, EPS, NU, PHI};
 use crate::{AxisKind, Geometry};
 
-/// A circle's angle: `offset + sign·x` of geometry axis `axis`, or
-/// `offset` without one.
+/// What turns a circle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Source {
+    /// A geometry axis.
+    Axis(usize),
+    /// The kappa arm's eulerian omega, chi or phi (0, 1, 2), Same branch
+    /// ([`super::super::kappa::KappaArm::to_eulerian`]).
+    Eulerian(usize),
+}
+
+/// A circle's angle: `offset + sign·x` of `source`'s value x, or `offset`
+/// without one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Circle {
-    pub(super) axis: Option<usize>,
+    pub(super) source: Option<Source>,
     pub(super) sign: f64,
     pub(super) offset: f64,
 }
@@ -25,7 +37,7 @@ pub(super) struct Circle {
 impl Circle {
     const fn fixed(offset: f64) -> Self {
         Self {
-            axis: None,
+            source: None,
             sign: 1.0,
             offset,
         }
@@ -65,17 +77,19 @@ pub(super) struct Map {
     /// You's azimuth atan2(x, z) about the beam of lab y, which hklrs's qaz
     /// and naz start from; `None` with the beam along y.
     pub(super) azimuth: Option<f64>,
+    /// The kappa arm, on circles as its eulerians.
+    pub(super) kappa: Option<KappaAxes>,
 }
 
 impl Map {
     /// `None` with a source axis, more sample or detector rotations than
     /// You's, or axes no L, offsets and senses lay on You's circles.
-    pub(super) fn new(geometry: &Geometry) -> Option<Self> {
+    pub(super) fn new(geometry: &Geometry, kappa: Option<&KappaAxes>) -> Option<Self> {
         if !geometry.source_stack().is_empty() {
             return None;
         }
         let beam = geometry.beam_direction().into_inner();
-        let sample = rotations(geometry, geometry.sample_stack());
+        let sample = sample(geometry, kappa)?;
         let up = (Vector3::y() - beam * beam.y).try_normalize(EPS);
         let mut best: Option<((bool, usize, usize), Self)> = None;
         for lab in labs(&beam) {
@@ -107,6 +121,7 @@ impl Map {
                         sample,
                         arm,
                         azimuth,
+                        kappa: kappa.copied(),
                     };
                     best = Some((cost, map));
                 }
@@ -124,11 +139,34 @@ impl Map {
         self.sample.into_iter().chain(arm).enumerate()
     }
 
-    /// Whether `axis` is on a circle or is one of the arm's own.
+    /// Whether `axis` is on a circle, the kappa arm's or the detector arm's
+    /// own.
     pub(super) fn carries(&self, axis: usize) -> bool {
-        self.circles().any(|(_, c)| c.axis == Some(axis))
+        self.circles()
+            .any(|(_, c)| c.source == Some(Source::Axis(axis)))
+            || self.kappa.is_some_and(|k| k.axes().contains(&axis))
             || matches!(self.arm, Arm::Own(own) if own.contains(&axis))
     }
+}
+
+/// The sample rotations, outermost first, `kappa`'s as its eulerian cradle:
+/// omega and phi about komega's axis d, chi about d × (kappa's axis), as
+/// hkl's cradle (−y, x, −y) is to its arm (−y, −y cos α − z sin α, −y).
+fn sample(geometry: &Geometry, kappa: Option<&KappaAxes>) -> Option<Vec<(Source, Vector3<f64>)>> {
+    let mut sample: Vec<_> = rotations(geometry, geometry.sample_stack())
+        .into_iter()
+        .map(|(i, a)| (Source::Axis(i), a))
+        .collect();
+    if let Some(kappa) = kappa {
+        let at = sample
+            .iter()
+            .position(|&(s, _)| s == Source::Axis(kappa.axes()[0]))?;
+        let (d, k) = (sample[at].1, sample[at + 1].1);
+        let chi = d.cross(&k).try_normalize(EPS)?;
+        let cradle = [(0, d), (1, chi), (2, d)].map(|(e, a)| (Source::Eulerian(e), a));
+        sample.splice(at..at + 3, cradle);
+    }
+    Some(sample)
 }
 
 /// The rotations of `stack`, outermost first, with their lab axes at zero.
@@ -177,7 +215,7 @@ fn quarter(c: usize, v: f64) -> Matrix3<f64> {
 /// `c..=PHI` once the circles before turn by `p` at their offsets, pushed
 /// with that turn of all four.
 fn place(
-    axes: &[(usize, Vector3<f64>)],
+    axes: &[(Source, Vector3<f64>)],
     lab: &Matrix3<f64>,
     c: usize,
     p: &Matrix3<f64>,
@@ -197,7 +235,7 @@ fn place(
             && let Some(sign) = sense(&(lab * a), &want)
         {
             circles[c] = Circle {
-                axis: Some(i),
+                source: Some(i),
                 sign,
                 offset,
             };
@@ -240,7 +278,7 @@ fn arm(geometry: &Geometry, lab: &Matrix3<f64>, beam: &Vector3<f64>) -> Option<(
                 [Circle::fixed(0.0); 2],
                 |mut circles, (&(i, a), &c)| {
                     circles[c - NU] = Circle {
-                        axis: Some(i),
+                        source: Some(Source::Axis(i)),
                         sign: sense(&(lab * a), &you::axis(c))?,
                         offset: 0.0,
                     };

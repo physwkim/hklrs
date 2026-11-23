@@ -1,8 +1,8 @@
 //! Closed-form candidates. For a Q goal, on every geometry [`map`] lays
-//! onto You (1999) 4S+2D: the constraint families solved as diffcalc-core
-//! (`059ec8a`, `src/diffcalc/hkl/calc*.py`) solves them, with its defects
-//! corrected (upstream-defects.md DC-1..DC-6). For a detector goal, the
-//! detector arms of [`detector`].
+//! onto You (1999) 4S+2D, a kappa arm through its eulerians: the constraint
+//! families solved as diffcalc-core (`059ec8a`, `src/diffcalc/hkl/calc*.py`)
+//! solves them, with its defects corrected (upstream-defects.md
+//! DC-1..DC-6). For a detector goal, the detector arms of [`detector`].
 //!
 //! [`search`] is the one boundary: it maps the mode's [`System`] onto a
 //! closed form (You's constraints through a [`Map`]) and offers what it
@@ -21,11 +21,11 @@ use std::f64::consts::PI;
 
 use nalgebra::Vector3;
 
-use super::Equation;
-use super::kappa::Branch;
+use super::kappa::{Branch, KappaAxes};
 use super::system::{Goal, System};
 use super::validate::SolutionSet;
-use map::{Arm, Circle, Map};
+use super::{Equation, Eulerian};
+use map::{Arm, Circle, Map, Source};
 use sample::Known;
 
 /// Fixes the detector, or with `Naz` the azimuth about the beam of a unit
@@ -86,33 +86,111 @@ enum Constraints {
     Samples(Known),
 }
 
+/// The kappa arm as its eulerian cradle (omega, chi, phi), as the mode
+/// moves it.
+#[derive(Clone, Copy, Debug)]
+struct Cradle {
+    kappa: KappaAxes,
+    /// With kappa held, the eulerians at `current`: chi stays, and omega
+    /// and phi turn with komega and kphi. `None` with all three written,
+    /// where each eulerian is free but as an equation holds it and either
+    /// kappa image of a solution's is one.
+    held: Option<[f64; 3]>,
+}
+
+impl Cradle {
+    /// `None` where kappa is written and komega or kphi held, which turns
+    /// omega or phi with kappa: no circle of You's.
+    fn new(system: &System, kappa: KappaAxes) -> Option<Self> {
+        let axes = kappa.axes();
+        let held = match axes.map(|i| system.is_written(i)) {
+            [true, true, true] => None,
+            [_, false, _] => {
+                let at = axes.map(|i| system.current()[i]);
+                Some(kappa.arm().to_eulerian(at, Branch::Same))
+            }
+            _ => return None,
+        };
+        Some(Self { kappa, held })
+    }
+
+    /// Eulerian `e` where kappa is held and so is its axis.
+    fn at(&self, system: &System, e: usize) -> Option<f64> {
+        let held = self.held?;
+        (!system.is_written(self.kappa.axes()[e])).then_some(held[e])
+    }
+
+    /// `values` with the arm at `eulerians`: both kappa images, those
+    /// within reach, or komega and kphi turned as far from `current` as
+    /// the eulerians are from `held`.
+    fn arms(&self, system: &System, eulerians: [f64; 3], values: Vec<f64>) -> Vec<Vec<f64>> {
+        let axes = self.kappa.axes();
+        let Some(held) = self.held else {
+            return [Branch::Same, Branch::Opposite]
+                .into_iter()
+                .filter_map(|b| self.kappa.arm().to_kappa(eulerians, b).ok())
+                .map(|k| {
+                    let mut values = values.clone();
+                    for (&i, v) in axes.iter().zip(k) {
+                        values[i] = v;
+                    }
+                    values
+                })
+                .collect();
+        };
+        let mut values = values;
+        for e in [0, 2].into_iter().filter(|&e| system.is_written(axes[e])) {
+            values[axes[e]] += eulerians[e] - held[e];
+        }
+        vec![values]
+    }
+}
+
+/// The eulerians `held` stands for, up to the image (omega + π, −chi,
+/// phi + π) of each, which turns the sample alike: every held one after
+/// the first also at its other value mod π (omega, phi) or sign (chi).
+fn images(held: [Option<f64>; 3]) -> Vec<[Option<f64>; 3]> {
+    let mut out = vec![held];
+    for e in (0..3).filter(|&e| held[e].is_some()).skip(1) {
+        let other = |v: f64| if e == 1 { -v } else { v + PI };
+        let turned: Vec<_> = out
+            .iter()
+            .map(|h| {
+                let mut h = *h;
+                h[e] = h[e].map(other);
+                h
+            })
+            .collect();
+        out.extend(turned);
+    }
+    out
+}
+
 /// The mode as You's constraints on `map`: the circles it holds, at
-/// `current` through their axes or fixed, and its equations, which must
-/// make one family. Every written axis must be the map's.
-fn constraints(system: &System, map: &Map) -> Option<Constraints> {
+/// `current` through their axes, the kappa arm's eulerians (each of their
+/// [`images`]) or fixed, and its equations, which must make one family.
+/// Every written axis must be the map's.
+fn constraints(system: &System, map: &Map, cradle: Option<&Cradle>) -> Option<Vec<Constraints>> {
     if !system.written().iter().all(|&i| map.carries(i)) {
         return None;
     }
     let unit = |v: &Vector3<f64>| (map.phi * v).try_normalize(0.0);
-    let fixed = |c: &Circle| match c.axis {
-        Some(i) if system.is_written(i) => None,
-        Some(i) => Some(c.angle(system.current()[i])),
-        None => Some(c.offset),
-    };
-    let (mut det, mut refs, known) = (Vec::new(), Vec::new(), map.sample.map(|c| fixed(&c)));
+    let (mut det, mut refs, mut eulerians) = (Vec::new(), Vec::new(), [None; 3]);
     let (mut bisect, mut omega) = (false, None);
-    match &map.arm {
-        Arm::Circles([nu, delta]) => {
-            det.extend(fixed(nu).map(Detector::Nu));
-            det.extend(fixed(delta).map(Detector::Delta));
-        }
-        // You's detector constraints are on NU and DELTA alone.
-        Arm::Own(own) if own.iter().all(|&i| system.is_written(i)) => {}
-        Arm::Own(_) => return None,
-    }
-    let chi = |axis: usize| map.sample[you::CHI].axis == Some(axis);
+    let chi = |axis: usize| map.sample[you::CHI].source == Some(Source::Axis(axis));
     for e in system.extra() {
         match *e {
+            Equation::Kappa(held) if cradle?.held.is_none() => {
+                let (e, v) = match held {
+                    Eulerian::Omega(v) => (0, v),
+                    Eulerian::Chi(v) => (1, v),
+                    Eulerian::Phi(v) => (2, v),
+                    Eulerian::Bisector { .. } => return None,
+                };
+                if eulerians[e].replace(v).is_some() {
+                    return None;
+                }
+            }
             Equation::Qaz { qaz } => det.push(Detector::Qaz(qaz + map.azimuth?)),
             Equation::Naz { normal, naz } => {
                 det.push(Detector::Naz(unit(&normal)?, naz + map.azimuth?))
@@ -141,25 +219,47 @@ fn constraints(system: &System, map: &Map) -> Option<Constraints> {
             _ => return None,
         }
     }
-    let held: Vec<usize> = (you::MU..=you::PHI)
-        .filter(|&c| known[c].is_some())
-        .collect();
-    match (&det[..], &refs[..], held.len(), bisect, omega) {
-        (&[d], &[r], 1, false, None) => Some(Constraints::DetRefSample(d, r, known)),
-        (&[], &[r], 2, false, None) => Some(Constraints::RefSamples(r, known)),
-        (&[], &[], 3, false, None) => Some(Constraints::Samples(known)),
-        (&[d], &[], 2, false, None) => Some(Constraints::DetSamples(d, known)),
-        (&[d], &[], _, true, _) => {
-            let b = match (&held[..], omega) {
-                (&[], Some(w)) => Bisect::Omega(w),
-                (&[you::MU], None) => Bisect::Mu(known[you::MU]?),
-                (&[you::ETA], None) => Bisect::Eta(known[you::ETA]?),
-                _ => return None,
-            };
-            Some(Constraints::DetBisect(d, b))
+    let fixed = |c: &Circle, eulerians: &[Option<f64>; 3]| match c.source {
+        Some(Source::Axis(i)) if system.is_written(i) => None,
+        Some(Source::Axis(i)) => Some(c.angle(system.current()[i])),
+        Some(Source::Eulerian(e)) => {
+            let at = cradle.and_then(|cradle| cradle.at(system, e));
+            at.or(eulerians[e]).map(|v| c.angle(v))
         }
-        _ => None,
+        None => Some(c.offset),
+    };
+    match &map.arm {
+        Arm::Circles([nu, delta]) => {
+            det.extend(fixed(nu, &eulerians).map(Detector::Nu));
+            det.extend(fixed(delta, &eulerians).map(Detector::Delta));
+        }
+        // You's detector constraints are on NU and DELTA alone.
+        Arm::Own(own) if own.iter().all(|&i| system.is_written(i)) => {}
+        Arm::Own(_) => return None,
     }
+    let family = |eulerians: [Option<f64>; 3]| {
+        let known = map.sample.map(|c| fixed(&c, &eulerians));
+        let held: Vec<usize> = (you::MU..=you::PHI)
+            .filter(|&c| known[c].is_some())
+            .collect();
+        match (&det[..], &refs[..], held.len(), bisect, omega) {
+            (&[d], &[r], 1, false, None) => Some(Constraints::DetRefSample(d, r, known)),
+            (&[], &[r], 2, false, None) => Some(Constraints::RefSamples(r, known)),
+            (&[], &[], 3, false, None) => Some(Constraints::Samples(known)),
+            (&[d], &[], 2, false, None) => Some(Constraints::DetSamples(d, known)),
+            (&[d], &[], _, true, _) => {
+                let b = match (&held[..], omega) {
+                    (&[], Some(w)) => Bisect::Omega(w),
+                    (&[you::MU], None) => Bisect::Mu(known[you::MU]?),
+                    (&[you::ETA], None) => Bisect::Eta(known[you::ETA]?),
+                    _ => return None,
+                };
+                Some(Constraints::DetBisect(d, b))
+            }
+            _ => None,
+        }
+    };
+    images(eulerians).into_iter().map(family).collect()
 }
 
 /// The set of `system` from a closed form of its mode: every candidate
@@ -205,21 +305,32 @@ fn arm_search<'a>(system: &'a System<'a>, eulerians: &[f64; 3]) -> Option<Soluti
 /// You's under a [`Map`]. The reach gate has passed: `q` is nonzero and no
 /// longer than 2k.
 fn you_search<'a>(system: &'a System<'a>, q: &Vector3<f64>) -> Option<SolutionSet<'a>> {
-    let map = Map::new(system.geometry())?;
-    let constraints = constraints(system, &map)?;
+    let map = Map::new(system.geometry(), system.kappa())?;
+    let cradle = match map.kappa {
+        Some(kappa) => Some(Cradle::new(system, kappa)?),
+        None => None,
+    };
+    let families = constraints(system, &map, cradle.as_ref())?;
     let own = match map.arm {
         Arm::Own(own) => Some((detector::Pair::new(system.geometry(), own)?, own)),
         Arm::Circles(_) => None,
     };
     let mut set = SolutionSet::new(system);
-    for a in solve::Problem::new(&(map.phi * q)).candidates(&constraints) {
-        let mut values = system.current().to_vec();
+    let problem = solve::Problem::new(&(map.phi * q));
+    for a in families.iter().flat_map(|c| problem.candidates(c)) {
+        let (mut values, mut eulerians) = (system.current().to_vec(), [0.0; 3]);
         for (c, circle) in map.circles() {
-            if let Some(i) = circle.axis.filter(|&i| system.is_written(i)) {
-                values[i] = circle.value(a[c]);
+            match circle.source {
+                Some(Source::Axis(i)) if system.is_written(i) => values[i] = circle.value(a[c]),
+                Some(Source::Eulerian(e)) => eulerians[e] = circle.value(a[c]),
+                _ => {}
             }
         }
-        let positions = match &own {
+        let arms = match &cradle {
+            Some(cradle) => cradle.arms(system, eulerians, values),
+            None => vec![values],
+        };
+        let positions = arms.into_iter().flat_map(|values| match &own {
             None => vec![values],
             Some((pair, [outer, inner])) => {
                 let kf = map.lab.transpose() * you::kout(&a);
@@ -233,8 +344,8 @@ fn you_search<'a>(system: &'a System<'a>, q: &Vector3<f64>) -> Option<SolutionSe
                     })
                     .collect()
             }
-        };
-        for image in positions.into_iter().flat_map(|v| system.slit_images(v)) {
+        });
+        for image in positions.flat_map(|v| system.slit_images(v)) {
             if set.is_degenerate() {
                 return Some(set);
             }
@@ -274,55 +385,63 @@ mod tests {
         Matrix3::new(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
     }
 
-    /// Every preset lays onto You's circles but the kappa ones, P23 6C (five
-    /// sample rotations), PYFAI (three detector rotations) and LISA (a
-    /// source axis): E6C and BM28 PSIC as they are, E4CH turned, ID01 with
-    /// χ fixed at π/2, ZAXIS through a detector arm of its own.
+    /// The map of `geo`, its arm komega, kappa, kphi where it has one.
+    fn map_of(geo: &Geometry) -> Option<Map> {
+        let arm = ["komega", "kappa", "kphi"].map(|n| geo.axis_index(n));
+        let kappa = match arm {
+            [Ok(o), Ok(k), Ok(p)] => Some(KappaAxes::new(geo, [o, k, p]).unwrap()),
+            _ => None,
+        };
+        Map::new(geo, kappa.as_ref())
+    }
+
+    /// Every preset lays onto You's circles but P23 6C (five sample
+    /// rotations), PYFAI (three detector rotations) and LISA (a source
+    /// axis): E6C and BM28 PSIC as they are, E4CH turned, ID01 with χ fixed
+    /// at π/2, ZAXIS through a detector arm of its own, K6C's kappa arm as
+    /// E6C's cradle.
     #[test]
     fn map_lays_presets_on_you() {
         let unmapped: Vec<_> = PRESETS
             .iter()
-            .filter(|&&name| Map::new(&preset(name).unwrap()).is_none())
+            .filter(|&&name| map_of(&preset(name).unwrap()).is_none())
             .collect();
-        assert_eq!(
-            unmapped,
-            [
-                &"K4CV",
-                &"K6C",
-                &"SOLEIL SIRIUS KAPPA",
-                &"SOLEIL CRISTAL K4C",
-                &"PETRA3 P23 6C",
-                &"PYFAI",
-                &"PETRA3 P08 LISA"
-            ]
-        );
+        assert_eq!(unmapped, [&"PETRA3 P23 6C", &"PYFAI", &"PETRA3 P08 LISA"]);
         let fixed = |offset| Circle {
-            axis: None,
+            source: None,
             sign: 1.0,
             offset,
         };
         let map = |name| {
             let geo = preset(name).unwrap();
             let on = move |axis, sign| Circle {
-                axis: Some(geo.axis_index(axis).unwrap()),
+                source: Some(Source::Axis(geo.axis_index(axis).unwrap())),
                 sign,
                 offset: 0.0,
             };
-            (Map::new(&preset(name).unwrap()).unwrap(), on)
+            (map_of(&preset(name).unwrap()).unwrap(), on)
         };
+        let you = [0, 1, 2, 3, 4, 5].map(|i| Circle {
+            source: Some(Source::Axis(i)),
+            sign: 1.0,
+            offset: 0.0,
+        });
         for name in ["E6C", "ESRF BM28 PSIC"] {
             let (map, _) = map(name);
             assert_eq!(map.lab, frame());
             assert_eq!(map.phi, frame());
-            let you = [0, 1, 2, 3, 4, 5].map(|i| Circle {
-                axis: Some(i),
-                sign: 1.0,
-                offset: 0.0,
-            });
             assert_eq!(map.sample, you[..4]);
             assert_eq!(map.arm, Arm::Circles([you[4], you[5]]));
             assert_eq!(map.azimuth, Some(0.0));
         }
+        let (k6c, _) = map("K6C");
+        assert_eq!((k6c.lab, k6c.phi), (frame(), frame()));
+        let eulerian = |e| Circle {
+            source: Some(Source::Eulerian(e)),
+            ..you[0]
+        };
+        assert_eq!(k6c.sample, [you[0], eulerian(0), eulerian(1), eulerian(2)]);
+        assert_eq!(k6c.arm, Arm::Circles([you[4], you[5]]));
         let (e4ch, on) = map("E4CH");
         let turn = Matrix3::new(0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0);
         assert_eq!(e4ch.lab, turn);
@@ -351,7 +470,7 @@ mod tests {
     /// parameters arbitrary; MED2+3's also with the slit fit.
     fn hkl_modes<'g>(name: &str, geo: &'g Geometry) -> Vec<(String, Mode<'g>)> {
         use super::super::{
-            aps_04id_polar as polar, e4c, petra3_p09_eh2 as p09, petra3_p23_4c as p23,
+            aps_04id_polar as polar, e4c, k4c, k6c, petra3_p09_eh2 as p09, petra3_p23_4c as p23,
             soleil_nanoscopium_robot as robot, soleil_sirius_turret as turret,
             soleil_sixs_med as med, zaxis,
         };
@@ -363,6 +482,31 @@ mod tests {
         let surface = Vector3::new(0.1, 1.0, 0.2);
         let modes = match name {
             "TwoC" => vec![],
+            "K4CV" | "SOLEIL CRISTAL K4C" => vec![
+                k4c::bissector(geo),
+                k4c::constant_omega(geo, 0.3),
+                k4c::constant_chi(geo, 0.5),
+                k4c::constant_phi(geo, -0.4),
+                k4c::double_diffraction(geo, h2),
+                k4c::psi_constant(geo, reference, psi),
+            ],
+            "K6C" | "SOLEIL SIRIUS KAPPA" => vec![
+                k6c::bissector_vertical(geo),
+                k6c::constant_omega_vertical(geo, 0.3),
+                k6c::constant_chi_vertical(geo, 0.5),
+                k6c::constant_phi_vertical(geo, -0.4),
+                k6c::lifting_detector_kphi(geo),
+                k6c::lifting_detector_komega(geo),
+                k6c::lifting_detector_mu(geo),
+                k6c::double_diffraction_vertical(geo, h2),
+                k6c::bissector_horizontal(geo),
+                k6c::constant_phi_horizontal(geo, -0.4),
+                k6c::constant_kphi_horizontal(geo),
+                k6c::double_diffraction_horizontal(geo, h2),
+                k6c::psi_constant_vertical(geo, reference, psi),
+                k6c::constant_incidence(geo, surface, 0.2, 0.7),
+                k6c::psi_vertical_soleil_sirius_kappa(geo, reference, psi),
+            ],
             "E4CV" | "E4CH" | "SOLEIL MARS" => vec![
                 e4c::bissector(geo),
                 e4c::constant_omega(geo),
@@ -511,16 +655,17 @@ mod tests {
     /// On every preset that maps, every hkl mode that is one of You's
     /// families agrees with the numeric search in every case of [`cases`]
     /// and solves at least one. The modes that are not tie a sample axis to
-    /// a detector one (`Bisector`, `Equal`), add a second reflection, or
-    /// hold one of a detector arm's own two axes, which no NU or DELTA
-    /// constraint is.
+    /// a detector one (`Bisector`, `Equal`, the kappa arm's), add a second
+    /// reflection or an azimuth to the incidence, hold one of a detector
+    /// arm's own two axes, which no NU or DELTA constraint is, or hold kphi
+    /// with kappa written, which no eulerian is.
     #[test]
     fn preset_modes_agree_with_numeric() {
         let mut refused = std::collections::BTreeSet::new();
         let (mut mapped, mut failed, mut unsolved) = (0, Vec::new(), Vec::new());
         for &name in PRESETS {
             let geo = preset(name).unwrap();
-            if Map::new(&geo).is_none() {
+            if map_of(&geo).is_none() {
                 continue;
             }
             for (label, mode) in hkl_modes(name, &geo) {
@@ -545,7 +690,7 @@ mod tests {
         }
         assert!(failed.is_empty(), "{}", failed.join("\n"));
         assert!(unsolved.is_empty(), "{unsolved:?}");
-        assert_eq!(mapped, 60);
+        assert_eq!(mapped, 86);
         let refused: Vec<_> = refused.iter().map(String::as_str).collect();
         assert_eq!(
             refused,
@@ -566,14 +711,30 @@ mod tests {
                 "E6C: bissector_vertical",
                 "E6C: double_diffraction_horizontal",
                 "E6C: double_diffraction_vertical",
+                "K4CV: bissector",
+                "K4CV: double_diffraction",
+                "K6C: bissector_horizontal",
+                "K6C: bissector_vertical",
+                "K6C: constant_incidence",
+                "K6C: constant_kphi_horizontal",
+                "K6C: double_diffraction_horizontal",
+                "K6C: double_diffraction_vertical",
                 "PETRA3 P09 EH2: 4-circles bissecting horizontal",
                 "PETRA3 P09 EH2: 4-circles constant chi horizontal",
                 "PETRA3 P09 EH2: 4-circles constant omega horizontal",
                 "PETRA3 P09 EH2: 4-circles constant phi horizontal",
                 "PETRA3 P09 EH2: zaxis + alpha=beta",
                 "PETRA3 P09 EH2: zaxis + beta-fixed",
+                "SOLEIL CRISTAL K4C: bissector",
+                "SOLEIL CRISTAL K4C: double_diffraction",
                 "SOLEIL MARS: bissector",
                 "SOLEIL MARS: double_diffraction",
+                "SOLEIL SIRIUS KAPPA: bissector_horizontal",
+                "SOLEIL SIRIUS KAPPA: bissector_vertical",
+                "SOLEIL SIRIUS KAPPA: constant_incidence",
+                "SOLEIL SIRIUS KAPPA: constant_kphi_horizontal",
+                "SOLEIL SIRIUS KAPPA: double_diffraction_horizontal",
+                "SOLEIL SIRIUS KAPPA: double_diffraction_vertical",
                 "SOLEIL SIXS MED1+2: delta_fixed",
                 "SOLEIL SIXS MED2+2: reflectivity",
                 "SOLEIL SIXS MED2+3: gamma_fixed",
@@ -598,7 +759,7 @@ mod tests {
             .detector_rotation("delta", [0.0, -1.0, 0.0])
             .build()
             .unwrap();
-        assert_eq!(Map::new(&reversed).unwrap().sample[you::CHI].sign, -1.0);
+        assert_eq!(map_of(&reversed).unwrap().sample[you::CHI].sign, -1.0);
         let azimuths = [
             ("SOLEIL NANOSCOPIUM ROBOT", ["rs", "rx", "delta", "gamma"]),
             ("APS POLAR", ["chi", "phi", "gamma", "delta"]),
@@ -613,7 +774,7 @@ mod tests {
         let normal = Vector3::new(0.2, 0.3, 1.0);
         let mut modes = Vec::new();
         for (geo, written) in &azimuths {
-            assert_ne!(Map::new(geo).unwrap().azimuth, Some(0.0));
+            assert_ne!(map_of(geo).unwrap().azimuth, Some(0.0));
             modes.push(Mode::named(geo, "qaz", written, |_| {
                 vec![Equation::Qaz { qaz: 0.4 }]
             }));
@@ -677,6 +838,46 @@ mod tests {
                     "{name} {eulerians:?}: analytic {a:?}\nnumeric {b:?}"
                 );
             }
+        }
+    }
+
+    /// With the arm written, eulerians within |chi| ≤ 2α come back as both
+    /// kappa images, each reading back on its branch; past 2α, as none.
+    #[test]
+    fn cradle_drops_chi_past_reach() {
+        let geometry = preset("K4CV").unwrap();
+        let mode = super::super::k4c::psi_constant(&geometry, Vector3::z(), 0.4).unwrap();
+        let current = vec![0.0; geometry.axes().len()];
+        let request = InverseRequest {
+            mode: &mode,
+            ub: Matrix3::identity(),
+            wavelength: Wavelength::new(1.54).unwrap(),
+            target: Target::Hkl(Vector3::x()),
+            current: &current,
+        };
+        let system = request.system().unwrap();
+        let kappa = map_of(&geometry).unwrap().kappa.unwrap();
+        let cradle = Cradle::new(&system, kappa).unwrap();
+        let (reach, arm, axes) = (kappa.arm().reach(), kappa.arm(), kappa.axes());
+        for chi in [reach - 1e-9, 1e-9 - reach] {
+            let eulerians = [0.3, chi, -0.2];
+            let images = cradle.arms(&system, eulerians, current.clone());
+            assert_eq!(images.len(), 2, "{chi}");
+            for (values, branch) in images.iter().zip([Branch::Same, Branch::Opposite]) {
+                let back = arm.to_eulerian(axes.map(|i| values[i]), branch);
+                assert!(
+                    back.iter()
+                        .zip(eulerians)
+                        .all(|(a, b)| wrap(a - b).abs() < 1e-9)
+                );
+            }
+        }
+        for chi in [reach + 1e-9, -reach - 1e-9] {
+            assert!(
+                cradle
+                    .arms(&system, [0.3, chi, -0.2], current.clone())
+                    .is_empty()
+            );
         }
     }
 
