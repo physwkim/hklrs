@@ -4,6 +4,7 @@
 //! detector geometry and translations, keV for energy. Q includes 2π.
 
 pub mod absorption;
+pub mod calib;
 mod detector;
 mod detector_table;
 mod error;
