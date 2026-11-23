@@ -40,7 +40,12 @@ def quat_matrix(q):
 
 def hkl_case(name, lat, wl, user_vals):
     """libhkl's view of one configuration."""
-    fac = Hkl.factories()[name]
+    factories = Hkl.factories()
+    if name not in factories:
+        pytest.skip(f"preset {name} is not in the installed libhkl {Hkl.VERSION}; "
+                    "its parity is the Rust golden hklrs/tests/hkl_golden.rs "
+                    "(hkl 7be4f79 driver)")
+    fac = factories[name]
     geo = fac.create_new_geometry()
     geo.wavelength_set(wl, USER)
     geo.axis_values_set(user_vals, USER)
