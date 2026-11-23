@@ -90,7 +90,10 @@ impl<'a> Rig<'a> {
         self.geometry.poses(&values)
     }
 
-    /// The fractional pixel (slow, fast) where `frame` lands on `detector`.
+    /// The fractional pixel (slow, fast) where `frame` lands on the plane of
+    /// the module that holds its observed peak, whether or not that is on
+    /// the chip: the residual geometry is the plane's linear index mapping,
+    /// not the chip's extent. `None` when the peak is outside the image.
     pub fn locate(
         &self,
         detector: &PixelDetector,
@@ -118,10 +121,11 @@ impl<'a> Rig<'a> {
         };
         let to_arm = poses.detector.inverse();
         let origin: Point3<f64> = to_arm * poses.sample_position();
+        let (slow, fast) = cell(frame.peak().pos).ok_or(Reject::NoRay)?;
+        let module = detector.module(slow, fast).map_err(|_| Reject::NoRay)?;
         detector
-            .locate(origin, to_arm.rotation * direction)
+            .locate_on(module, origin, to_arm.rotation * direction)
             .map_err(|e| match e {
-                Error::RayOutside => Reject::RayOutside,
                 Error::RayBehind => Reject::RayBehind,
                 Error::RayParallel => Reject::RayParallel,
                 _ => Reject::NoRay,
@@ -144,6 +148,13 @@ impl<'a> Rig<'a> {
             .map(|a| (at[a] - peak.pos[a]) / peak.sigma[a])
             .collect())
     }
+}
+
+/// The image pixel (slow, fast) a peak position rounds to; `None` for a
+/// position below the first pixel.
+pub(crate) fn cell(pos: [f64; 2]) -> Option<(usize, usize)> {
+    let r = |x: f64| (x >= -0.5).then(|| x.round() as usize);
+    Some((r(pos[0])?, r(pos[1])?))
 }
 
 /// Residuals per axis with a finite σ in `frame`.
