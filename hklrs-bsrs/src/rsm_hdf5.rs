@@ -14,9 +14,10 @@ use std::path::PathBuf;
 
 use bsrs::event_model::StreamResource;
 use hklrs::normalise::RawFrame;
+use rust_hdf5::format::FormatError;
 use rust_hdf5::{DatatypeMessage, H5File, Hdf5Error};
 
-use crate::rsm::FrameReader;
+use crate::rsm::{FrameReader, ReadError};
 
 const MIMETYPE: &str = "application/x-hdf5";
 /// The only file uri bsrs emits: `file://localhost` + an absolute path.
@@ -52,13 +53,32 @@ pub enum Hdf5FrameError {
     NotFrames { shape: Vec<usize> },
     #[error("pixel {pixel}, {value}, has no exact f64")]
     Inexact { pixel: usize, value: i128 },
+    /// Metadata whose checksum does not match: read while the writer was
+    /// rewriting it, or corrupt. libhdf5's SWMR reader reads such metadata
+    /// again (`H5Pset_metadata_read_attempts`); rust-hdf5's `H5File` reads
+    /// it once.
+    #[error("HDF5: {0}")]
+    ChecksumMismatch(String),
     #[error("HDF5: {0}")]
     Hdf5(String),
 }
 
 impl From<Hdf5Error> for Hdf5FrameError {
     fn from(e: Hdf5Error) -> Self {
-        Self::Hdf5(e.to_string())
+        // rust-hdf5's I/O-layer error type is private (`pub(crate) mod io`),
+        // so a mismatch it raises is known by its text.
+        let checksum = match &e {
+            Hdf5Error::Format(FormatError::ChecksumMismatch { .. }) => true,
+            Hdf5Error::IoLayer(io) => io
+                .to_string()
+                .starts_with("format error: checksum mismatch"),
+            _ => false,
+        };
+        if checksum {
+            Self::ChecksumMismatch(e.to_string())
+        } else {
+            Self::Hdf5(e.to_string())
+        }
     }
 }
 
@@ -120,12 +140,21 @@ impl Hdf5FrameReader {
     }
 }
 
+/// Not readable yet: a file the IOC has not created, which it creates at
+/// its first frame (LazyOpen, `host/areadetector.rs:975`); a frame past
+/// those flushed, as when the datum is sent after a failed flush
+/// (`host/areadetector.rs:1933`); and metadata read mid-rewrite.
 impl FrameReader for Hdf5FrameReader {
-    fn read(
-        &self,
-        resource: &StreamResource,
-        index: u64,
-    ) -> Result<RawFrame, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(self.frame(resource, index)?)
+    fn read(&self, resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError> {
+        self.frame(resource, index).map_err(|e| match e {
+            Hdf5FrameError::MissingFile { .. }
+            | Hdf5FrameError::IndexOutOfRange { .. }
+            | Hdf5FrameError::ChecksumMismatch(_) => ReadError::NotYet(e.into()),
+            Hdf5FrameError::UnknownResource { .. }
+            | Hdf5FrameError::NotLocal { .. }
+            | Hdf5FrameError::NotFrames { .. }
+            | Hdf5FrameError::Inexact { .. }
+            | Hdf5FrameError::Hdf5(_) => ReadError::Permanent(e.into()),
+        })
     }
 }

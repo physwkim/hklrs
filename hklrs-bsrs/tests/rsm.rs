@@ -3,8 +3,9 @@
 //! hand-built documents for the orders a step scan does not produce.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bsrs::backends::soft::SoftMotor;
 use bsrs::backends::soft::detector::soft_detector;
@@ -23,7 +24,7 @@ use hklrs::presets::preset;
 use hklrs::projection::Projection;
 use hklrs::{PixelDetector, Wavelength};
 use hklrs_bsrs::{
-    FailedFrame, FrameFailure, FrameReader, RsmCallback, RsmConfig, RsmError, RsmValue,
+    FailedFrame, FrameFailure, FrameReader, ReadError, RsmCallback, RsmConfig, RsmError, RsmValue,
 };
 use serde_json::{Value, json};
 
@@ -91,35 +92,53 @@ fn direct(frames: &[(f64, u64)]) -> Cube {
     cube
 }
 
-/// Synthetic frames for any resource; `fail` is unreadable, `slow` takes
-/// a while and `transposed` is read in the (fast, slow) shape.
+/// Synthetic frames for any resource; `fail` is unreadable for good,
+/// `late` not readable yet until `written` is set, `slow` takes a while
+/// and `transposed` is read in the (fast, slow) shape. `reads` records
+/// each read's index and time.
 #[derive(Default)]
 struct Frames {
     fail: Option<u64>,
+    late: Option<u64>,
+    written: Arc<AtomicBool>,
     slow: Option<u64>,
     transposed: Option<u64>,
+    reads: Arc<Mutex<Vec<(u64, Instant)>>>,
 }
 
 impl FrameReader for Frames {
-    fn read(
-        &self,
-        _resource: &StreamResource,
-        index: u64,
-    ) -> Result<RawFrame, Box<dyn std::error::Error + Send + Sync>> {
+    fn read(&self, _resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError> {
+        self.reads.lock().unwrap().push((index, Instant::now()));
         if self.slow == Some(index) {
             std::thread::sleep(Duration::from_millis(50));
         }
         if self.fail == Some(index) {
-            return Err(format!("frame {index} is unreadable").into());
+            return Err(ReadError::Permanent(
+                format!("frame {index} is unreadable").into(),
+            ));
+        }
+        if self.late == Some(index) && !self.written.load(Ordering::SeqCst) {
+            return Err(ReadError::NotYet(
+                format!("frame {index} is not written").into(),
+            ));
         }
         if self.transposed == Some(index) {
-            return Ok(RawFrame::new((SHAPE.1, SHAPE.0), pixels(index))?);
+            return Ok(RawFrame::new((SHAPE.1, SHAPE.0), pixels(index)).unwrap());
         }
         Ok(raw(index))
     }
 }
 
+/// The indices read, in order.
+fn indices(reads: &Mutex<Vec<(u64, Instant)>>) -> Vec<u64> {
+    reads.lock().unwrap().iter().map(|&(i, _)| i).collect()
+}
+
 fn rsm(frames: Frames) -> Arc<RsmCallback> {
+    rsm_within(frames, RsmConfig::DEFAULT_READ_DEADLINE)
+}
+
+fn rsm_within(frames: Frames, read_deadline: Duration) -> Arc<RsmCallback> {
     let field = |name: &str| RsmValue::Field(name.to_owned());
     let config = RsmConfig {
         map: frame_map(),
@@ -138,6 +157,7 @@ fn rsm(frames: Frames) -> Arc<RsmCallback> {
         count_time: None,
         seed: None,
         reader: Arc::new(frames),
+        read_deadline,
     };
     Arc::new(RsmCallback::new(config).unwrap())
 }
@@ -374,11 +394,14 @@ fn an_event_waiting_at_the_stop_document_is_a_failed_frame() {
     assert_eq!(map.cube, direct(&frames(1)));
 }
 
-/// The reader fails on frame 1, event 2 of the scan; the other four map.
+/// The reader fails on frame 1, event 2 of the scan, for good: it is read
+/// once and fails at once; the other four map.
 #[tokio::test]
-async fn a_reader_failure_fails_only_its_frame() {
+async fn a_permanent_reader_failure_fails_its_frame_unretried() {
+    let reads = Arc::default();
     let rsm = rsm(Frames {
         fail: Some(1),
+        reads: Arc::clone(&reads),
         ..Frames::default()
     });
     scan(&rsm, &KOMEGA[..5]).await;
@@ -394,6 +417,104 @@ async fn a_reader_failure_fails_only_its_frame() {
     let mut others = frames(5);
     others.remove(1);
     assert_eq!(map.cube, direct(&others));
+    assert_eq!(indices(&reads), [0, 1, 2, 3, 4]);
+}
+
+/// Frame 1 is never written: it is read again until the deadline after
+/// its first read, then fails with the reader's reason; frame 2 maps
+/// after it.
+#[test]
+fn a_frame_never_readable_fails_at_the_deadline() {
+    let deadline = Duration::from_millis(150);
+    let reads = Arc::default();
+    let rsm = rsm_within(
+        Frames {
+            late: Some(1),
+            reads: Arc::clone(&reads),
+            ..Frames::default()
+        },
+        deadline,
+    );
+    feed(
+        &rsm,
+        [
+            start(),
+            descriptor(&["delta"], &[]),
+            resource(),
+            datum(1..4, 0),
+        ]
+        .into_iter()
+        .chain((1..=3).map(|seq| event(seq, true)))
+        .chain([stop()]),
+    );
+    let map = rsm.finish().unwrap();
+    assert_eq!(
+        map.failed,
+        [FailedFrame {
+            seq_num: 2,
+            reason: FrameFailure::Read("frame 1 is not written".into())
+        }]
+    );
+    assert_eq!(map.mapped, [1, 3]);
+    assert_eq!(map.cube, direct(&[(KOMEGA[0], 0), (KOMEGA[2], 2)]));
+    let late: Vec<Instant> = reads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|&&(i, _)| i == 1)
+        .map(|&(_, at)| at)
+        .collect();
+    assert!(late.len() >= 2, "{} reads", late.len());
+    assert!(late[late.len() - 1] - late[0] >= deadline);
+}
+
+/// Frame 1 is written only after the worker has read it twice: meanwhile
+/// events 3 to 5 wait behind it, unread, and the snapshot holds event 1
+/// alone; once it is written all five map in seq_num order.
+#[test]
+fn frames_after_a_waiting_frame_keep_their_order() {
+    let (written, reads) = (Arc::new(AtomicBool::new(false)), Arc::default());
+    let rsm = rsm(Frames {
+        late: Some(1),
+        written: Arc::clone(&written),
+        reads: Arc::clone(&reads),
+        ..Frames::default()
+    });
+    feed(
+        &rsm,
+        [
+            start(),
+            descriptor(&["delta"], &[]),
+            resource(),
+            datum(1..6, 0),
+        ]
+        .into_iter()
+        .chain((1..=5).map(|seq| event(seq, true))),
+    );
+    let waited = Instant::now();
+    while indices(&reads).iter().filter(|&&i| i == 1).count() < 2 {
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "frame 1 not read twice"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let waiting = rsm.snapshot().unwrap();
+    assert_eq!(waiting.mapped, [1]);
+    assert_eq!(waiting.failed, []);
+    written.store(true, Ordering::SeqCst);
+    rsm.document(&stop());
+    let map = rsm.finish().unwrap();
+    assert_eq!(map.failed, []);
+    assert_eq!(map.mapped, [1, 2, 3, 4, 5]);
+    assert_eq!(map.cube, direct(&frames(5)));
+    let read = indices(&reads);
+    let again = read.iter().filter(|&&i| i == 1).count();
+    assert!(again >= 3, "frame 1 read {again} times");
+    let mut order = vec![0];
+    order.extend(std::iter::repeat_n(1, again));
+    order.extend([2, 3, 4]);
+    assert_eq!(read, order);
 }
 
 /// The reader states the shape it read: frame 2 comes back transposed,

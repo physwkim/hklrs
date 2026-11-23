@@ -4,12 +4,15 @@
 //!
 //! bsrs runs callbacks inline, so the callback only pairs documents: one
 //! worker thread reads, maps and adds the frames in the order they are
-//! paired, and is the only writer of the map.
+//! paired, and is the only writer of the map. A frame its reader cannot
+//! read yet is read again until [`RsmConfig::read_deadline`], and the
+//! frames behind it wait for it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use bsrs::engine::DocumentCallback;
 use bsrs::event_model::{
@@ -44,11 +47,19 @@ pub trait FrameReader: Send + Sync {
     /// Frame `index` of `resource`: the whole raw image in the shape it
     /// was read in, which [`FrameMap::map`] refuses unless it is the raw
     /// shape.
-    fn read(
-        &self,
-        resource: &StreamResource,
-        index: u64,
-    ) -> Result<RawFrame, Box<dyn std::error::Error + Send + Sync>>;
+    fn read(&self, resource: &StreamResource, index: u64) -> Result<RawFrame, ReadError>;
+}
+
+/// Why a [`FrameReader`] has no frame. The reader only says which kind of
+/// failure it is; whether to read again is the [`RsmCallback`] worker's.
+#[derive(Debug, Error)]
+pub enum ReadError {
+    /// A later read may find it: the detector may still be writing it.
+    #[error("not readable yet: {0}")]
+    NotYet(Box<dyn std::error::Error + Send + Sync>),
+    /// No later read will.
+    #[error("{0}")]
+    Permanent(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// What an [`RsmCallback`] maps.
@@ -72,7 +83,21 @@ pub struct RsmConfig {
     /// The cube the frames are added to; `None` starts empty.
     pub seed: Option<Cube>,
     pub reader: Arc<dyn FrameReader>,
+    /// How long after a frame's first read it is read again while
+    /// [`ReadError::NotYet`]; then it fails with the last reason. Zero
+    /// reads each frame once.
+    pub read_deadline: Duration,
 }
+
+impl RsmConfig {
+    /// For a frame its datum announces before the file holds it: bsrs
+    /// flushes the file before each datum but sends the datum even when
+    /// that flush fails.
+    pub const DEFAULT_READ_DEADLINE: Duration = Duration::from_secs(10);
+}
+
+/// The pause between reads of a frame not readable yet.
+const POLL: Duration = Duration::from_millis(20);
 
 /// Why the map does not hold the whole run.
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -146,9 +171,10 @@ impl RsmCallback {
         let (jobs, receiver) = mpsc::channel();
         let worker = {
             let (map, reader, out) = (config.map, config.reader, Arc::clone(&out));
+            let deadline = config.read_deadline;
             std::thread::Builder::new()
                 .name("rsm".into())
-                .spawn(move || work(&map, &*reader, receiver, &out))
+                .spawn(move || work(&map, &*reader, deadline, receiver, &out))
                 .map_err(|e| RsmError::Worker(e.to_string()))?
         };
         Ok(Self {
@@ -231,7 +257,8 @@ impl RsmCallback {
     }
 
     /// The whole run's map, once its Stop document has been seen and the
-    /// worker has added every frame.
+    /// worker has added every frame. Each frame still not readable holds
+    /// it up to [`RsmConfig::read_deadline`], one after another.
     pub fn finish(&self) -> Result<RsmMap, RsmError> {
         if !matches!(*lock(&self.phase), Phase::Stopped) {
             return Err(RsmError::NotStopped);
@@ -499,7 +526,12 @@ impl Frame {
         }
     }
 
-    fn map(&self, map: &FrameMap, reader: &dyn FrameReader) -> Result<MappedFrame, FrameFailure> {
+    fn map(
+        &self,
+        map: &FrameMap,
+        reader: &dyn FrameReader,
+        deadline: Duration,
+    ) -> Result<MappedFrame, FrameFailure> {
         let b = &self.bindings;
         let readbacks = b
             .axes
@@ -514,10 +546,27 @@ impl Frame {
         if let Some(t) = &b.count_time {
             scalars = scalars.count_time(self.value(t)?)?;
         }
-        let raw = reader
-            .read(&self.resource, self.index)
-            .map_err(|e| FrameFailure::Read(e.to_string()))?;
+        let raw = self.read(reader, deadline)?;
         Ok(map.map(&readbacks, wavelength, &raw, &scalars)?)
+    }
+
+    /// Reads the frame again every [`POLL`] while it is not readable yet,
+    /// until `deadline` after the first read. The worker reads nothing
+    /// else meanwhile, so the frames behind it keep their order.
+    fn read(&self, reader: &dyn FrameReader, deadline: Duration) -> Result<RawFrame, FrameFailure> {
+        let first = Instant::now();
+        loop {
+            let reason = match reader.read(&self.resource, self.index) {
+                Ok(raw) => return Ok(raw),
+                Err(ReadError::Permanent(e)) => return Err(FrameFailure::Read(e.to_string())),
+                Err(ReadError::NotYet(e)) => e,
+            };
+            let left = deadline.saturating_sub(first.elapsed());
+            if left.is_zero() {
+                return Err(FrameFailure::Read(reason.to_string()));
+            }
+            std::thread::sleep(left.min(POLL));
+        }
     }
 }
 
@@ -537,11 +586,17 @@ impl Out {
     }
 }
 
-fn work(map: &FrameMap, reader: &dyn FrameReader, jobs: Receiver<Job>, out: &Mutex<Out>) {
+fn work(
+    map: &FrameMap,
+    reader: &dyn FrameReader,
+    deadline: Duration,
+    jobs: Receiver<Job>,
+    out: &Mutex<Out>,
+) {
     for job in jobs {
         match job {
             Job::Frame(frame) => {
-                let mapped = frame.map(map, reader);
+                let mapped = frame.map(map, reader, deadline);
                 let mut out = lock(out);
                 let added = mapped.and_then(|m| Ok(map.add(&mut out.map.cube, &m)?));
                 match added {

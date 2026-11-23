@@ -25,8 +25,8 @@ pub use lua::LuaDiffractometer;
 pub use plans::{hkl_list_scan, hkl_scan, mv_hkl, psi_scan, zone_scan};
 pub use pseudo::PseudoAxis;
 pub use rsm::{
-    FailedFrame, FrameFailure, FrameReader, RsmCallback, RsmConfig, RsmError, RsmMap, RsmMonitor,
-    RsmValue,
+    FailedFrame, FrameFailure, FrameReader, ReadError, RsmCallback, RsmConfig, RsmError, RsmMap,
+    RsmMonitor, RsmValue,
 };
 #[cfg(feature = "hdf5")]
 pub use rsm_hdf5::{Hdf5FrameError, Hdf5FrameReader};
