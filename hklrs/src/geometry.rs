@@ -68,6 +68,8 @@ impl Axis {
 pub struct Poses {
     pub sample: Isometry3<f64>,
     pub detector: Isometry3<f64>,
+    /// Rotation of the incident beam: `source * beam_direction` is k̂ᵢ.
+    pub source: UnitQuaternion<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +78,7 @@ pub struct Geometry {
     axes: Vec<Axis>,
     sample: Vec<usize>,
     detector: Vec<usize>,
+    source: Vec<usize>,
     beam_direction: Unit<Vector3<f64>>,
 }
 
@@ -100,6 +103,7 @@ pub struct GeometryBuilder {
     axes: Vec<Axis>,
     sample: Vec<usize>,
     detector: Vec<usize>,
+    source: Vec<usize>,
     beam_direction: [f64; 3],
     error: Option<Error>,
 }
@@ -108,6 +112,7 @@ pub struct GeometryBuilder {
 enum Holder {
     Sample,
     Detector,
+    Source,
 }
 
 impl GeometryBuilder {
@@ -141,6 +146,7 @@ impl GeometryBuilder {
         let (stack, label) = match holder {
             Holder::Sample => (&mut self.sample, "sample"),
             Holder::Detector => (&mut self.detector, "detector"),
+            Holder::Source => (&mut self.source, "source"),
         };
         if stack.contains(&idx) {
             self.error = Some(Error::AxisRepeated {
@@ -218,7 +224,14 @@ impl GeometryBuilder {
         self.push(Holder::Detector, name, Ok(AxisKind::Parameter))
     }
 
-    /// Incident beam direction in the lab frame; default +x.
+    /// Rotation of the incident beam, outermost first. Only rotations: a
+    /// translation cannot change a plane wave's direction.
+    pub fn source_rotation(self, name: &str, axis: [f64; 3]) -> Self {
+        self.push(Holder::Source, name, Self::rotation(name, axis))
+    }
+
+    /// Incident beam direction in the lab frame with the source stack at
+    /// zero; default +x.
     pub fn beam_direction(mut self, direction: [f64; 3]) -> Self {
         self.beam_direction = direction;
         self
@@ -234,6 +247,7 @@ impl GeometryBuilder {
             axes: self.axes,
             sample: self.sample,
             detector: self.detector,
+            source: self.source,
         })
     }
 }
@@ -245,6 +259,7 @@ impl Geometry {
             axes: Vec::new(),
             sample: Vec::new(),
             detector: Vec::new(),
+            source: Vec::new(),
             beam_direction: [1.0, 0.0, 0.0],
             error: None,
         }
@@ -278,6 +293,12 @@ impl Geometry {
         &self.detector
     }
 
+    /// Source stack, outermost first, as indices into [`Geometry::axes`].
+    pub fn source_stack(&self) -> &[usize] {
+        &self.source
+    }
+
+    /// Incident beam direction with the source stack at zero.
     pub fn beam_direction(&self) -> Unit<Vector3<f64>> {
         self.beam_direction
     }
@@ -308,6 +329,7 @@ impl Geometry {
         Ok(Poses {
             sample: self.chain(&self.sample, values),
             detector: self.chain(&self.detector, values),
+            source: self.chain(&self.source, values).rotation,
         })
     }
 
@@ -494,5 +516,28 @@ mod tests {
             })
         );
         assert_eq!(g.poses(&[f64::NAN]), Err(Error::NonFinite { index: 0 }));
+    }
+
+    #[test]
+    fn source_stack_rotates_the_beam_and_empty_is_identity() {
+        let empty = Geometry::builder("t")
+            .sample_rotation("r", [0.0, 0.0, 1.0])
+            .build()
+            .unwrap();
+        assert_eq!(
+            empty.poses(&[0.3]).unwrap().source,
+            UnitQuaternion::identity()
+        );
+        // outer x then inner y: R_x(a) R_y(b) x̂ = R_x(a) (cos b, 0, -sin b)
+        let g = Geometry::builder("t")
+            .source_rotation("a", [1.0, 0.0, 0.0])
+            .source_rotation("b", [0.0, 1.0, 0.0])
+            .build()
+            .unwrap();
+        assert_eq!(g.source_stack(), &[0, 1]);
+        let (a, b) = (0.7_f64, 0.2_f64);
+        let ki = g.poses(&[a, b]).unwrap().source * g.beam_direction();
+        let want = Vector3::new(b.cos(), a.sin() * b.sin(), -a.cos() * b.sin());
+        assert!((ki.into_inner() - want).norm() < 1e-15, "{ki:?}");
     }
 }
