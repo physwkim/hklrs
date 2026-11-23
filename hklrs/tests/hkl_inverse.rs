@@ -6,9 +6,9 @@
 //! independent residuals where hkl's own precision is coarser (counted);
 //! every hklrs solution passes the independent check (extras beyond hkl's
 //! are counted); |Q| > 4π/λ is `Unreachable`; `Degenerate` holds only where
-//! the independent Jacobian is singular at every hkl solution; where hkl
-//! fails on a reachable target, what hklrs finds is counted and checked the
-//! same way.
+//! the independent Jacobian is singular at every hkl solution; a case hkl
+//! fails with |Q| <= 2k is an hkl miss only where hklrs returns a verified
+//! solution (held axes can still leave the target out of reach).
 
 mod common;
 mod inverse_check;
@@ -134,8 +134,8 @@ struct Counts {
     hklrs_solutions: usize,
     extras: usize,
     hkl_failed: usize,
-    hkl_failed_solved: usize,
-    hkl_failed_solutions: usize,
+    hkl_misses: usize,
+    hkl_miss_solutions: usize,
 }
 
 fn run(geometry: &str, mode_name: &str) {
@@ -214,9 +214,11 @@ fn run(geometry: &str, mode_name: &str) {
                 continue;
             }
         };
+        let mut verified = 0;
         for s in &ours {
-            if let Err(e) = inverse_check::check(&mode, &ub, wavelength, &hkl, &current, s) {
-                fail(e);
+            match inverse_check::check(&mode, &ub, wavelength, &hkl, &current, s) {
+                Ok(()) => verified += 1,
+                Err(e) => fail(e),
             }
         }
         n.hklrs_solutions += ours.len();
@@ -245,15 +247,15 @@ fn run(geometry: &str, mode_name: &str) {
             .count();
         if case.get("error").is_some() {
             n.hkl_failed += 1;
-            n.hkl_failed_solved += usize::from(!ours.is_empty());
-            n.hkl_failed_solutions += ours.len();
+            n.hkl_misses += usize::from(verified > 0);
+            n.hkl_miss_solutions += verified;
         }
     }
     println!(
         "{geometry} {mode_name}: {} cases, {} unreachable, {} degenerate (hkl's {} solutions \
          there singular); hkl {} solutions elsewhere, all found ({} after a Newton step); hklrs \
-         {} solutions, {} beyond hkl's; hkl failed {} reachable cases, hklrs solved {} of them \
-         with {} solutions",
+         {} solutions, {} beyond hkl's; hkl failed {} cases with |Q| <= 2k, {} of them hkl misses \
+         (hklrs {} verified solutions there)",
         n.cases,
         n.unreachable,
         n.degenerate,
@@ -263,8 +265,8 @@ fn run(geometry: &str, mode_name: &str) {
         n.hklrs_solutions,
         n.extras,
         n.hkl_failed,
-        n.hkl_failed_solved,
-        n.hkl_failed_solutions,
+        n.hkl_misses,
+        n.hkl_miss_solutions,
     );
     assert!(n.cases > 0, "no {geometry} {mode_name} cases");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
