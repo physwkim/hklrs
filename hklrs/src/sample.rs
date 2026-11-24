@@ -75,17 +75,23 @@ fn triad(a: &Vector3<f64>, b: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::from_columns(&[t1, t3.cross(&t1), t3])
 }
 
+/// `m` as a rotation if it already is a proper one (‖MᵀM − I‖∞ ≤ 1e-9,
+/// det > 0); nothing is silently re-orthogonalised. `what` names `m` in the
+/// error.
+pub fn proper_rotation(what: &'static str, m: &Matrix3<f64>) -> Result<Rotation3<f64>, Error> {
+    let deviation = (m.transpose() * m - Matrix3::identity()).abs().max();
+    if !(deviation <= 1e-9 && m.determinant() > 0.0) {
+        return Err(Error::NotRotation { what, deviation });
+    }
+    Ok(Rotation3::from_matrix_unchecked(*m))
+}
+
 impl Orientation {
     /// Manual U from a matrix that must already be a proper rotation
-    /// (‖UᵀU − I‖∞ ≤ 1e-9, det > 0); nothing is silently re-orthogonalised.
+    /// ([`proper_rotation`]).
     pub fn from_u_matrix(u: &Matrix3<f64>) -> Result<Self, Error> {
-        let deviation = (u.transpose() * u - Matrix3::identity()).abs().max();
-        if !(deviation <= 1e-9 && u.determinant() > 0.0) {
-            return Err(Error::NotRotation { deviation });
-        }
-        let r = Rotation3::from_matrix_unchecked(*u);
         Ok(Self::Manual {
-            u: UnitQuaternion::from_rotation_matrix(&r),
+            u: UnitQuaternion::from_rotation_matrix(&proper_rotation("U", u)?),
         })
     }
 
@@ -279,6 +285,23 @@ mod tests {
                 .abs()
                 .max();
             assert!(d < 1e-15, "({x}, {y}, {z}): {d}");
+        }
+    }
+
+    #[test]
+    fn proper_rotation_names_what_it_checks() {
+        let r = Rotation3::from_euler_angles(0.3, -0.2, 1.1);
+        assert_eq!(proper_rotation("frame", r.matrix()).unwrap(), r);
+        let sheared = Matrix3::new(1.0, 0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+        let improper = Matrix3::from_diagonal(&Vector3::new(1.0, 1.0, -1.0));
+        let nan = Matrix3::from_element(f64::NAN);
+        for m in [sheared, improper, nan] {
+            let e = proper_rotation("frame", &m).unwrap_err();
+            assert!(matches!(e, Error::NotRotation { what: "frame", .. }));
+            assert!(e.to_string().starts_with("frame is not a proper rotation"));
+            let e = Orientation::from_u_matrix(&m).unwrap_err();
+            assert!(matches!(e, Error::NotRotation { what: "U", .. }));
+            assert!(e.to_string().starts_with("U is not a proper rotation"));
         }
     }
 

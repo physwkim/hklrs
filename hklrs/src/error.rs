@@ -55,8 +55,8 @@ pub enum Error {
     ParallelDirections { what: &'static str },
     #[error("the two reflections are parallel in {space} (sin of their angle = {sin:e})")]
     ParallelReflections { space: &'static str, sin: f64 },
-    #[error("U is not a proper rotation (max |UᵀU − I| = {deviation}, or det ≤ 0)")]
-    NotRotation { deviation: f64 },
+    #[error("{what} is not a proper rotation (max |{what}ᵀ·{what} − I| = {deviation}, or det ≤ 0)")]
+    NotRotation { what: &'static str, deviation: f64 },
     #[error("no Bragg reflection: lambda/2d = {ratio} > 1")]
     BraggImpossible { ratio: f64 },
     #[error("unknown geometry preset {name:?}")]

@@ -117,3 +117,11 @@ def test_frames_into_a_cube_are_xu_area_gridded(name, roi):
     assert np.all(np.isnan(cube.intensity[~hit]))
     assert np.all(np.isfinite(g.data[at][hit]))
     np.testing.assert_array_equal(cube.intensity[hit], g.data[at][hit] / COUNT_TIME)
+
+
+def test_bad_frame_names_frame():
+    geo = hklrs.Geometry.preset("E4CV")
+    det = hklrs_area(params(AREA_BASE, {}))
+    improper = [[1, 0, 0], [0, 1, 0], [0, 0, -1]]
+    with pytest.raises(ValueError, match=r"^frame is not a proper rotation"):
+        fm.FrameMap(geo, det, [(DX, 0.0)] * 3, "qsurface", frame=improper)

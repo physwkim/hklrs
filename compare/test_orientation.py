@@ -189,6 +189,12 @@ def test_parallel_reflections_raise():
         hklrs.Sample.busing_levy("p", lat, a, c)
 
 
+def test_bad_u_names_u():
+    lat = hklrs.Lattice(5.0, 5.0, 5.0, 90, 90, 90)
+    with pytest.raises(ValueError, match=r"^U is not a proper rotation"):
+        hklrs.Sample("u", lat, [[1, 0, 0], [0, 1, 0], [0, 0, -1]])
+
+
 def sample_ux_uy_uz_hkl(lat, angles):
     """libhkl sample with ux, uy, uz set through their parameters, degrees."""
     s = Hkl.Sample.new("u")
