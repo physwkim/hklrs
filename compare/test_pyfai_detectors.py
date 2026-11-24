@@ -27,8 +27,6 @@ def lab(request):
 
 def fingerprint(det):
     """count, sum and sum of squares (mod 2**64) of the masked row-major indices"""
-    if det.mask is None:
-        return [0, 0, 0]
     k = np.flatnonzero(det.mask).astype(np.uint64)
     return [len(k), int(k.sum(dtype=np.uint64)), int((k * k).sum(dtype=np.uint64))]
 
@@ -179,6 +177,6 @@ def test_generic_binnings_are_pyfai_s(e, lab):
         return
     det = f.detector(*lab)
     assert det.shape == tuple(facts["shape"])
-    assert det.mask is None
+    assert det.mask.shape == det.shape and not det.mask.any()
     np.testing.assert_allclose(positions(det, e["pixels"]),
                                pyfai_positions(lab, e["zyx"]), rtol=0, atol=TOL)

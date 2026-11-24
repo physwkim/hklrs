@@ -107,15 +107,11 @@ def test_bin_11_cirpad_placed_in_single_precision():
 
 @pytest.mark.parametrize("row", ROWS, ids=lambda r: r["name"])
 def test_mask(row):
-    """None when no pixel is masked. Pilatus: binoculars steps the centre
-    strip by the module width (487), not the module pitch (487 + 7 gap), so
-    modules 1 and 2 lose columns 729..732 and 1216..1219 where 736..739 and
-    1230..1233 are right (BIN-1)."""
+    """Pilatus: binoculars steps the centre strip by the module width (487),
+    not the module pitch (487 + 7 gap), so modules 1 and 2 lose columns
+    729..732 and 1216..1219 where 736..739 and 1230..1233 are right (BIN-1)."""
     want = golden_mask(row)
     got = hklrs.detector(row["name"]).mask
-    if not want.any():
-        assert got is None
-        return
     assert got.dtype == np.bool_ and got.shape == want.shape
     differ = np.argwhere(got != want).tolist()
     expected = []

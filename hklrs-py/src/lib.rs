@@ -573,15 +573,11 @@ impl PyPixelDetector {
         self.0.shape()
     }
 
-    /// Bool array of the detector shape, True where a pixel is masked; None
-    /// when no pixel is.
+    /// Bool array of the detector shape, True where a pixel is masked.
     #[getter]
-    fn mask<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyArray2<bool>>>> {
+    fn mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<bool>>> {
         let mask = self.0.mask();
-        mask.data()
-            .contains(&true)
-            .then(|| PyArray1::from_slice(py, mask.data()).reshape(mask.shape()))
-            .transpose()
+        PyArray1::from_slice(py, mask.data()).reshape(mask.shape())
     }
 
     /// The detector with `mask` (bool array of its shape, True excludes the
