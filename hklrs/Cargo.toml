@@ -23,3 +23,8 @@ ndarray = { version = "0.16", optional = true }
 hdf5 = ["dep:rust-hdf5"]
 # μ of a material from xrt-rs (absorption::xrt); needs Rust 1.98
 xrt = ["dep:xrt-rs", "dep:ndarray"]
+
+# reads the Zenodo scans and the reference cube through rust-hdf5
+[[test]]
+name = "binoculars_pt111"
+required-features = ["hdf5"]

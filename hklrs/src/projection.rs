@@ -4,11 +4,12 @@
 //! in hklrs units: Å⁻¹ with 2π, radians.
 //!
 //! binoculars 7be4f79 counterparts (hkl-binoculars.c): `QSample` is qcustom
-//! QX_QY_QZ (:826-848), `QparQper` qcustom QPAR_QPER (:923-947), `Hkl` the
-//! hkl space (:1507-1570), `Angles` the angles space (:341-389). `QLab` has
-//! none.
+//! QX_QY_QZ on a HORIZONTAL surface with uq = 0 (:826-848), `QSurface` the
+//! same on any surface and uq, `QparQper` qcustom QPAR_QPER (:923-947),
+//! `Hkl` the hkl space (:1507-1570), `Angles` the angles space (:341-389).
+//! `QLab` has none.
 
-use nalgebra::{Unit, Vector3};
+use nalgebra::{Rotation3, Unit, Vector3};
 
 use crate::grid::Projected;
 use crate::{
@@ -23,6 +24,12 @@ pub enum Projection {
     QLab,
     /// Q in the sample frame (sample stack undone).
     QSample,
+    /// Q in a frame fixed to the sample, on the columns of `frame` (its
+    /// axes in the sample frame): frame⁻¹ Q_sample. binoculars' QxQyQz
+    /// takes frame Rx(−π/2) for a VERTICAL surface, which puts the normal ŷ
+    /// on qz, times Rz(−omega_offset) (Python binoculars 93956b2, sixs.py
+    /// :376-390) or euler_xyz(uqx, uqy, uqz) (hkl-binoculars.c:800-817).
+    QSurface { frame: Rotation3<f64> },
     /// Miller indices of Q for the sample, through its UB.
     Hkl(Sample),
     /// Q split along a surface normal given in the sample frame:
@@ -44,6 +51,7 @@ impl Projection {
         match self {
             Self::QLab => &["qx_lab", "qy_lab", "qz_lab"],
             Self::QSample => &["qx", "qy", "qz"],
+            Self::QSurface { .. } => &["qx_surface", "qy_surface", "qz_surface"],
             Self::Hkl(_) => &["H", "K", "L"],
             Self::QparQper { .. } => &["qpar", "qper"],
             Self::Angles => &["delta_lab", "gamma_lab", "tth"],
@@ -69,6 +77,12 @@ impl Projection {
             Self::QSample => {
                 let q = q_map(geometry, values, wavelength, detector)?;
                 q.into_planes().into()
+            }
+            Self::QSurface { frame } => {
+                let to_frame = frame.inverse();
+                map(&q_map(geometry, values, wavelength, detector)?, |q| {
+                    (to_frame * q).into()
+                })
             }
             Self::Hkl(sample) => {
                 // U once per frame, not per pixel; hkl() is forward's kernel
@@ -118,7 +132,7 @@ fn map<const N: usize>(planes: &Planes, f: impl Fn(Vector3<f64>) -> [f64; N]) ->
 mod tests {
     use std::f64::consts::FRAC_PI_2;
 
-    use nalgebra::UnitQuaternion;
+    use nalgebra::{Matrix3, UnitQuaternion};
 
     use super::*;
     use crate::absorption::{Masked, Weight};
@@ -153,10 +167,15 @@ mod tests {
         )
     }
 
-    fn all() -> [Projection; 5] {
+    fn frame() -> Rotation3<f64> {
+        Rotation3::from_euler_angles(-0.4, 0.25, 1.1)
+    }
+
+    fn all() -> [Projection; 6] {
         [
             Projection::QLab,
             Projection::QSample,
+            Projection::QSurface { frame: frame() },
             Projection::Hkl(sample()),
             Projection::QparQper {
                 normal: Unit::new_normalize(Vector3::new(0.2, -0.1, 1.0)),
@@ -184,14 +203,39 @@ mod tests {
                     |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-12);
                 assert!(close(&at(0), sc.q_lab.as_slice()), "QLab {px}");
                 assert!(close(&at(1), sc.q_sample.as_slice()), "QSample {px}");
-                assert!(close(&at(2), f.hkl.as_slice()), "Hkl {px}");
+                let on_frame = frame().matrix().tr_mul(&sc.q_sample);
+                assert!(close(&at(2), on_frame.as_slice()), "QSurface {px}");
+                assert!(close(&at(3), f.hkl.as_slice()), "Hkl {px}");
                 let qper = sc.q_sample.dot(&n);
                 let qpar = (sc.q_sample.norm_squared() - qper * qper).sqrt();
-                assert!(close(&at(3), &[qpar, qper]), "QparQper {px}");
+                assert!(close(&at(4), &[qpar, qper]), "QparQper {px}");
                 let kf = sc.kf;
                 let angles = [kf.z.atan2(kf.x), kf.y.atan2(kf.x.hypot(kf.z)), sc.tth.0];
-                assert!(close(&at(4), &angles), "Angles {px}");
+                assert!(close(&at(5), &angles), "Angles {px}");
             }
+        }
+    }
+
+    /// binoculars' VERTICAL surface frame Rx(−π/2): (qx, −qz, qy) of
+    /// Q_sample, to the bit, the surface normal ŷ on the third axis.
+    #[test]
+    fn vertical_surface_puts_the_normal_on_qz() {
+        let (g, values, wavelength, d) = setup();
+        let vertical = Rotation3::from_matrix_unchecked(Matrix3::new(
+            1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, //
+            0.0, -1.0, 0.0,
+        ));
+        let s = Projection::QSample
+            .project(&g, &values, wavelength, &d)
+            .unwrap();
+        let v = Projection::QSurface { frame: vertical }
+            .project(&g, &values, wavelength, &d)
+            .unwrap();
+        let [qx, qy, qz] = [0, 1, 2].map(|k| s.planes()[k].data());
+        let [vx, vy, vz] = [0, 1, 2].map(|k| v.planes()[k].data());
+        for i in 0..qx.len() {
+            assert_eq!([vx[i], vy[i], vz[i]], [qx[i], -qz[i], qy[i]], "{i}");
         }
     }
 

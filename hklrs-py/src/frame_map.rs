@@ -4,9 +4,10 @@
 
 use hklrs::frame_map::FrameMap;
 use hklrs::grid::{Binning, Cube};
+use hklrs::nalgebra::{Matrix3, Rotation3};
 use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::projection::Projection;
-use hklrs::{Sample, Wavelength};
+use hklrs::{Orientation, Sample, Wavelength};
 use numpy::{PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -29,23 +30,35 @@ fn from_core(v: f64, angular: bool) -> f64 {
     if angular { v.to_degrees() } else { v }
 }
 
+/// `rows` as a rotation, held to the rule a manual U is
+/// (`Orientation::from_u_matrix`).
+fn rotation(rows: [[f64; 3]; 3]) -> PyResult<Rotation3<f64>> {
+    let m = Matrix3::from_fn(|i, j| rows[i][j]);
+    Orientation::from_u_matrix(&m).map_err(|e| PyValueError::new_err(format!("frame=: {e}")))?;
+    Ok(Rotation3::from_matrix_unchecked(m))
+}
+
 fn projection(
     name: &str,
     sample: Option<Sample>,
     normal: Option<[f64; 3]>,
+    frame: Option<[[f64; 3]; 3]>,
 ) -> PyResult<Projection> {
-    let p = match (name, sample, normal) {
-        ("qlab", None, None) => Projection::QLab,
-        ("qsample", None, None) => Projection::QSample,
-        ("hkl", Some(s), None) => Projection::Hkl(s),
-        ("qpar_qper", None, Some(n)) => Projection::QparQper {
+    let p = match (name, sample, normal, frame) {
+        ("qlab", None, None, None) => Projection::QLab,
+        ("qsample", None, None, None) => Projection::QSample,
+        ("qsurface", None, None, Some(f)) => Projection::QSurface {
+            frame: rotation(f)?,
+        },
+        ("hkl", Some(s), None, None) => Projection::Hkl(s),
+        ("qpar_qper", None, Some(n), None) => Projection::QparQper {
             normal: unit("normal", n)?,
         },
-        ("angles", None, None) => Projection::Angles,
-        ("qlab" | "qsample" | "hkl" | "qpar_qper" | "angles", ..) => {
+        ("angles", None, None, None) => Projection::Angles,
+        ("qlab" | "qsample" | "qsurface" | "hkl" | "qpar_qper" | "angles", ..) => {
             return Err(PyValueError::new_err(format!(
-                "projection {name:?}: sample= goes with \"hkl\" alone and normal= \
-                 with \"qpar_qper\" alone"
+                "projection {name:?}: frame= goes with \"qsurface\" alone, sample= \
+                 with \"hkl\" alone and normal= with \"qpar_qper\" alone"
             )));
         }
         _ => {
@@ -136,8 +149,11 @@ impl PyCube {
 /// one (step, anchor) binning per dimension of `projection`, and keyword
 /// options:
 ///
-/// - `sample` for the "hkl" projection, `normal` (sample frame) for
-///   "qpar_qper"; the others are "qlab", "qsample" and "angles";
+/// - `frame` for the "qsurface" projection, a proper rotation (rows) whose
+///   columns are the surface axes in the sample frame, as
+///   `Sample.surface_frame` returns it; `sample` for "hkl"; `normal`
+///   (sample frame) for "qpar_qper"; the others are "qlab", "qsample" and
+///   "angles";
 /// - `region`: an `hklrs.normalise.Region` on the raw frame, the whole
 ///   frame unbinned when omitted;
 /// - `fields`: `hklrs.normalise.PixelFields` of the raw shape, none when
@@ -157,20 +173,21 @@ impl PyFrameMap {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let raw_shape = detector.0.shape();
-        let (mut sample, mut normal) = (None, None);
+        let (mut sample, mut normal, mut frame) = (None, None, None);
         let mut region = Region::new(0..raw_shape.0, 0..raw_shape.1, (1, 1));
         let mut fields = PixelFields::new();
         xu_options(options, |key, value| {
             match key {
                 "sample" => sample = Some(value.extract::<PyRef<'_, PySample>>()?.0.clone()),
                 "normal" => normal = Some(value.extract()?),
+                "frame" => frame = Some(value.extract()?),
                 "region" => region = value.extract::<PyRef<'_, PyRegion>>()?.0.clone(),
                 "fields" => fields = value.extract::<PyRef<'_, PyPixelFields>>()?.0.clone(),
                 _ => return Ok(false),
             }
             Ok(true)
         })?;
-        let projection = self::projection(projection, sample, normal)?;
+        let projection = self::projection(projection, sample, normal, frame)?;
         let ang = matches!(projection, Projection::Angles);
         let binnings = binnings
             .into_iter()
