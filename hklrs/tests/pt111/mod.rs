@@ -96,6 +96,11 @@ impl Scan {
             .unwrap()
     }
 
+    /// The detector images, (frame, row, column).
+    fn images(&self) -> H5Dataset {
+        h5(&self.path).dataset("com/scan_data/xpad_image").unwrap()
+    }
+
     fn frames(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         let n = self.readbacks.len();
         (0..n).step_by(BATCH).map(move |s| s..(s + BATCH).min(n))
@@ -268,35 +273,40 @@ pub fn compare(
     let mut cube = bounds.cube().unwrap();
     let mut attenuated = attenuated_bounds.clone().cube().unwrap();
     let mut single = attenuated_bounds.cube().unwrap();
-    let pixels = h * w;
     for scan in scans {
-        let images: Vec<u16> = scan.read("com/scan_data/xpad_image");
-        assert_eq!(images.len(), scan.readbacks.len() * pixels);
+        assert_eq!(scan.images().shape(), [scan.readbacks.len(), h, w]);
         for frames in scan.frames() {
+            // an H5File is not Sync: each rayon job reads through its own
             let mapped: Vec<(MappedFrame, Option<MappedFrame>)> = frames
                 .into_par_iter()
-                .filter_map(|i| {
-                    let a = scan.attenuation(i)?;
-                    let image = &images[i * pixels..(i + 1) * pixels];
-                    let frame = |counts: Vec<f64>| {
-                        let raw = Image::new((h, w), counts).unwrap();
-                        map.map(&scan.readbacks[i], scan.wavelength, &raw, &one)
-                            .unwrap()
-                    };
-                    let scale = COEFFICIENT.powf(a);
-                    let ours = frame(image.iter().map(|&r| f64::from(r) * scale).collect());
-                    // PYBIN-1: uint16 → float32, *= 1.87**att (sixs.py:917, :922)
-                    let theirs = (a != 0.0).then(|| {
-                        let scale = scale as f32;
-                        frame(
-                            image
-                                .iter()
-                                .map(|&r| f64::from(f32::from(r) * scale))
-                                .collect(),
-                        )
-                    });
-                    Some((ours, theirs))
-                })
+                .map_init(
+                    || scan.images(),
+                    |images, i| {
+                        let a = scan.attenuation(i)?;
+                        let image: Vec<u16> = images
+                            .read_numeric_slice_as(&[i, 0, 0], &[1, h, w])
+                            .unwrap();
+                        let frame = |counts: Vec<f64>| {
+                            let raw = Image::new((h, w), counts).unwrap();
+                            map.map(&scan.readbacks[i], scan.wavelength, &raw, &one)
+                                .unwrap()
+                        };
+                        let scale = COEFFICIENT.powf(a);
+                        let ours = frame(image.iter().map(|&r| f64::from(r) * scale).collect());
+                        // PYBIN-1: uint16 → float32, *= 1.87**att (sixs.py:917, :922)
+                        let theirs = (a != 0.0).then(|| {
+                            let scale = scale as f32;
+                            frame(
+                                image
+                                    .iter()
+                                    .map(|&r| f64::from(f32::from(r) * scale))
+                                    .collect(),
+                            )
+                        });
+                        Some((ours, theirs))
+                    },
+                )
+                .flatten()
                 .collect();
             let all: Vec<_> = mapped
                 .iter()
