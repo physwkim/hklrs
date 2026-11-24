@@ -298,13 +298,23 @@ pub fn compare(
                     Some((ours, theirs))
                 })
                 .collect();
-            for (ours, theirs) in &mapped {
-                assert_eq!(cube.add(ours.points(), ours.pixels()).unwrap(), 0);
-                if let Some(theirs) = theirs {
-                    assert_eq!(attenuated.add(ours.points(), ours.pixels()).unwrap(), 0);
-                    assert_eq!(single.add(theirs.points(), theirs.pixels()).unwrap(), 0);
-                }
-            }
+            let all: Vec<_> = mapped
+                .iter()
+                .map(|(ours, _)| (ours.points(), ours.pixels()))
+                .collect();
+            let (ours, theirs): (Vec<_>, Vec<_>) = mapped
+                .iter()
+                .filter_map(|(ours, theirs)| {
+                    let theirs = theirs.as_ref()?;
+                    Some((
+                        (ours.points(), ours.pixels()),
+                        (theirs.points(), theirs.pixels()),
+                    ))
+                })
+                .unzip();
+            assert_eq!(cube.add_frames(&all).unwrap(), 0);
+            assert_eq!(attenuated.add_frames(&ours).unwrap(), 0);
+            assert_eq!(single.add_frames(&theirs).unwrap(), 0);
         }
     }
     println!("pass 2: {:.0?}", clock.elapsed());

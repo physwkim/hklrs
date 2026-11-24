@@ -10,6 +10,8 @@
 //! instead (hkl-binoculars.c:375, :842-844), bins centred on multiples of the
 //! resolution whose edges go to the even neighbour.
 
+use rayon::prelude::*;
+
 use crate::normalise::{Normalised, NormalisedFrame};
 use crate::{Error, Image};
 
@@ -436,13 +438,82 @@ impl Cube {
     /// how many unmasked pixels fell outside them and were not added. On
     /// error the cube is unchanged.
     pub fn add(&mut self, points: &Projected, pixels: &NormalisedFrame) -> Result<usize, Error> {
+        let (rows, outside) = self.placed(points, pixels)?;
+        self.sums().deposit(&rows);
+        Ok(outside)
+    }
+
+    /// [`add`](Self::add) of each of `frames`, (points, pixels), in order,
+    /// in parallel: every bin takes its pixels in frame then pixel order, so
+    /// the sums are those of adding the frames one by one. Every frame is
+    /// checked before any state changes; the error is the first failing
+    /// frame's and leaves the cube unchanged. Returns how many unmasked
+    /// pixels fell outside the axes in all.
+    pub fn add_frames(
+        &mut self,
+        frames: &[(&Projected, &NormalisedFrame)],
+    ) -> Result<usize, Error> {
+        let placed: Vec<_> = frames
+            .par_iter()
+            .map(|&(points, pixels)| {
+                let (mut rows, outside) = self.placed(points, pixels)?;
+                // stable: a bin keeps its pixels in pixel order
+                rows.sort_by_key(|r| r.0);
+                Ok((rows, outside))
+            })
+            .collect();
+        let placed = placed.into_iter().collect::<Result<Vec<_>, Error>>()?;
+        let outside = placed.iter().map(|p| p.1).sum();
+        let rows: Vec<_> = placed.into_iter().map(|p| p.0).collect();
+
+        // the cube cut at quantiles of a sample of the offsets; each piece is
+        // summed by one task, frame after frame
+        let tasks = 4 * rayon::current_num_threads();
+        let total: usize = rows.iter().map(Vec::len).sum();
+        let stride = (total / (16 * tasks)).max(1);
+        let mut sample: Vec<usize> = rows
+            .iter()
+            .flat_map(|r| r.iter().step_by(stride).map(|r| r.0))
+            .collect();
+        sample.sort_unstable();
+        let cuts = (1..tasks).filter_map(|s| sample.get(s * sample.len() / tasks).copied());
+        let mut rest = self.sums();
+        let mut pieces: Vec<_> = cuts.map(|hi| rest.split_below(hi)).collect();
+        pieces.push(rest);
+        pieces.into_par_iter().for_each(|mut piece| {
+            let (lo, hi) = (piece.lo, piece.lo + piece.photons.len());
+            for rows in &rows {
+                let first = rows.partition_point(|r| r.0 < lo);
+                let end = rows.partition_point(|r| r.0 < hi);
+                piece.deposit(&rows[first..end]);
+            }
+        });
+        Ok(outside)
+    }
+
+    fn sums(&mut self) -> Sums<'_> {
+        Sums {
+            lo: 0,
+            photons: &mut self.photons,
+            weight: &mut self.weight,
+            contributions: &mut self.contributions,
+        }
+    }
+
+    /// The unmasked pixels of one frame inside the axes, (offset, value) in
+    /// pixel order, and how many fell outside.
+    fn placed(
+        &self,
+        points: &Projected,
+        pixels: &NormalisedFrame,
+    ) -> Result<(Vec<(usize, Normalised)>, usize), Error> {
         if self.is_empty() {
-            return Ok(unmasked(points, pixels)?.len());
+            return Ok((Vec::new(), unmasked(points, pixels)?.len()));
         }
         let binnings: Vec<Binning> = self.axes.iter().map(|a| a.binning).collect();
         self.check_grid(points.names, &binnings)?;
         let (values, bins) = binned(&binnings, points, pixels)?;
-        Ok(self.deposit(&bins, &values))
+        Ok(self.rows(&bins, &values))
     }
 
     /// One-pass filling: widens the axes to take every unmasked pixel of
@@ -466,27 +537,22 @@ impl Cube {
         if axes != self.axes {
             *self = Self::zeros(axes)?.with(self);
         }
-        let outside = self.deposit(&bins, &values);
+        let (rows, outside) = self.rows(&bins, &values);
         debug_assert_eq!(outside, 0, "the axes span every unmasked pixel");
+        self.sums().deposit(&rows);
         Ok(())
     }
 
-    /// Adds each of `values` to the bin of its row of flattened `bins`: its
-    /// counts, its weight and one contribution, as a bin of a cut takes a
-    /// pixel. Returns how many rows fell outside the axes.
-    fn deposit(&mut self, bins: &[i64], values: &[Normalised]) -> usize {
-        let mut outside = 0;
-        for (k, n) in bins.chunks_exact(self.axes.len()).zip(values) {
-            match self.offset(k) {
-                Some(off) => {
-                    self.photons[off] += n.counts();
-                    self.weight[off] += n.weight().get();
-                    self.contributions[off] += 1;
-                }
-                None => outside += 1,
-            }
-        }
-        outside
+    /// (offset, value) of each of `values` whose row of flattened `bins`
+    /// lies inside the axes, in row order, and how many rows did not.
+    fn rows(&self, bins: &[i64], values: &[Normalised]) -> (Vec<(usize, Normalised)>, usize) {
+        let rows: Vec<_> = bins
+            .chunks_exact(self.axes.len())
+            .zip(values)
+            .filter_map(|(k, &n)| Some((self.offset(k)?, n)))
+            .collect();
+        let outside = values.len() - rows.len();
+        (rows, outside)
     }
 
     /// `self` plus `other` bin by bin; `other`'s axes lie inside `self`'s.
@@ -521,6 +587,46 @@ impl Cube {
             Self::zeros(axes)?.with(&self)
         };
         Ok(out.with(&other))
+    }
+}
+
+/// The sums of a cube's bins from offset `lo` on, as many as the slices
+/// hold.
+struct Sums<'a> {
+    lo: usize,
+    photons: &'a mut [f64],
+    weight: &'a mut [f64],
+    contributions: &'a mut [u64],
+}
+
+impl<'a> Sums<'a> {
+    /// Splits off the bins below offset `hi`.
+    fn split_below(&mut self, hi: usize) -> Sums<'a> {
+        let n = hi - self.lo;
+        let (photons, rest) = std::mem::take(&mut self.photons).split_at_mut(n);
+        self.photons = rest;
+        let (weight, rest) = std::mem::take(&mut self.weight).split_at_mut(n);
+        self.weight = rest;
+        let (contributions, rest) = std::mem::take(&mut self.contributions).split_at_mut(n);
+        self.contributions = rest;
+        let lo = std::mem::replace(&mut self.lo, hi);
+        Sums {
+            lo,
+            photons,
+            weight,
+            contributions,
+        }
+    }
+
+    /// Adds each value to the bin at its offset: its counts, its weight and
+    /// one contribution, as a bin of a cut takes a pixel.
+    fn deposit(&mut self, rows: &[(usize, Normalised)]) {
+        for &(off, n) in rows {
+            let i = off - self.lo;
+            self.photons[i] += n.counts();
+            self.weight[i] += n.weight().get();
+            self.contributions[i] += 1;
+        }
     }
 }
 
@@ -800,6 +906,70 @@ mod tests {
         }
         assert_eq!(one, two);
         assert_eq!(two.contributions().iter().sum::<u64>(), 4);
+    }
+
+    fn on_threads<T: Send>(n: usize, f: impl FnOnce() -> T + Send) -> T {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(f)
+    }
+
+    #[test]
+    fn add_frames_sums_each_bin_in_frame_then_pixel_order_on_any_thread_count() {
+        // ±1e16 + 1 rounds back to ±1e16: bin 1 ends at 1 only if it takes
+        // 1e16, the ones, -1e16 and the last one in this order
+        let frames = [
+            (
+                points(ONE, &[&[0.5], &[1.5], &[2.5]]),
+                [3.0, 1e16, 4.0].as_slice(),
+            ),
+            (
+                points(ONE, &[&[1.5], &[1.5], &[1.5], &[7.0]]),
+                &[1.0, 1.0, 1.0, 5.0],
+            ),
+            (points(ONE, &[&[1.5], &[2.5], &[1.5]]), &[-1e16, 2.0, 1.0]),
+        ]
+        .map(|(p, c)| (p, unweighted(c)));
+        let start = cube(ONE, &[&[0.0], &[2.0]], &[0.0, 0.0]);
+        let mut expected = start.clone();
+        for (p, px) in &frames {
+            expected.add(p, px).unwrap();
+        }
+        assert_eq!(expected.photons, [3.0, 1.0, 6.0]);
+        let frames: Vec<_> = frames.iter().map(|(p, px)| (p, px)).collect();
+        for threads in [1, 2, 3, 5, 12] {
+            let mut c = start.clone();
+            assert_eq!(on_threads(threads, || c.add_frames(&frames)).unwrap(), 1);
+            assert_eq!(c, expected, "{threads} threads");
+        }
+    }
+
+    #[test]
+    fn add_frames_fails_on_the_first_failing_frame_on_any_thread_count() {
+        let frames: Vec<_> = (0..40)
+            .map(|f| {
+                let x = match f {
+                    17 => 1e300,
+                    30 => f64::NAN,
+                    35 => -1e300,
+                    _ => 0.5,
+                };
+                (points(ONE, &[&[0.5], &[x]]), unweighted(&[1.0, 1.0]))
+            })
+            .collect();
+        let frames: Vec<_> = frames.iter().map(|(p, px)| (p, px)).collect();
+        let start = cube(ONE, &[&[0.0]], &[0.0]);
+        for threads in [1, 4, 16] {
+            let mut c = start.clone();
+            let e = on_threads(threads, || c.add_frames(&frames));
+            assert!(
+                matches!(e, Err(Error::NoBin { value, .. }) if value == 1e300),
+                "{threads} threads: {e:?}"
+            );
+            assert_eq!(c, start);
+        }
     }
 
     #[test]
