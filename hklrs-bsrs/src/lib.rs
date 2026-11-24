@@ -16,7 +16,7 @@ mod rsm_hdf5;
 mod samples;
 
 pub use config::{
-    AxisConfig, Config, GeometryConfig, LatticeConfig, ModeConfig, PsiConfig, ReflectionConfig,
+    AxisConfig, Config, GeometryConfig, LatticeConfig, ModeConfig, ReflectionConfig,
     SCHEMA_VERSION, SampleConfig,
 };
 pub use diffractometer::{Diffractometer, RealAxis, WavelengthSource};

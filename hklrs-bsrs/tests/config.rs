@@ -3,6 +3,7 @@
 //! hexagonal sample oriented from two reflections, limits and cut points;
 //! imported here it gives hklpy2's UB and forward solutions.
 
+use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use hklrs::{InverseRequest, Lattice, ModeSpec, Orientation, Sample, Target, Wave
 use hklrs_bsrs::{
     Config, DiffError, Diffractometer, LuaDiffractometer, Measured, RealAxis, WavelengthSource,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
 const AXES: [&str; 4] = ["omega", "chi", "phi", "tth"];
@@ -153,11 +154,70 @@ fn hklpy2_bissector_gives_hklpy2_ub_and_solutions() {
 
 #[test]
 fn hklpy2_psi_constant_takes_its_extras() {
-    let mode = ModeSpec {
-        psi: Some((Vector3::new(0.0, 0.0, 1.0), 30f64.to_radians())),
-        ..ModeSpec::new("psi_constant")
-    };
+    let mode = ModeSpec::new("psi_constant").with_psi(Vector3::z(), 30f64.to_radians());
     check_case(1, mode);
+}
+
+/// hklpy2_e4cv.yml on K4CV in constant_omega, its sample without
+/// reflections alone, with `extras` as axes.extra_axes.
+fn k4cv_constant_omega(extras: Value) -> Result<Config, DiffError> {
+    let mut doc: Value = serde_saphyr::from_str(&read("hklpy2_e4cv.yml")).unwrap();
+    let axes = ["komega", "kappa", "kphi", "tth"];
+    doc["samples"].as_object_mut().unwrap().remove("hexagonal");
+    doc["sample_name"] = "sample".into();
+    doc["axes"]["real_axes"] = json!(axes);
+    doc["axes"]["extra_axes"] = extras;
+    let xref = doc["axes"]["axes_xref"].as_object_mut().unwrap();
+    xref.retain(|k, _| ["h", "k", "l"].contains(&k.as_str()));
+    xref.extend(axes.map(|a| (a.into(), a.into())));
+    let limits = doc["constraints"]["omega"].clone();
+    let constraint = |a: &str| {
+        let mut c = limits.clone();
+        c["label"] = a.into();
+        (a.to_owned(), c)
+    };
+    doc["constraints"] = Value::Object(axes.map(constraint).into_iter().collect());
+    doc["solver"]["geometry"] = "K4CV".into();
+    doc["solver"]["real_axes"] = json!(axes);
+    doc["solver"]["mode"] = "constant_omega".into();
+    Config::from_hklpy2(&serde_saphyr::to_string(&doc).unwrap())
+}
+
+#[test]
+fn hklpy2_k4cv_constant_omega_carries_omega() {
+    // hklpy2 keeps every mode's parameters; constant_omega takes omega alone
+    let extras = json!({"h2": 0, "k2": 0, "l2": 1, "psi": 0, "omega": 12.5});
+    let config = k4cv_constant_omega(extras).unwrap();
+    let mode = config.mode.clone().unwrap();
+    assert_eq!(mode.name, "constant_omega");
+    assert_eq!(mode.parameters, BTreeMap::from([("omega".into(), 12.5)]));
+
+    let geometry = preset("K4CV").unwrap();
+    let reals = geometry.axes().iter().map(|a| {
+        let real = Arc::new(SoftMotor::new(a.name(), Some(0.0))) as Arc<dyn RealAxis>;
+        (a.name(), real)
+    });
+    let sample = Sample::new(
+        "s",
+        Lattice::cubic(LAMBDA).unwrap(),
+        Orientation::Manual {
+            u: UnitQuaternion::identity(),
+        },
+    );
+    let source = WavelengthSource::Fixed(Wavelength::new(LAMBDA).unwrap());
+    let dx = Diffractometer::new("k4cv", geometry.clone(), reals.collect(), source, sample);
+    let dx = dx.unwrap();
+    dx.load_config(&config).unwrap();
+    let omega = ModeSpec::new("constant_omega").with("omega", 12.5f64.to_radians());
+    assert_eq!(dx.mode(), Some(omega));
+
+    let e = k4cv_constant_omega(json!({"psi": 0})).unwrap_err();
+    assert_eq!(
+        e,
+        DiffError::ConfigMissing {
+            field: "axes.extra_axes.omega".into()
+        }
+    );
 }
 
 #[test]
@@ -439,11 +499,8 @@ fn configured() -> Arc<Diffractometer> {
         wavelength: Wavelength::new(LAMBDA).unwrap(),
     };
     dx.add_reflection("r001", measured).unwrap();
-    dx.set_mode(ModeSpec {
-        psi: Some((Vector3::new(1.0, 0.0, 0.0), 0.5)),
-        ..ModeSpec::new("psi_constant")
-    })
-    .unwrap();
+    dx.set_mode(ModeSpec::new("psi_constant").with_psi(Vector3::x(), 0.5))
+        .unwrap();
     dx
 }
 
@@ -502,7 +559,10 @@ fn config_errors_name_what_they_reject_and_load_nothing() {
     let mut unknown = good.clone();
     unknown.sample = "missing".into();
     let mut mode = good.clone();
-    mode.mode.as_mut().unwrap().psi = None;
+    mode.mode.as_mut().unwrap().parameters.remove("psi");
+    let mut parameter = good.clone();
+    let parameters = &mut parameter.mode.as_mut().unwrap().parameters;
+    parameters.insert("hkl3".into(), 1.0);
     let mut geometry = good.clone();
     geometry.geometry.name = "E6C".into();
     let cases = [
@@ -529,10 +589,11 @@ fn config_errors_name_what_they_reject_and_load_nothing() {
         ),
         (
             mode,
-            e4cv()
-                .set_mode(ModeSpec::new("psi_constant"))
-                .unwrap_err()
-                .to_string(),
+            "mode \"psi_constant\": mode \"psi_constant\" needs parameter \"psi\"".to_owned(),
+        ),
+        (
+            parameter,
+            "mode \"psi_constant\": mode \"psi_constant\" takes no parameter \"hkl3\"".to_owned(),
         ),
         (
             geometry,
@@ -552,13 +613,13 @@ fn config_errors_name_what_they_reject_and_load_nothing() {
 #[test]
 fn config_text_errors_name_what_they_reject() {
     let mut json: Value = serde_json::from_str(&configured().config().to_json()).unwrap();
-    json["schema_version"] = 2.into();
+    json["schema_version"] = 1.into();
     let e = Config::from_json(&json.to_string()).unwrap_err();
     assert_eq!(
         e.to_string(),
-        "hklrs JSON configuration schema version 2 is not 1"
+        "hklrs JSON configuration schema version 1 is not 2"
     );
-    json["schema_version"] = 1.into();
+    json["schema_version"] = 2.into();
     json["limits"] = 1.into();
     let e = Config::from_json(&json.to_string())
         .unwrap_err()

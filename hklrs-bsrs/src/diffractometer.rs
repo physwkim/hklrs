@@ -15,7 +15,7 @@ use futures::future::{join_all, try_join_all};
 use futures::try_join;
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::{
-    AxisKind, Deg, Geometry, InverseError, InverseRequest, Lattice, Mode, ModeParameters, ModeSpec,
+    AxisKind, Deg, Geometry, InverseError, InverseRequest, Lattice, Mode, ModeSpec, ModeTable,
     Orientation, Picker, Reflection, Sample, Target, Wavelength, forward,
 };
 use serde_json::{Value, json};
@@ -68,7 +68,7 @@ struct State {
     geometry: Geometry,
     wavelength: WavelengthSource,
     samples: Samples,
-    /// None only for a geometry no [`ModeSpec`] builds on.
+    /// None only for a geometry without hkl's default mode.
     mode: Option<ModeSpec>,
     /// The last h, k, l the pseudo axes were sent to; their setpoint.
     target: Option<[f64; 3]>,
@@ -103,12 +103,9 @@ impl State {
     /// The reference and ψ (rad) of the device's mode, a psi mode.
     fn psi(&self) -> Result<(Vector3<f64>, f64), DiffError> {
         let mode = require_mode(&self.geometry, self.mode.as_ref())?;
-        match (ModeSpec::parameters(&mode.name), mode.psi) {
-            (Some(ModeParameters::Psi), Some(psi)) => Ok(psi),
-            _ => Err(DiffError::NoPsi {
-                mode: mode.name.clone(),
-            }),
-        }
+        mode.psi().ok_or_else(|| DiffError::NoPsi {
+            mode: mode.name.clone(),
+        })
     }
 
     /// Solves `setpoint` closest to `current` and, only when that succeeds,
@@ -130,7 +127,7 @@ impl State {
                 };
                 match component {
                     Component::Hkl(index) => target[index] = value,
-                    Component::Psi => mode.psi = Some((self.psi()?.0, value.to_radians())),
+                    Component::Psi => mode = mode.with_psi(self.psi()?.0, value.to_radians()),
                 }
                 target
             }
@@ -281,14 +278,15 @@ pub(crate) fn build_mode<'g>(
     })
 }
 
-/// hkl's default: the first of [`ModeSpec::names`] `geometry` builds.
+/// hkl's default mode of the preset `geometry` is named after, where it
+/// builds on `geometry`; it takes no parameter.
 pub(crate) fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
-    ModeSpec::names()
-        .map(ModeSpec::new)
-        .find(|m| m.build(geometry).is_ok())
+    let table = ModeTable::of(geometry.name()).ok()?;
+    let mode = ModeSpec::new(table.default_mode()?);
+    mode.build(geometry).is_ok().then_some(mode)
 }
 
-/// The one psi mode of [`ModeSpec::names`] `geometry` builds.
+/// The one psi mode of `geometry`'s [`ModeTable`] that builds on it.
 pub(crate) fn psi_mode(geometry: &Geometry) -> Result<String, DiffError> {
     match <[String; 1]>::try_from(psi_modes(geometry)) {
         Ok([one]) => Ok(one),
@@ -299,18 +297,18 @@ pub(crate) fn psi_mode(geometry: &Geometry) -> Result<String, DiffError> {
     }
 }
 
-/// The psi modes `geometry` builds.
+/// The psi modes of `geometry`'s [`ModeTable`] that build on it.
 fn psi_modes(geometry: &Geometry) -> Vec<String> {
+    let Ok(table) = ModeTable::of(geometry.name()) else {
+        return Vec::new();
+    };
     // a psi mode refuses a geometry by its axes, whatever the reference
     let builds = |name: &&str| {
-        let mode = ModeSpec {
-            psi: Some((Vector3::z(), 0.0)),
-            ..ModeSpec::new(*name)
-        };
+        let mode = ModeSpec::new(*name).with_psi(Vector3::z(), 0.0);
         mode.build(geometry).is_ok()
     };
-    ModeSpec::names()
-        .filter(|&name| ModeSpec::parameters(name) == Some(ModeParameters::Psi))
+    table
+        .psi_modes()
         .filter(builds)
         .map(str::to_owned)
         .collect()
@@ -636,8 +634,8 @@ impl Diffractometer {
         Ok(())
     }
 
-    /// The hkl mode the pseudo axes solve in; at construction the first of
-    /// [`ModeSpec::names`] this geometry builds.
+    /// The hkl mode the pseudo axes solve in; at construction hkl's default
+    /// mode of the geometry's preset.
     pub fn mode(&self) -> Option<ModeSpec> {
         self.state().mode.clone()
     }

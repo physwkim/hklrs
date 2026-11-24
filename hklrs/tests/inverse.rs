@@ -9,14 +9,14 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use hklrs::inverse::kappa::Branch;
 use hklrs::inverse::{
-    self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, k4c, k6c, petra3_p09_eh2,
-    petra3_p23_4c, soleil_sixs_med, zaxis,
+    self, aps_04id_polar, e4c, e6c, esrf_bm28_psic, esrf_id01_psic, k6c, petra3_p09_eh2,
+    soleil_sixs_med, zaxis,
 };
 use hklrs::nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
-use hklrs::presets::{KAPPA_ALPHA_DEG, kappa_axis, preset};
+use hklrs::presets::{KAPPA_ALPHA_DEG, PRESETS, kappa_axis, preset};
 use hklrs::{
-    Deg, Equation, Eulerian, Geometry, InverseError, InverseRequest, Lattice, Mode, Picker, Target,
-    Wavelength, scattering,
+    Deg, Equation, Eulerian, Geometry, InverseError, InverseRequest, Lattice, Mode, ModeSpec,
+    ModeTable, Picker, Target, Wavelength, scattering,
 };
 use inverse_check::wrap;
 
@@ -44,6 +44,41 @@ fn modes(geo: &Geometry) -> Vec<Mode<'_>> {
         e4c::double_diffraction(geo, Vector3::new(1.0, 1.0, 0.0)).unwrap(),
         e4c::psi_constant(geo, Vector3::new(0.0, 0.0, 1.0), 0.4).unwrap(),
     ]
+}
+
+/// Mode `name` of `geo`'s preset table, its parameters arbitrary but for a
+/// psi mode's reference and ψ: a second reflection (1, 1, 0), a surface
+/// normal (0, 0, 1).
+fn table_mode<'g>(
+    geo: &'g Geometry,
+    name: &str,
+    reference: Vector3<f64>,
+    psi: f64,
+) -> Result<Mode<'g>, InverseError> {
+    let parameters = ModeTable::of(geo.name()).unwrap().parameters(name).unwrap();
+    let hkl2 = if parameters.iter().any(|p| p.name == "psi") {
+        reference
+    } else {
+        Vector3::new(1.0, 1.0, 0.0)
+    };
+    let value = |p: &str| match p {
+        "h2" => hkl2.x,
+        "k2" => hkl2.y,
+        "l2" => hkl2.z,
+        "x" | "y" => 0.0,
+        "z" => 1.0,
+        "psi" => psi,
+        "omega" => 0.2,
+        "chi" => 0.3,
+        "phi" => 0.4,
+        "incidence" => 0.1,
+        "azimuth" => 0.2,
+        other => panic!("no value for {other}"),
+    };
+    let spec = parameters
+        .iter()
+        .fold(ModeSpec::new(name), |s, p| s.with(p.name, value(p.name)));
+    spec.build(geo)
 }
 
 const TARGETS: [[f64; 3]; 4] = [
@@ -267,65 +302,20 @@ fn hkl_17_unreachable_target_is_err_for_every_mode() {
             mode.name()
         );
     };
-    for name in ["E4CV", "E4CH"] {
-        let geo = preset(name).unwrap();
-        let current = current(&geo);
-        for mode in modes(&geo) {
-            unreachable(Ok(mode), &current);
-        }
-    }
-    let (hkl2, reference) = (Vector3::new(1.0, 1.0, 0.0), Vector3::new(0.0, 0.0, 1.0));
+    let four = [10.0, 20.0, 30.0, 40.0];
     let six = [5.0, 10.0, 20.0, 30.0, 15.0, 40.0];
-    let geo = preset("E6C").unwrap();
-    let at = geo.values_from_degrees(&six).unwrap();
-    for mode in [
-        e6c::bissector_vertical(&geo),
-        e6c::constant_omega_vertical(&geo),
-        e6c::constant_chi_vertical(&geo),
-        e6c::constant_phi_vertical(&geo),
-        e6c::lifting_detector_phi(&geo),
-        e6c::lifting_detector_omega(&geo),
-        e6c::lifting_detector_mu(&geo),
-        e6c::double_diffraction_vertical(&geo, hkl2),
-        e6c::bissector_horizontal(&geo),
-        e6c::double_diffraction_horizontal(&geo, hkl2),
-        e6c::psi_constant_vertical(&geo, reference, 0.4),
-        e6c::psi_constant_horizontal(&geo, reference, 0.4),
-        e6c::constant_mu_horizontal(&geo),
+    for (name, at) in [
+        ("E4CV", &four[..]),
+        ("E4CH", &four),
+        ("E6C", &six),
+        ("K4CV", &four),
+        ("K6C", &six),
     ] {
-        unreachable(mode, &at);
-    }
-    let geo = preset("K4CV").unwrap();
-    let four = current(&geo);
-    for mode in [
-        k4c::bissector(&geo),
-        k4c::constant_omega(&geo, 0.2),
-        k4c::constant_chi(&geo, 0.3),
-        k4c::constant_phi(&geo, 0.4),
-        k4c::double_diffraction(&geo, hkl2),
-        k4c::psi_constant(&geo, reference, 0.4),
-    ] {
-        unreachable(mode, &four);
-    }
-    let geo = preset("K6C").unwrap();
-    let at = geo.values_from_degrees(&six).unwrap();
-    for mode in [
-        k6c::bissector_vertical(&geo),
-        k6c::constant_omega_vertical(&geo, 0.2),
-        k6c::constant_chi_vertical(&geo, 0.3),
-        k6c::constant_phi_vertical(&geo, 0.4),
-        k6c::lifting_detector_kphi(&geo),
-        k6c::lifting_detector_komega(&geo),
-        k6c::lifting_detector_mu(&geo),
-        k6c::double_diffraction_vertical(&geo, hkl2),
-        k6c::bissector_horizontal(&geo),
-        k6c::constant_phi_horizontal(&geo, 0.4),
-        k6c::constant_kphi_horizontal(&geo),
-        k6c::double_diffraction_horizontal(&geo, hkl2),
-        k6c::psi_constant_vertical(&geo, reference, 0.4),
-        k6c::constant_incidence(&geo, reference, 0.1, 0.2),
-    ] {
-        unreachable(mode, &at);
+        let geo = preset(name).unwrap();
+        let at = geo.values_from_degrees(at).unwrap();
+        for mode in ModeTable::of(name).unwrap().names() {
+            unreachable(table_mode(&geo, mode, Vector3::z(), 0.4), &at);
+        }
     }
 }
 
@@ -1341,56 +1331,42 @@ fn same_verdict(a: &Verdict, b: &Verdict) -> bool {
     }
 }
 
-type Psi = for<'a> fn(&'a Geometry, Vector3<f64>, f64) -> Result<Mode<'a>, InverseError>;
-
-/// The ψ modes of every preset reach the same set from all zero, where ψ is
-/// undefined, as from a turned current.
+/// The ψ modes of every preset, hkl engine and psi engine, reach the same
+/// set from all zero, where ψ is undefined, as from a turned current.
 #[test]
 fn psi_modes_reach_the_same_set_from_zero() {
-    let modes: [(&str, Psi); 21] = [
-        ("E4CV", e4c::psi_constant),
-        ("E4CV", e4c::psi),
-        ("E4CH", e4c::psi_constant),
-        ("E4CH", e4c::psi),
-        ("SOLEIL MARS", e4c::psi_constant),
-        ("SOLEIL MARS", e4c::psi),
-        ("K4CV", k4c::psi_constant),
-        ("K4CV", k4c::psi),
-        ("E6C", e6c::psi_constant_vertical),
-        ("E6C", e6c::psi_vertical),
-        ("E6C", e6c::psi_constant_horizontal),
-        ("PETRA3 P23 6C", e6c::psi_constant_vertical),
-        ("PETRA3 P23 6C", e6c::psi_vertical),
-        ("PETRA3 P23 6C", e6c::psi_constant_horizontal),
-        ("K6C", k6c::psi_constant_vertical),
-        ("K6C", k6c::psi_vertical),
-        ("SOLEIL SIRIUS KAPPA", k6c::psi_vertical_soleil_sirius_kappa),
-        ("APS POLAR", aps_04id_polar::psi_constant_horizontal),
-        ("APS POLAR", aps_04id_polar::psi_constant_vertical),
-        ("APS POLAR", aps_04id_polar::psi_vertical),
-        ("PETRA3 P23 4C", petra3_p23_4c::psi_constant),
-    ];
     let mut failed = Vec::new();
-    let mut solved = 0;
-    for (name, build) in modes {
+    let (mut modes, mut solved) = (0, 0);
+    for &name in PRESETS {
         let geo = preset(name).unwrap();
+        let table = ModeTable::of(name).unwrap();
+        let psi_constant: Vec<_> = table.psi_modes().collect();
         for reference in [Vector3::z(), Vector3::new(1.0, 1.0, 0.0)] {
             for psi in [-2.5, 0.4] {
-                let mode = build(&geo, reference, psi).unwrap();
-                for hkl in TARGETS {
-                    let [zero, turned] = from_zero_and_turned(&mode, hkl);
-                    if !same_verdict(&zero, &turned) {
-                        failed.push(format!(
-                            "{name} {} {reference:?} {psi} {hkl:?}:\nzero {zero:?}\nturned {turned:?}",
-                            mode.name()
-                        ));
+                let built = psi_constant
+                    .iter()
+                    .map(|m| table_mode(&geo, m, reference, psi))
+                    .chain(table.psi().map(|engine| engine(&geo, reference, psi)));
+                for mode in built {
+                    let mode = mode.unwrap();
+                    modes += 1;
+                    for hkl in TARGETS {
+                        let [zero, turned] = from_zero_and_turned(&mode, hkl);
+                        if !same_verdict(&zero, &turned) {
+                            failed.push(format!(
+                                "{name} {} {reference:?} {psi} {hkl:?}:\nzero {zero:?}\nturned {turned:?}",
+                                mode.name()
+                            ));
+                        }
+                        solved += usize::from(zero.is_ok());
                     }
-                    solved += usize::from(zero.is_ok());
                 }
             }
         }
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
+    // 23 modes: the psi_constant* of 11 presets and 9 psi engines
+    assert_eq!(modes, 23 * 4);
     assert!(solved > 0);
 }
 
@@ -1403,7 +1379,7 @@ fn incidence_along_the_beam_reaches_the_same_set_from_zero() {
     let normal = geo.beam_direction().into_inner();
     let mut solved = 0;
     for (incidence, azimuth) in [(0.2, 0.5), (-0.3, 2.0), (0.05, -1.0)] {
-        let mode = k6c::constant_incidence(&geo, normal, incidence, azimuth).unwrap();
+        let mode = k6c::constant_incidence(&geo, k6c::K6C, normal, incidence, azimuth).unwrap();
         for hkl in TARGETS {
             let [zero, turned] = from_zero_and_turned(&mode, hkl);
             assert!(

@@ -483,22 +483,27 @@ def test_solve_and_pseudo_solve_raise_one_type_per_error(error):
     assert raised == [getattr(hklrs, error)] * 4
 
 
-@pytest.mark.parametrize("error", ["GeometryError", "ZeroReference"])
-def test_mode_and_pseudo_mode_raise_one_type_per_error(error):
-    """As above for the errors a mode raises when it is made."""
+def test_mode_and_pseudo_mode_raise_one_type_per_error():
+    """As above for the error a mode raises when it is made."""
     g = hklrs.Geometry.preset("E4CV")
-    if error == "GeometryError":
-        made = (lambda: hklrs.Mode(g, "bissector_vertical"),
-                lambda: hklrs.PseudoMode(g, "eulerians", [0.0, 0.0, 0.0]))
-    else:
-        made = (lambda: hklrs.Mode(g, "psi_constant", reference=[0.0] * 3, psi=10.0),
-                lambda: hklrs.PseudoMode(g, "psi", [10.0], reference=[0.0] * 3))
+    made = (lambda: hklrs.Mode(g, "psi_constant", h2=0.0, k2=0.0, l2=0.0, psi=10.0),
+            lambda: hklrs.PseudoMode(g, "psi", [10.0], reference=[0.0] * 3))
     raised = []
     for f in made:
         with pytest.raises(hklrs.InverseError) as e:
             f()
         raised.append(type(e.value))
-    assert raised == [getattr(hklrs, error)] * 2
+    assert raised == [hklrs.ZeroReference] * 2
+
+
+def test_another_presets_mode_is_unknown_and_its_engine_a_geometry_error():
+    """Mode takes its name from the geometry's preset, so E6C's mode on E4CV
+    is unknown; PseudoMode checks the engine's axes instead."""
+    g = hklrs.Geometry.preset("E4CV")
+    with pytest.raises(hklrs.UnknownMode):
+        hklrs.Mode(g, "bissector_vertical")
+    with pytest.raises(hklrs.GeometryError):
+        hklrs.PseudoMode(g, "eulerians", [0.0, 0.0, 0.0])
 
 
 def test_pick_and_pseudo_pick_read_picker_alike():

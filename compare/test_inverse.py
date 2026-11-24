@@ -140,10 +140,11 @@ def case_inputs(rig, mode, rng):
     hkl2 = [float(rng.choice([-2, -1, 1, 2])) for _ in range(3)]
     kw, params = {}, None
     if mode == "double_diffraction":
-        kw, params = {"hkl2": hkl2}, hkl2
+        kw, params = dict(zip(("h2", "k2", "l2"), hkl2)), hkl2
     elif mode == "psi_constant":
         psi = hklrs.psi(rig.g, rig.sample, hkl2, a)
-        kw, params = {"reference": hkl2, "psi": psi}, hkl2 + [psi]
+        params = hkl2 + [psi]
+        kw = dict(zip(("h2", "k2", "l2", "psi"), params))
     start = list(a)
     for i in range(4):
         if mode not in HELD or HELD[mode] != i:
@@ -206,16 +207,27 @@ def test_unreachable_raises(preset, mode):
 
 def test_mode_raises_unknown_names_and_missing_parameters_by_type():
     """Mode reads its name and parameters through the core's ModeSpec: an
-    unknown name and a missing parameter raise its variants' subclasses."""
+    unknown name, a missing and an unknown parameter raise its variants'
+    subclasses. names and parameters list hkl's table of the preset."""
     g = hklrs.Geometry.preset("E4CV")
     with pytest.raises(hklrs.UnknownMode) as e:
         hklrs.Mode(g, "nope")
-    assert e.value.name == "nope" and isinstance(e.value, ValueError)
-    for mode, needs, kw in (("double_diffraction", "hkl2", {}),
-                            ("psi_constant", "reference and psi", {"reference": [1.0, 0.0, 0.0]})):
-        with pytest.raises(hklrs.ModeParameter) as e:
+    assert (e.value.geometry, e.value.name) == ("E4CV", "nope")
+    assert isinstance(e.value, ValueError)
+    for mode, missing, kw in (("double_diffraction", "h2", {}),
+                              ("psi_constant", "psi", {"h2": 1.0, "k2": 0.0, "l2": 0.0})):
+        with pytest.raises(hklrs.MissingParameter) as e:
             hklrs.Mode(g, mode, **kw)
-        assert (e.value.mode, e.value.needs) == (mode, needs)
+        assert (e.value.mode, e.value.parameter) == (mode, missing)
+    with pytest.raises(hklrs.UnknownParameter) as e:
+        hklrs.Mode(g, "bissector", hkl2=1.0)
+    assert (e.value.mode, e.value.parameter) == ("bissector", "hkl2")
+    assert hklrs.Mode.names(g)[0] == "bissector"
+    assert hklrs.Mode.parameters(g, "psi_constant") == [
+        ("h2", False), ("k2", False), ("l2", False), ("psi", True)]
+    k4cv = hklrs.Geometry.preset("K4CV")
+    assert hklrs.Mode.parameters(k4cv, "constant_omega") == [("omega", True)]
+    assert hklrs.Mode(k4cv, "constant_omega", omega=10.0).name == "constant_omega"
 
 
 def libhkl_psi(rig, axes, ref):

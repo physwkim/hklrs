@@ -186,7 +186,7 @@ async fn wh_carries_psi_as_the_reading_does() {
     // Q at (0, 0, 1) lies along the reference: ψ is undefined
     ok(
         &lua,
-        r#"e4cv:set_mode("psi_constant", {psi = {reference = {0, 0, 1}, angle = 30}})"#,
+        r#"e4cv:set_mode("psi_constant", {h2 = 0, k2 = 0, l2 = 1, psi = 30})"#,
     )
     .await;
     assert_eq!(psi_reading(&dx).await, Value::Null);
@@ -233,39 +233,36 @@ async fn set_mode_takes_its_parameters_as_one_table() {
     let lua = lua(&dx);
     ok(
         &lua,
-        r#"e4cv:set_mode("psi_constant", {psi = {reference = {1, 0, 0}, angle = 90}})"#,
+        r#"e4cv:set_mode("psi_constant", {h2 = 1, k2 = 0, l2 = 0, psi = 90})"#,
     )
     .await;
-    assert_eq!(
-        dx.mode(),
-        Some(ModeSpec {
-            psi: Some((Vector3::x(), FRAC_PI_2)),
-            ..ModeSpec::new("psi_constant")
-        })
-    );
+    let psi_constant = ModeSpec::new("psi_constant").with_psi(Vector3::x(), FRAC_PI_2);
+    assert_eq!(dx.mode(), Some(psi_constant));
     ok(
         &lua,
-        r#"e4cv:set_mode("double_diffraction", {hkl2 = {0, 1, 0}})"#,
+        r#"e4cv:set_mode("double_diffraction", {h2 = 0, k2 = 1, l2 = 0})"#,
     )
     .await;
-    assert_eq!(
-        dx.mode(),
-        Some(ModeSpec {
-            hkl2: Some(Vector3::y()),
-            ..ModeSpec::new("double_diffraction")
-        })
-    );
+    let double_diffraction = ModeSpec::new("double_diffraction")
+        .with("h2", 0.0)
+        .with("k2", 1.0)
+        .with("l2", 0.0);
+    assert_eq!(dx.mode(), Some(double_diffraction));
     ok(&lua, r#"e4cv:set_mode("bissector", {})"#).await;
     assert_eq!(dx.mode(), Some(ModeSpec::new("bissector")));
 
     for (statement, says) in [
         (r#"e4cv:set_mode("nope", {})"#, "\"nope\""),
-        (r#"e4cv:set_mode("psi_constant", {})"#, "reference and psi"),
+        (r#"e4cv:set_mode("psi_constant", {})"#, "parameter \"h2\""),
         (
-            r#"e4cv:set_mode("psi_constant", {psi = {reference = {1, 0, 0}}})"#,
-            "angle",
+            r#"e4cv:set_mode("psi_constant", {h2 = 1, k2 = 0, l2 = 0})"#,
+            "parameter \"psi\"",
         ),
-        (r#"e4cv:set_mode("bissector", {hkl3 = {0, 1, 0}})"#, "hkl3"),
+        (r#"e4cv:set_mode("bissector", {hkl3 = 1})"#, "hkl3"),
+        (
+            r#"e4cv:set_mode("psi_constant", {h2 = {0, 1, 0}})"#,
+            "expected f64",
+        ),
     ] {
         let e = error(&lua, statement).await;
         assert!(e.contains(says), "{statement}: {e}");

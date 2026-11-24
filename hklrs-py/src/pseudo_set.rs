@@ -2,9 +2,9 @@
 //! `pseudo_solve` / `pseudo_pick`, the writing side of `hklrs.pseudo`.
 //! Angles are degrees here, radians in the core; q is Å⁻¹.
 
-use hklrs::InverseError as E;
-use hklrs::inverse::{aps_04id_polar, e4c, e6c, k4c, k6c, pseudo, soleil_sixs_med};
+use hklrs::inverse::{pseudo, soleil_sixs_med};
 use hklrs::nalgebra::{Matrix3, Vector3};
+use hklrs::{ModeTable, PsiEngine};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -50,22 +50,11 @@ impl Engine {
 }
 
 /// hkl's psi engine mode on the preset `geometry` is named after.
-type PsiMode = for<'g> fn(&'g hklrs::Geometry, Vector3<f64>, f64) -> Result<hklrs::Mode<'g>, E>;
-
-fn psi_mode(geometry: &str) -> PyResult<PsiMode> {
-    Ok(match geometry {
-        "E4CV" | "E4CH" | "SOLEIL MARS" => e4c::psi,
-        "K4CV" => k4c::psi,
-        "E6C" | "PETRA3 P23 6C" => e6c::psi_vertical,
-        "K6C" => k6c::psi_vertical,
-        "SOLEIL SIRIUS KAPPA" => k6c::psi_vertical_soleil_sirius_kappa,
-        "APS POLAR" => aps_04id_polar::psi_vertical,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "hkl has no psi engine on {other:?}"
-            )));
-        }
-    })
+fn psi_mode(geometry: &str) -> PyResult<PsiEngine> {
+    let table = ModeTable::of(geometry).ok();
+    table
+        .and_then(ModeTable::psi)
+        .ok_or_else(|| PyValueError::new_err(format!("hkl has no psi engine on {geometry:?}")))
 }
 
 /// One of hkl's pseudo-axis engines set to its pseudo values, as an inverse

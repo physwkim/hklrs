@@ -37,8 +37,8 @@ pub use forward::{
 pub use geometry::{Axis, AxisKind, Geometry, GeometryBuilder, Poses};
 pub use image::Image;
 pub use inverse::{
-    Equation, Eulerian, InverseError, InverseRequest, Mode, ModeParameters, ModeSpec, Picker,
-    Slits, Target,
+    Equation, Eulerian, InverseError, InverseRequest, Mode, ModeParameter, ModeSpec, ModeTable,
+    Picker, PsiEngine, Slits, Target,
 };
 pub use lattice::Lattice;
 pub use qmap::{

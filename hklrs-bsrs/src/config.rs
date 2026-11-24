@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use hklrs::nalgebra::{Matrix3, Vector3};
+use hklrs::nalgebra::Matrix3;
 use hklrs::{Deg, Geometry, Lattice, ModeSpec, Orientation, Sample, Wavelength};
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,7 @@ use crate::samples::{Entry, Samples};
 use crate::{DiffError, Measured};
 
 /// The [`Config::schema_version`] this crate reads and writes.
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
 
 /// Axis values by geometry axis name.
 pub(crate) type Positions = BTreeMap<String, f64>;
@@ -87,46 +87,32 @@ pub struct ReflectionConfig {
     pub wavelength: f64,
 }
 
-/// A [`ModeSpec`] with ψ in degrees.
+/// A [`ModeSpec`] by hkl's names for the geometry's preset, angle
+/// parameters in degrees.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModeConfig {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hkl2: Option<[f64; 3]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub psi: Option<PsiConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PsiConfig {
-    pub reference: [f64; 3],
-    /// Degrees.
-    pub angle: f64,
-}
-
-impl From<&ModeConfig> for ModeSpec {
-    fn from(m: &ModeConfig) -> Self {
-        ModeSpec {
-            name: m.name.clone(),
-            hkl2: m.hkl2.map(Vector3::from),
-            psi: m
-                .psi
-                .map(|p| (Vector3::from(p.reference), p.angle.to_radians())),
-        }
+impl ModeConfig {
+    /// The mode on `geometry`, its angles in radians.
+    pub(crate) fn spec(&self, geometry: &Geometry) -> Result<ModeSpec, DiffError> {
+        let parameters = self.parameters.clone();
+        ModeSpec::from_degrees(geometry, &self.name, parameters).map_err(|source| DiffError::Mode {
+            mode: self.name.clone(),
+            source,
+        })
     }
-}
 
-impl From<&ModeSpec> for ModeConfig {
-    fn from(m: &ModeSpec) -> Self {
+    /// `spec`, which builds on `geometry`.
+    fn capture(geometry: &Geometry, spec: &ModeSpec) -> Self {
+        let parameters = spec.degrees(geometry);
         ModeConfig {
-            name: m.name.clone(),
-            hkl2: m.hkl2.map(Into::into),
-            psi: m.psi.map(|(reference, angle)| PsiConfig {
-                reference: reference.into(),
-                angle: angle.to_degrees(),
-            }),
+            name: spec.name.clone(),
+            parameters: parameters.expect("a device's mode builds on its geometry"),
         }
     }
 }
@@ -218,7 +204,7 @@ impl Config {
             },
             samples: configs.collect(),
             sample: samples.current_name().to_owned(),
-            mode: mode.map(ModeConfig::from),
+            mode: mode.map(|m| ModeConfig::capture(geometry, m)),
             wavelength: match wavelength {
                 WavelengthSource::Fixed(w) => Some(w.angstrom()),
                 WavelengthSource::Signal(_) => None,
@@ -241,7 +227,7 @@ impl Config {
         let samples = Samples::from_entries(entries, &self.sample)?;
         let mode = match &self.mode {
             Some(m) => {
-                let spec = ModeSpec::from(m);
+                let spec = m.spec(&geometry)?;
                 build_mode(&geometry, &spec)?;
                 Some(spec)
             }

@@ -22,14 +22,10 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::{
-    aps_04id_polar as polar, e4c, e6c, esrf_bm28_psic, k4c, k6c, petra3_p09_eh2 as p09,
-    petra3_p23_4c as p23_4c, soleil_nanoscopium_robot as nanoscopium, soleil_sirius_turret,
-    soleil_sixs_med, zaxis,
-};
+use hklrs::inverse::soleil_sixs_med;
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
-use hklrs::{Geometry, InverseError, InverseRequest, Mode, Target, Wavelength};
+use hklrs::{Geometry, InverseError, InverseRequest, Mode, ModeSpec, Target, Wavelength};
 use inverse_check::{largest, wrap};
 use serde_json::Value;
 
@@ -48,122 +44,36 @@ fn angular_distance(a: &[f64], b: &[f64]) -> f64 {
     largest(a.iter().zip(b).map(|(x, y)| wrap(x - y).abs()))
 }
 
+/// The case's mode from the geometry's table, its parameters by hkl's names
+/// in hkl's user units; MED2+3 v2 with eta_a_rotation set adds the slit fit
+/// MED2+3's modes carry.
 fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
+    let name = case["mode"].as_str().unwrap();
     let names = case["parameter_names"].as_array().unwrap();
-    let param = |n: &str| {
-        let i = names.iter().position(|p| p == n).unwrap();
-        common::f(&case["parameters"][i])
+    let parameters = names.iter().zip(case["parameters"].as_array().unwrap());
+    let parameters = parameters.map(|(n, v)| (n.as_str().unwrap().to_owned(), common::f(v)));
+    let mut spec = ModeSpec::from_degrees(geo, name, parameters).unwrap();
+    // hkl's init takes the normal as a lab direction at the start
+    // geometry, where the sample rotation carries the holder frame.
+    if name == "constant_incidence" {
+        let start = geo.poses(&axes(geo, &case["start_axes"])).unwrap();
+        let p = &spec.parameters;
+        let normal = start.sample.rotation.inverse() * Vector3::new(p["x"], p["y"], p["z"]);
+        spec = spec
+            .with("x", normal.x)
+            .with("y", normal.y)
+            .with("z", normal.z);
+    }
+    let mode = spec.build(geo).unwrap();
+    let mode = match (case.get("fitted_axes"), mode.slits()) {
+        (Some(_), None) => soleil_sixs_med::slits(mode).unwrap(),
+        _ => mode,
     };
-    let rad = |n: &str| param(n).to_radians();
-    let hkl2 = || Vector3::new(param("h2"), param("k2"), param("l2"));
-    let psi = || param("psi").to_radians();
-    let surface = || Vector3::new(param("x"), param("y"), param("z"));
-    let emergence = || param("emergence").to_radians();
-    let kappa = case["geometry"] == "K4CV";
-    let k6c = case["geometry"] == "K6C";
-    let p09 = case["geometry"] == "PETRA3 P09 EH2";
-    let p23_4c = case["geometry"] == "PETRA3 P23 4C";
-    let mode = match case["mode"].as_str().unwrap() {
-        "bissector_vertical" if k6c => k6c::bissector_vertical(geo),
-        "constant_omega_vertical" if k6c => k6c::constant_omega_vertical(geo, rad("omega")),
-        "constant_chi_vertical" if k6c => k6c::constant_chi_vertical(geo, rad("chi")),
-        "constant_phi_vertical" if k6c => k6c::constant_phi_vertical(geo, rad("phi")),
-        "lifting_detector_kphi" if k6c => k6c::lifting_detector_kphi(geo),
-        "lifting_detector_komega" if k6c => k6c::lifting_detector_komega(geo),
-        "lifting_detector_mu" if k6c => k6c::lifting_detector_mu(geo),
-        "double_diffraction_vertical" if k6c => k6c::double_diffraction_vertical(geo, hkl2()),
-        "bissector_horizontal" if k6c => k6c::bissector_horizontal(geo),
-        "constant_phi_horizontal" if k6c => k6c::constant_phi_horizontal(geo, rad("phi")),
-        "constant_kphi_horizontal" if k6c => k6c::constant_kphi_horizontal(geo),
-        "double_diffraction_horizontal" if k6c => k6c::double_diffraction_horizontal(geo, hkl2()),
-        "psi_constant_vertical" if k6c => k6c::psi_constant_vertical(geo, hkl2(), psi()),
-        // hkl's init takes the normal as a lab direction at the start
-        // geometry, where the sample rotation carries the holder frame.
-        "constant_incidence" if k6c => {
-            let start = geo.poses(&axes(geo, &case["start_axes"])).unwrap();
-            let normal =
-                start.sample.rotation.inverse() * Vector3::new(param("x"), param("y"), param("z"));
-            k6c::constant_incidence(geo, normal, rad("incidence"), rad("azimuth"))
-        }
-        "bissector" if kappa => k4c::bissector(geo),
-        "constant_omega" if kappa => k4c::constant_omega(geo, rad("omega")),
-        "constant_chi" if kappa => k4c::constant_chi(geo, rad("chi")),
-        "constant_phi" if kappa => k4c::constant_phi(geo, rad("phi")),
-        "double_diffraction" if kappa => k4c::double_diffraction(geo, hkl2()),
-        "psi_constant" if kappa => k4c::psi_constant(geo, hkl2(), psi()),
-        "bissector_vertical" if p23_4c => p23_4c::bissector_vertical(geo),
-        "lifting_detector_omega_t" if p23_4c => p23_4c::lifting_detector_omega_t(geo),
-        "lifting_detector_mu" if p23_4c => p23_4c::lifting_detector_mu(geo),
-        "bissector_horizontal" if p23_4c => p23_4c::bissector_horizontal(geo),
-        "psi_constant" if p23_4c => p23_4c::psi_constant(geo, hkl2(), psi()),
-        "bissector" => e4c::bissector(geo),
-        "constant_omega" => e4c::constant_omega(geo),
-        "constant_chi" => e4c::constant_chi(geo),
-        "constant_phi" => e4c::constant_phi(geo),
-        "double_diffraction" => e4c::double_diffraction(geo, hkl2()),
-        "psi_constant" => e4c::psi_constant(geo, hkl2(), psi()),
-        "bissector_vertical" => e6c::bissector_vertical(geo),
-        "constant_omega_vertical" => e6c::constant_omega_vertical(geo),
-        "constant_chi_vertical" => e6c::constant_chi_vertical(geo),
-        "constant_phi_vertical" => e6c::constant_phi_vertical(geo),
-        "lifting_detector_phi" => e6c::lifting_detector_phi(geo),
-        "lifting_detector_omega" => e6c::lifting_detector_omega(geo),
-        "lifting_detector_mu" => e6c::lifting_detector_mu(geo),
-        "double_diffraction_vertical" => e6c::double_diffraction_vertical(geo, hkl2()),
-        "bissector_horizontal" => e6c::bissector_horizontal(geo),
-        "double_diffraction_horizontal" => e6c::double_diffraction_horizontal(geo, hkl2()),
-        "psi_constant_vertical" => e6c::psi_constant_vertical(geo, hkl2(), psi()),
-        "psi_constant_horizontal" => e6c::psi_constant_horizontal(geo, hkl2(), psi()),
-        "constant_mu_horizontal" => e6c::constant_mu_horizontal(geo),
-        "constant_nu_coplanar" => esrf_bm28_psic::constant_nu_coplanar(geo),
-        "constant_delta_coplanar" => esrf_bm28_psic::constant_delta_coplanar(geo),
-        "constant_eta_noncoplanar" => esrf_bm28_psic::constant_eta_noncoplanar(geo),
-        "zaxis" => zaxis::zaxis(geo),
-        "reflectivity" if case["geometry"] == "ZAXIS" => zaxis::reflectivity(geo),
-        "reflectivity" => soleil_sixs_med::reflectivity(geo),
-        "mu_fixed" => soleil_sixs_med::mu_fixed(geo),
-        "emergence_fixed" => soleil_sixs_med::emergence_fixed(geo, surface(), emergence()),
-        "pitch_fixed" => soleil_sixs_med::pitch_fixed(geo),
-        "delta_fixed" => soleil_sixs_med::delta_fixed(geo),
-        "gamma_fixed" => soleil_sixs_med::gamma_fixed(geo),
-        "lifting_detector_thetah" => soleil_sirius_turret::lifting_detector_thetah(geo),
-        "lifting detector rz" => nanoscopium::lifting_detector_rz(geo),
-        "lifting detector rs" => nanoscopium::lifting_detector_rs(geo),
-        "lifting detector rx" => nanoscopium::lifting_detector_rx(geo),
-        "zaxis + alpha-fixed" if p09 => p09::zaxis_alpha_fixed(geo),
-        "zaxis + alpha=beta" if p09 => p09::zaxis_alpha_eq_beta(geo),
-        "4-circles bissecting horizontal" if p09 => p09::bissecting_horizontal(geo),
-        "4-circles constant omega horizontal" if p09 => p09::constant_omega_horizontal(geo),
-        "4-circles constant chi horizontal" if p09 => p09::constant_chi_horizontal(geo),
-        "4-circles constant phi horizontal" if p09 => p09::constant_phi_horizontal(geo),
-        "lifting detector mu" if p09 => p09::lifting_detector_mu(geo),
-        "lifting detector omega" if p09 => p09::lifting_detector_omega(geo),
-        "lifting detector chi" if p09 => p09::lifting_detector_chi(geo),
-        "lifting detector phi" if p09 => p09::lifting_detector_phi(geo),
-        "4-circles constant phi horizontal" => polar::constant_phi_horizontal(geo),
-        "zaxis + alpha-fixed" => polar::zaxis_alpha_fixed(geo),
-        "zaxis + alpha=beta" => polar::zaxis_alpha_eq_beta(geo),
-        "4-circles bissecting horizontal" => polar::bissecting_horizontal(geo),
-        "4-circles constant mu horizontal" => polar::constant_mu_horizontal(geo),
-        "4-circles constant chi horizontal" => polar::constant_chi_horizontal(geo),
-        "lifting detector tau" => polar::lifting_detector_tau(geo),
-        "lifting detector mu" => polar::lifting_detector_mu(geo),
-        "lifting detector chi" => polar::lifting_detector_chi(geo),
-        "lifting detector phi" => polar::lifting_detector_phi(geo),
-        "psi constant horizontal" => polar::psi_constant_horizontal(geo, hkl2(), psi()),
-        "psi constant vertical" => polar::psi_constant_vertical(geo, hkl2(), psi()),
-        m => panic!("mode {m}"),
-    }
-    .unwrap();
-    match case.get("fitted_axes") {
-        Some(fitted) => {
-            let mode = soleil_sixs_med::slits(mode).unwrap();
-            let axis = mode.slits().unwrap().axis();
-            assert_eq!(fitted, &serde_json::json!([geo.axes()[axis].name()]));
-            mode
-        }
-        None => mode,
-    }
+    let fitted = mode
+        .slits()
+        .map(|s| serde_json::json!([geo.axes()[s.axis()].name()]));
+    assert_eq!(case.get("fitted_axes"), fitted.as_ref());
+    mode
 }
 
 /// The written axes then the slits axis: what the solve moves.

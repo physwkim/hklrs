@@ -1,291 +1,689 @@
-//! Modes by name, for callers that hold a mode as data (a Python binding, a
-//! saved configuration) and build it against a geometry when they solve.
+//! hkl's "hkl" engine modes by name, one [`ModeTable`] per preset, for
+//! callers that hold a mode as data (a Python binding, a saved
+//! configuration) and build it against a geometry when they solve. A
+//! geometry's table is the one of the preset it is named after; mode and
+//! parameter names are hkl's for that preset, whose modes of one name differ
+//! between presets.
+
+use std::collections::BTreeMap;
 
 use nalgebra::Vector3;
 
-use super::{InverseError, Mode, e4c, e6c};
+use super::{
+    InverseError, Mode, aps_04id_polar as polar, e4c, e6c, esrf_bm28_psic as psic, k4c, k6c,
+    petra3_p09_eh2 as p09, petra3_p23_4c as p23, pyfai, soleil_nanoscopium_robot as robot,
+    soleil_sirius_turret as turret, soleil_sixs_med as med, zaxis,
+};
 use crate::Geometry;
 
-/// What a mode takes besides the geometry.
-#[derive(Clone, Copy)]
-enum Build {
-    Plain(fn(&Geometry) -> Result<Mode<'_>, InverseError>),
-    Hkl2(fn(&Geometry, Vector3<f64>) -> Result<Mode<'_>, InverseError>),
-    Psi(fn(&Geometry, Vector3<f64>, f64) -> Result<Mode<'_>, InverseError>),
+/// A parameter of a mode, as hkl names it. An angle is radians in a
+/// [`ModeSpec`] and degrees where hkl shows it to the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModeParameter {
+    pub name: &'static str,
+    pub angle: bool,
 }
 
-impl Build {
-    fn parameters(self) -> ModeParameters {
-        match self {
-            Self::Plain(_) => ModeParameters::Plain,
-            Self::Hkl2(_) => ModeParameters::Hkl2,
-            Self::Psi(_) => ModeParameters::Psi,
+/// hkl's psi engine mode: reference (Miller indices) and ψ (rad).
+pub type PsiEngine = for<'g> fn(&'g Geometry, Vector3<f64>, f64) -> Result<Mode<'g>, InverseError>;
+
+/// A mode from its parameter values in [`Entry::parameters`] order.
+type Build = for<'g> fn(&'g Geometry, &[f64]) -> Result<Mode<'g>, InverseError>;
+
+struct Entry {
+    name: &'static str,
+    parameters: &'static [ModeParameter],
+    build: Build,
+}
+
+/// The "hkl" engine modes of a preset in hkl's order, its default first,
+/// and its psi engine.
+pub struct ModeTable {
+    preset: &'static str,
+    modes: &'static [Entry],
+    psi: Option<PsiEngine>,
+}
+
+const fn plain(name: &'static str) -> ModeParameter {
+    ModeParameter { name, angle: false }
+}
+
+const fn angle(name: &'static str) -> ModeParameter {
+    ModeParameter { name, angle: true }
+}
+
+const NONE: &[ModeParameter] = &[];
+const OMEGA: &[ModeParameter] = &[angle("omega")];
+const CHI: &[ModeParameter] = &[angle("chi")];
+const PHI: &[ModeParameter] = &[angle("phi")];
+/// `double_diffraction_parameters`, hkl-pseudoaxis-common-hkl-private.h.
+const HKL2: &[ModeParameter] = &[plain("h2"), plain("k2"), plain("l2")];
+/// `psi_constant_parameters`, hkl-pseudoaxis-common-hkl-private.h.
+const PSI: &[ModeParameter] = &[plain("h2"), plain("k2"), plain("l2"), angle("psi")];
+/// `constant_incidence_parameters`, hkl-engine-k6c.c.
+const INCIDENCE: &[ModeParameter] = &[
+    plain("x"),
+    plain("y"),
+    plain("z"),
+    angle("incidence"),
+    angle("azimuth"),
+];
+/// `emergence_fixed`'s, hkl-engine-soleil-sixs-med.c.
+const EMERGENCE: &[ModeParameter] = &[plain("x"), plain("y"), plain("z"), angle("emergence")];
+
+/// The vector of the first three values: hkl2, a reference or a surface.
+fn v(p: &[f64]) -> Vector3<f64> {
+    Vector3::new(p[0], p[1], p[2])
+}
+
+macro_rules! modes {
+    ($($name:literal: $parameters:expr, $build:expr;)*) => {
+        &[$(Entry { name: $name, parameters: $parameters, build: $build }),*]
+    };
+}
+
+/// hkl-engine-e4c.c: E4CV, E4CH, SOLEIL MARS.
+const E4C: &[Entry] = modes! {
+    "bissector": NONE, |g, _| e4c::bissector(g);
+    "constant_omega": NONE, |g, _| e4c::constant_omega(g);
+    "constant_chi": NONE, |g, _| e4c::constant_chi(g);
+    "constant_phi": NONE, |g, _| e4c::constant_phi(g);
+    "double_diffraction": HKL2, |g, p| e4c::double_diffraction(g, v(p));
+    "psi_constant": PSI, |g, p| e4c::psi_constant(g, v(p), p[3]);
+};
+
+/// hkl-engine-k4c.c: K4CV; hkl-engine-soleil-cristal-k4c.c repeats it.
+const K4C: &[Entry] = modes! {
+    "bissector": NONE, |g, _| k4c::bissector(g);
+    "constant_omega": OMEGA, |g, p| k4c::constant_omega(g, p[0]);
+    "constant_chi": CHI, |g, p| k4c::constant_chi(g, p[0]);
+    "constant_phi": PHI, |g, p| k4c::constant_phi(g, p[0]);
+    "double_diffraction": HKL2, |g, p| k4c::double_diffraction(g, v(p));
+    "psi_constant": PSI, |g, p| k4c::psi_constant(g, v(p), p[3]);
+};
+
+/// hkl-engine-e6c.c: E6C; hkl-engine-petra3-p23-6c.c repeats it.
+const E6C: &[Entry] = modes! {
+    "bissector_vertical": NONE, |g, _| e6c::bissector_vertical(g);
+    "constant_omega_vertical": NONE, |g, _| e6c::constant_omega_vertical(g);
+    "constant_chi_vertical": NONE, |g, _| e6c::constant_chi_vertical(g);
+    "constant_phi_vertical": NONE, |g, _| e6c::constant_phi_vertical(g);
+    "lifting_detector_phi": NONE, |g, _| e6c::lifting_detector_phi(g);
+    "lifting_detector_omega": NONE, |g, _| e6c::lifting_detector_omega(g);
+    "lifting_detector_mu": NONE, |g, _| e6c::lifting_detector_mu(g);
+    "double_diffraction_vertical": HKL2, |g, p| e6c::double_diffraction_vertical(g, v(p));
+    "bissector_horizontal": NONE, |g, _| e6c::bissector_horizontal(g);
+    "double_diffraction_horizontal": HKL2, |g, p| e6c::double_diffraction_horizontal(g, v(p));
+    "psi_constant_vertical": PSI, |g, p| e6c::psi_constant_vertical(g, v(p), p[3]);
+    "psi_constant_horizontal": PSI, |g, p| e6c::psi_constant_horizontal(g, v(p), p[3]);
+    "constant_mu_horizontal": NONE, |g, _| e6c::constant_mu_horizontal(g);
+};
+
+/// hkl-engine-k6c.c, on the preset's [`k6c::Detectors`].
+macro_rules! k6c_modes {
+    ($d:expr) => {
+        modes! {
+            "bissector_vertical": NONE, |g, _| k6c::bissector_vertical(g, $d);
+            "constant_omega_vertical": OMEGA, |g, p| k6c::constant_omega_vertical(g, $d, p[0]);
+            "constant_chi_vertical": CHI, |g, p| k6c::constant_chi_vertical(g, $d, p[0]);
+            "constant_phi_vertical": PHI, |g, p| k6c::constant_phi_vertical(g, $d, p[0]);
+            "lifting_detector_kphi": NONE, |g, _| k6c::lifting_detector_kphi(g, $d);
+            "lifting_detector_komega": NONE, |g, _| k6c::lifting_detector_komega(g, $d);
+            "lifting_detector_mu": NONE, |g, _| k6c::lifting_detector_mu(g, $d);
+            "double_diffraction_vertical": HKL2,
+                |g, p| k6c::double_diffraction_vertical(g, $d, v(p));
+            "bissector_horizontal": NONE, |g, _| k6c::bissector_horizontal(g, $d);
+            "constant_phi_horizontal": PHI, |g, p| k6c::constant_phi_horizontal(g, $d, p[0]);
+            "constant_kphi_horizontal": NONE, |g, _| k6c::constant_kphi_horizontal(g, $d);
+            "double_diffraction_horizontal": HKL2,
+                |g, p| k6c::double_diffraction_horizontal(g, $d, v(p));
+            "psi_constant_vertical": PSI,
+                |g, p| k6c::psi_constant_vertical(g, $d, v(p), p[3]);
+            "constant_incidence": INCIDENCE,
+                |g, p| k6c::constant_incidence(g, $d, v(p), p[3], p[4]);
         }
+    };
+}
+
+/// hkl-engine-esrf-bm28-psic.c; hkl-engine-esrf-id01-psic.c repeats it.
+const PSIC: &[Entry] = modes! {
+    "constant_nu_coplanar": NONE, |g, _| psic::constant_nu_coplanar(g);
+    "constant_delta_coplanar": NONE, |g, _| psic::constant_delta_coplanar(g);
+    "constant_eta_noncoplanar": NONE, |g, _| psic::constant_eta_noncoplanar(g);
+};
+
+/// hkl-engine-soleil-sixs-med.c, MED2+3 v2 and, with its slit fit, MED2+3.
+macro_rules! med23_modes {
+    ($($slits:path)?) => {
+        modes! {
+            "mu_fixed": NONE, |g, _| med::mu_fixed(g)$(.and_then($slits))?;
+            "gamma_fixed": NONE, |g, _| med::gamma_fixed(g)$(.and_then($slits))?;
+            "emergence_fixed": EMERGENCE,
+                |g, p| med::emergence_fixed(g, v(p), p[3])$(.and_then($slits))?;
+        }
+    };
+}
+
+static TABLES: [ModeTable; 24] = [
+    ModeTable {
+        preset: "TwoC",
+        modes: &[],
+        psi: None,
+    },
+    ModeTable {
+        preset: "E4CV",
+        modes: E4C,
+        psi: Some(e4c::psi),
+    },
+    ModeTable {
+        preset: "E4CH",
+        modes: E4C,
+        psi: Some(e4c::psi),
+    },
+    ModeTable {
+        preset: "E6C",
+        modes: E6C,
+        psi: Some(e6c::psi_vertical),
+    },
+    ModeTable {
+        preset: "K4CV",
+        modes: K4C,
+        psi: Some(k4c::psi),
+    },
+    ModeTable {
+        preset: "K6C",
+        modes: k6c_modes!(k6c::K6C),
+        psi: Some(k6c::psi_vertical),
+    },
+    ModeTable {
+        preset: "ZAXIS",
+        modes: modes! {
+            "zaxis": NONE, |g, _| zaxis::zaxis(g);
+            "reflectivity": NONE, |g, _| zaxis::reflectivity(g);
+        },
+        psi: None,
+    },
+    ModeTable {
+        preset: "SOLEIL MARS",
+        modes: E4C,
+        psi: Some(e4c::psi),
+    },
+    ModeTable {
+        preset: "SOLEIL SIXS MED1+2",
+        modes: modes! {
+            "pitch_fixed": NONE, |g, _| med::pitch_fixed(g);
+            "delta_fixed": NONE, |g, _| med::delta_fixed(g);
+        },
+        psi: None,
+    },
+    ModeTable {
+        preset: "SOLEIL SIXS MED2+2",
+        modes: modes! {
+            "mu_fixed": NONE, |g, _| med::mu_fixed(g);
+            "reflectivity": NONE, |g, _| med::reflectivity(g);
+            "emergence_fixed": EMERGENCE, |g, p| med::emergence_fixed(g, v(p), p[3]);
+        },
+        psi: None,
+    },
+    ModeTable {
+        preset: "SOLEIL SIXS MED2+3",
+        modes: med23_modes!(med::slits),
+        psi: None,
+    },
+    ModeTable {
+        preset: "SOLEIL SIXS MED2+3 v2",
+        modes: med23_modes!(),
+        psi: None,
+    },
+    ModeTable {
+        preset: "SOLEIL SIRIUS KAPPA",
+        modes: k6c_modes!(k6c::SOLEIL_SIRIUS_KAPPA),
+        psi: Some(k6c::psi_vertical_soleil_sirius_kappa),
+    },
+    ModeTable {
+        preset: "SOLEIL SIRIUS TURRET",
+        modes: modes! {
+            "lifting_detector_thetah": NONE, |g, _| turret::lifting_detector_thetah(g);
+        },
+        psi: None,
+    },
+    ModeTable {
+        preset: "SOLEIL CRISTAL K4C",
+        modes: K4C,
+        psi: None,
+    },
+    ModeTable {
+        preset: "SOLEIL NANOSCOPIUM ROBOT",
+        modes: modes! {
+            "lifting detector rz": NONE, |g, _| robot::lifting_detector_rz(g);
+            "lifting detector rs": NONE, |g, _| robot::lifting_detector_rs(g);
+            "lifting detector rx": NONE, |g, _| robot::lifting_detector_rx(g);
+        },
+        psi: None,
+    },
+    ModeTable {
+        preset: "ESRF ID01 PSIC",
+        modes: PSIC,
+        psi: None,
+    },
+    ModeTable {
+        preset: "ESRF BM28 PSIC",
+        modes: PSIC,
+        psi: None,
+    },
+    ModeTable {
+        preset: "APS POLAR",
+        modes: modes! {
+            "4-circles constant phi horizontal": NONE, |g, _| polar::constant_phi_horizontal(g);
+            "zaxis + alpha-fixed": NONE, |g, _| polar::zaxis_alpha_fixed(g);
+            "zaxis + beta-fixed": NONE, |g, _| polar::zaxis_beta_fixed(g);
+            "zaxis + alpha=beta": NONE, |g, _| polar::zaxis_alpha_eq_beta(g);
+            "4-circles bissecting horizontal": NONE, |g, _| polar::bissecting_horizontal(g);
+            "4-circles constant mu horizontal": NONE, |g, _| polar::constant_mu_horizontal(g);
+            "4-circles constant chi horizontal": NONE, |g, _| polar::constant_chi_horizontal(g);
+            "lifting detector tau": NONE, |g, _| polar::lifting_detector_tau(g);
+            "lifting detector mu": NONE, |g, _| polar::lifting_detector_mu(g);
+            "lifting detector chi": NONE, |g, _| polar::lifting_detector_chi(g);
+            "lifting detector phi": NONE, |g, _| polar::lifting_detector_phi(g);
+            "psi constant horizontal": PSI,
+                |g, p| polar::psi_constant_horizontal(g, v(p), p[3]);
+            "psi constant vertical": PSI, |g, p| polar::psi_constant_vertical(g, v(p), p[3]);
+        },
+        psi: Some(polar::psi_vertical),
+    },
+    ModeTable {
+        preset: "PETRA3 P09 EH2",
+        modes: modes! {
+            "zaxis + alpha-fixed": NONE, |g, _| p09::zaxis_alpha_fixed(g);
+            "zaxis + beta-fixed": NONE, |g, _| p09::zaxis_beta_fixed(g);
+            "zaxis + alpha=beta": NONE, |g, _| p09::zaxis_alpha_eq_beta(g);
+            "4-circles bissecting horizontal": NONE, |g, _| p09::bissecting_horizontal(g);
+            "4-circles constant omega horizontal": NONE, |g, _| p09::constant_omega_horizontal(g);
+            "4-circles constant chi horizontal": NONE, |g, _| p09::constant_chi_horizontal(g);
+            "4-circles constant phi horizontal": NONE, |g, _| p09::constant_phi_horizontal(g);
+            "lifting detector mu": NONE, |g, _| p09::lifting_detector_mu(g);
+            "lifting detector omega": NONE, |g, _| p09::lifting_detector_omega(g);
+            "lifting detector chi": NONE, |g, _| p09::lifting_detector_chi(g);
+            "lifting detector phi": NONE, |g, _| p09::lifting_detector_phi(g);
+        },
+        psi: None,
+    },
+    ModeTable {
+        preset: "PETRA3 P23 4C",
+        modes: modes! {
+            "bissector_vertical": NONE, |g, _| p23::bissector_vertical(g);
+            "lifting_detector_omega_t": NONE, |g, _| p23::lifting_detector_omega_t(g);
+            "lifting_detector_mu": NONE, |g, _| p23::lifting_detector_mu(g);
+            "bissector_horizontal": NONE, |g, _| p23::bissector_horizontal(g);
+            "psi_constant": PSI, |g, p| p23::psi_constant(g, v(p), p[3]);
+        },
+        psi: None,
+    },
+    ModeTable {
+        preset: "PETRA3 P23 6C",
+        modes: E6C,
+        psi: Some(e6c::psi_vertical),
+    },
+    ModeTable {
+        preset: "PYFAI",
+        modes: modes! {
+            "pyfai_default": NONE, |g, _| pyfai::pyfai_default(g);
+        },
+        psi: None,
+    },
+    // hkl-engine-petra3-p08-lisa.c: no builder here for its modes.
+    ModeTable {
+        preset: "PETRA3 P08 LISA",
+        modes: &[],
+        psi: None,
+    },
+];
+
+impl ModeTable {
+    /// The table of preset `name` ([`crate::presets::PRESETS`]); the one of
+    /// a geometry is `ModeTable::of(geometry.name())`.
+    pub fn of(name: &str) -> Result<&'static Self, InverseError> {
+        TABLES
+            .iter()
+            .find(|t| t.preset == name)
+            .ok_or_else(|| InverseError::NotPreset {
+                geometry: name.into(),
+            })
+    }
+
+    pub fn preset(&self) -> &'static str {
+        self.preset
+    }
+
+    /// hkl's mode names, its default first.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + use<> {
+        self.modes.iter().map(|e| e.name)
+    }
+
+    /// hkl's default mode; None on a preset without modes.
+    pub fn default_mode(&self) -> Option<&'static str> {
+        self.modes.first().map(|e| e.name)
+    }
+
+    /// The parameters of mode `name`, in hkl's order.
+    pub fn parameters(&self, name: &str) -> Result<&'static [ModeParameter], InverseError> {
+        Ok(self.entry(name)?.parameters)
+    }
+
+    /// The modes holding ψ about a reference: those taking `psi`.
+    pub fn psi_modes(&self) -> impl Iterator<Item = &'static str> + use<> {
+        let modes = self.modes.iter();
+        modes
+            .filter(|e| e.parameters.iter().any(|p| p.name == "psi"))
+            .map(|e| e.name)
+    }
+
+    /// hkl's psi engine; None on a preset without one.
+    pub fn psi(&self) -> Option<PsiEngine> {
+        self.psi
+    }
+
+    fn entry(&self, name: &str) -> Result<&'static Entry, InverseError> {
+        self.modes
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| InverseError::UnknownMode {
+                geometry: self.preset.into(),
+                name: name.into(),
+            })
+    }
+
+    /// Mode `name`'s parameter `parameter`.
+    fn parameter(&self, name: &str, parameter: &str) -> Result<ModeParameter, InverseError> {
+        self.parameters(name)?
+            .iter()
+            .find(|p| p.name == parameter)
+            .copied()
+            .ok_or_else(|| InverseError::UnknownParameter {
+                mode: name.into(),
+                parameter: parameter.into(),
+            })
     }
 }
 
-/// The parameters of [`ModeSpec`] a mode takes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModeParameters {
-    /// None.
-    Plain,
-    /// [`ModeSpec::hkl2`].
-    Hkl2,
-    /// [`ModeSpec::psi`].
-    Psi,
-}
-
-/// hkl's "hkl" engine modes for E4C and E6C geometries.
-const MODES: [(&str, Build); 19] = [
-    ("bissector", Build::Plain(e4c::bissector)),
-    ("constant_omega", Build::Plain(e4c::constant_omega)),
-    ("constant_chi", Build::Plain(e4c::constant_chi)),
-    ("constant_phi", Build::Plain(e4c::constant_phi)),
-    ("double_diffraction", Build::Hkl2(e4c::double_diffraction)),
-    ("psi_constant", Build::Psi(e4c::psi_constant)),
-    ("bissector_vertical", Build::Plain(e6c::bissector_vertical)),
-    (
-        "constant_omega_vertical",
-        Build::Plain(e6c::constant_omega_vertical),
-    ),
-    (
-        "constant_chi_vertical",
-        Build::Plain(e6c::constant_chi_vertical),
-    ),
-    (
-        "constant_phi_vertical",
-        Build::Plain(e6c::constant_phi_vertical),
-    ),
-    (
-        "lifting_detector_phi",
-        Build::Plain(e6c::lifting_detector_phi),
-    ),
-    (
-        "lifting_detector_omega",
-        Build::Plain(e6c::lifting_detector_omega),
-    ),
-    (
-        "lifting_detector_mu",
-        Build::Plain(e6c::lifting_detector_mu),
-    ),
-    (
-        "double_diffraction_vertical",
-        Build::Hkl2(e6c::double_diffraction_vertical),
-    ),
-    (
-        "bissector_horizontal",
-        Build::Plain(e6c::bissector_horizontal),
-    ),
-    (
-        "double_diffraction_horizontal",
-        Build::Hkl2(e6c::double_diffraction_horizontal),
-    ),
-    (
-        "psi_constant_vertical",
-        Build::Psi(e6c::psi_constant_vertical),
-    ),
-    (
-        "psi_constant_horizontal",
-        Build::Psi(e6c::psi_constant_horizontal),
-    ),
-    (
-        "constant_mu_horizontal",
-        Build::Plain(e6c::constant_mu_horizontal),
-    ),
-];
-
-/// A mode by name and its parameters. A parameter the named mode does not
-/// take is ignored.
-#[derive(Clone, Debug, PartialEq)]
+/// A mode by name and its parameters, as the table of the geometry it is
+/// built on names them.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModeSpec {
     pub name: String,
-    /// Miller indices also held in diffraction: the double_diffraction modes.
-    pub hkl2: Option<Vector3<f64>>,
-    /// Reference (Miller indices) and ψ (rad): the psi_constant modes.
-    pub psi: Option<(Vector3<f64>, f64)>,
+    /// By name; angles in radians.
+    pub parameters: BTreeMap<String, f64>,
 }
 
 impl ModeSpec {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            hkl2: None,
-            psi: None,
+            parameters: BTreeMap::new(),
         }
     }
 
-    /// Every name [`ModeSpec::build`] knows; a geometry without a mode's
-    /// axes still refuses it at build.
-    pub fn names() -> impl Iterator<Item = &'static str> {
-        MODES.iter().map(|&(name, _)| name)
+    /// With parameter `name` at `value` (an angle in radians).
+    pub fn with(mut self, name: impl Into<String>, value: f64) -> Self {
+        self.parameters.insert(name.into(), value);
+        self
     }
 
-    /// The parameters mode `name` takes; None for a name
-    /// [`ModeSpec::build`] does not know.
-    pub fn parameters(name: &str) -> Option<ModeParameters> {
-        lookup(name).map(Build::parameters)
+    /// With a psi mode's reference (h2, k2, l2) and ψ (rad).
+    pub fn with_psi(self, reference: Vector3<f64>, psi: f64) -> Self {
+        let (h, k, l) = (reference.x, reference.y, reference.z);
+        self.with("h2", h)
+            .with("k2", k)
+            .with("l2", l)
+            .with("psi", psi)
     }
 
+    /// A psi mode's reference and ψ (rad); None on another mode.
+    pub fn psi(&self) -> Option<(Vector3<f64>, f64)> {
+        let p = |name| self.parameters.get(name).copied();
+        Some((Vector3::new(p("h2")?, p("k2")?, p("l2")?), p("psi")?))
+    }
+
+    /// Mode `name` of `geometry`'s table from `parameters` in hkl's user
+    /// units, angles in degrees; a parameter the mode does not take fails.
+    pub fn from_degrees(
+        geometry: &Geometry,
+        name: impl Into<String>,
+        parameters: impl IntoIterator<Item = (String, f64)>,
+    ) -> Result<Self, InverseError> {
+        let name = name.into();
+        let table = ModeTable::of(geometry.name())?;
+        let parameters = parameters
+            .into_iter()
+            .map(|(p, value)| {
+                let angle = table.parameter(&name, &p)?.angle;
+                Ok((p, if angle { value.to_radians() } else { value }))
+            })
+            .collect::<Result<_, InverseError>>()?;
+        Ok(Self { name, parameters })
+    }
+
+    /// Its parameters in hkl's user units, angles in degrees.
+    pub fn degrees(&self, geometry: &Geometry) -> Result<BTreeMap<String, f64>, InverseError> {
+        let table = ModeTable::of(geometry.name())?;
+        self.parameters
+            .iter()
+            .map(|(p, &value)| {
+                let angle = table.parameter(&self.name, p)?.angle;
+                Ok((p.clone(), if angle { value.to_degrees() } else { value }))
+            })
+            .collect()
+    }
+
+    /// The mode on `geometry`, from its table: every parameter the mode
+    /// takes must be given, and no other.
     pub fn build<'g>(&self, geometry: &'g Geometry) -> Result<Mode<'g>, InverseError> {
-        let name = self.name.as_str();
-        let build = lookup(name).ok_or_else(|| InverseError::UnknownMode { name: name.into() })?;
-        let missing = |needs| InverseError::ModeParameter {
-            mode: name.into(),
-            needs,
-        };
-        match build {
-            Build::Plain(f) => f(geometry),
-            Build::Hkl2(f) => f(geometry, self.hkl2.ok_or_else(|| missing("hkl2"))?),
-            Build::Psi(f) => {
-                let (reference, psi) = self.psi.ok_or_else(|| missing("reference and psi"))?;
-                f(geometry, reference, psi)
-            }
+        let table = ModeTable::of(geometry.name())?;
+        let entry = table.entry(&self.name)?;
+        for p in self.parameters.keys() {
+            table.parameter(&self.name, p)?;
         }
+        let values = entry
+            .parameters
+            .iter()
+            .map(|p| {
+                self.parameters
+                    .get(p.name)
+                    .copied()
+                    .ok_or_else(|| InverseError::MissingParameter {
+                        mode: self.name.clone(),
+                        parameter: p.name,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        (entry.build)(geometry, &values)
     }
-}
-
-fn lookup(name: &str) -> Option<Build> {
-    MODES.iter().find(|&&(n, _)| n == name).map(|&(_, b)| b)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presets::preset;
+    use crate::presets::{PRESETS, preset};
 
-    /// The names `PyMode::build` in hklrs-py takes, as of this table's
-    /// introduction.
-    const PY_NAMES: [&str; 19] = [
-        "bissector",
-        "constant_omega",
-        "constant_chi",
-        "constant_phi",
-        "double_diffraction",
-        "psi_constant",
-        "bissector_vertical",
-        "constant_omega_vertical",
-        "constant_chi_vertical",
-        "constant_phi_vertical",
-        "lifting_detector_phi",
-        "lifting_detector_omega",
-        "lifting_detector_mu",
-        "double_diffraction_vertical",
-        "bissector_horizontal",
-        "double_diffraction_horizontal",
-        "psi_constant_vertical",
-        "psi_constant_horizontal",
-        "constant_mu_horizontal",
-    ];
+    #[test]
+    fn every_preset_has_one_table() {
+        let tables: Vec<_> = TABLES.iter().map(|t| t.preset).collect();
+        assert_eq!(tables, PRESETS);
+    }
 
-    /// `PyMode::build`'s mapping, written out apart from [`MODES`].
-    fn direct<'g>(
-        g: &'g Geometry,
-        name: &str,
-        hkl2: Vector3<f64>,
-        reference: Vector3<f64>,
-        psi: f64,
-    ) -> Result<Mode<'g>, InverseError> {
-        match name {
-            "bissector" => e4c::bissector(g),
-            "constant_omega" => e4c::constant_omega(g),
-            "constant_chi" => e4c::constant_chi(g),
-            "constant_phi" => e4c::constant_phi(g),
-            "double_diffraction" => e4c::double_diffraction(g, hkl2),
-            "psi_constant" => e4c::psi_constant(g, reference, psi),
-            "bissector_vertical" => e6c::bissector_vertical(g),
-            "constant_omega_vertical" => e6c::constant_omega_vertical(g),
-            "constant_chi_vertical" => e6c::constant_chi_vertical(g),
-            "constant_phi_vertical" => e6c::constant_phi_vertical(g),
-            "lifting_detector_phi" => e6c::lifting_detector_phi(g),
-            "lifting_detector_omega" => e6c::lifting_detector_omega(g),
-            "lifting_detector_mu" => e6c::lifting_detector_mu(g),
-            "double_diffraction_vertical" => e6c::double_diffraction_vertical(g, hkl2),
-            "bissector_horizontal" => e6c::bissector_horizontal(g),
-            "double_diffraction_horizontal" => e6c::double_diffraction_horizontal(g, hkl2),
-            "psi_constant_vertical" => e6c::psi_constant_vertical(g, reference, psi),
-            "psi_constant_horizontal" => e6c::psi_constant_horizontal(g, reference, psi),
-            "constant_mu_horizontal" => e6c::constant_mu_horizontal(g),
-            _ => unreachable!("{name}"),
+    /// golden/hkl_modes.py: per gi factory, hkl's mode names in order, its
+    /// default, each mode's parameters with their angle flag, and the psi
+    /// engine's mode. PYFAI and PETRA3 P08 LISA have no factory there: PYFAI
+    /// is `hkl-engine-pyfai.c`'s one parameterless mode, LISA has none here.
+    #[test]
+    fn tables_are_hkls() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../golden/hkl_modes.json");
+        let golden: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect(path)).unwrap();
+        let golden = golden["presets"].as_object().unwrap();
+        for t in &TABLES {
+            let g = preset(t.preset).unwrap();
+            let Some(hkl) = golden.get(t.preset) else {
+                let pyfai = ["pyfai_default"];
+                let expected: &[&str] = if t.preset == "PYFAI" { &pyfai } else { &[] };
+                assert_eq!(t.names().collect::<Vec<_>>(), expected, "{}", t.preset);
+                assert!(t.modes.iter().all(|e| e.parameters.is_empty()));
+                assert!(t.psi.is_none());
+                continue;
+            };
+            assert_eq!(t.default_mode(), hkl["default"].as_str(), "{}", t.preset);
+            let modes: Vec<_> = hkl["modes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| {
+                    let parameters: Vec<_> = m["parameters"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| (p["name"].as_str().unwrap(), p["angle"].as_bool().unwrap()))
+                        .collect();
+                    (m["name"].as_str().unwrap(), parameters)
+                })
+                .collect();
+            let ours: Vec<_> = t
+                .modes
+                .iter()
+                .map(|e| {
+                    let parameters = e.parameters.iter().map(|p| (p.name, p.angle)).collect();
+                    (e.name, parameters)
+                })
+                .collect::<Vec<(_, Vec<_>)>>();
+            assert_eq!(ours, modes, "{}", t.preset);
+            let psi = hkl["psi"].as_array().map(|m| {
+                assert_eq!(m.len(), 1);
+                let names: Vec<_> = m[0]["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p["name"].as_str().unwrap())
+                    .collect();
+                assert_eq!(names, ["h2", "k2", "l2"]);
+                m[0]["name"].as_str().unwrap()
+            });
+            let built = t.psi.map(|psi| {
+                let mode = psi(&g, Vector3::new(0.0, 0.0, 1.0), 0.3).unwrap();
+                mode.name().to_owned()
+            });
+            assert_eq!(built.as_deref(), psi, "{}", t.preset);
         }
     }
 
-    #[test]
-    fn names_are_the_ones_py_mode_takes() {
-        assert_eq!(ModeSpec::names().collect::<Vec<_>>(), PY_NAMES);
+    /// Every value of each mode's parameters, angles in rad.
+    fn values(table: &ModeTable, name: &str) -> ModeSpec {
+        let values = [0.2, 0.3, 1.0, 0.4, -0.7];
+        let parameters = table.parameters(name).unwrap();
+        parameters
+            .iter()
+            .zip(values)
+            .fold(ModeSpec::new(name), |s, (p, v)| s.with(p.name, v))
     }
 
     #[test]
-    fn every_name_builds_what_its_constructor_builds() {
-        let hkl2 = Vector3::new(1.0, 1.0, 0.0);
-        let reference = Vector3::new(0.0, 0.0, 1.0);
-        let psi = 0.3;
-        // each geometry builds its own engine's modes and refuses the other's
-        let (e4c, e6c) = PY_NAMES.split_at(6);
-        for (geometry, own) in [("E4CV", e4c), ("E6C", e6c)] {
-            let g = preset(geometry).unwrap();
-            for name in PY_NAMES {
-                let spec = ModeSpec {
-                    name: name.into(),
-                    hkl2: Some(hkl2),
-                    psi: Some((reference, psi)),
-                };
-                let built = spec.build(&g);
-                assert_eq!(
-                    built,
-                    direct(&g, name, hkl2, reference, psi),
-                    "{geometry} {name}"
-                );
-                assert_eq!(built.is_ok(), own.contains(&name), "{geometry} {name}");
-                if let Ok(mode) = built {
-                    assert_eq!(mode.name(), name);
-                }
+    fn every_mode_builds_on_its_preset_under_its_own_name() {
+        for t in &TABLES {
+            let g = preset(t.preset).unwrap();
+            for name in t.names() {
+                let mode = values(t, name).build(&g).unwrap();
+                assert_eq!(mode.name(), name, "{}", t.preset);
+            }
+            if let Some(psi) = t.psi {
+                psi(&g, Vector3::new(0.0, 0.0, 1.0), 0.3).unwrap();
             }
         }
     }
 
     #[test]
-    fn parameters_are_what_build_asks_for() {
-        assert_eq!(ModeSpec::parameters("bisector"), None);
-        let (e4c, e6c) = PY_NAMES.split_at(6);
-        for (geometry, own) in [("E4CV", e4c), ("E6C", e6c)] {
-            let g = preset(geometry).unwrap();
-            for &name in own {
-                let needs = match ModeSpec::new(name).build(&g) {
-                    Ok(_) => ModeParameters::Plain,
-                    Err(InverseError::ModeParameter { needs: "hkl2", .. }) => ModeParameters::Hkl2,
-                    Err(InverseError::ModeParameter {
-                        needs: "reference and psi",
-                        ..
-                    }) => ModeParameters::Psi,
-                    Err(e) => panic!("{geometry} {name}: {e}"),
-                };
-                assert_eq!(ModeSpec::parameters(name), Some(needs), "{name}");
-            }
-        }
-    }
-
-    #[test]
-    fn errors_name_the_mode_and_what_it_lacks() {
-        let g = preset("E6C").unwrap();
+    fn parameters_are_checked_by_name() {
+        let g = preset("K4CV").unwrap();
+        let omega = ModeSpec::new("constant_omega");
         assert_eq!(
-            ModeSpec::new("bisector").build(&g),
-            Err(InverseError::UnknownMode {
-                name: "bisector".into()
+            omega.build(&g),
+            Err(InverseError::MissingParameter {
+                mode: "constant_omega".into(),
+                parameter: "omega",
             })
         );
-        for (name, needs) in [
-            ("double_diffraction_vertical", "hkl2"),
-            ("psi_constant_horizontal", "reference and psi"),
-        ] {
-            let e = ModeSpec::new(name).build(&g).unwrap_err();
-            assert_eq!(
-                e,
-                InverseError::ModeParameter {
-                    mode: name.into(),
-                    needs
-                }
-            );
-            assert_eq!(e.to_string(), format!("mode {name:?} needs {needs}"));
+        assert_eq!(
+            omega.clone().with("omega", 0.3).build(&g),
+            k4c::constant_omega(&g, 0.3)
+        );
+        assert_eq!(
+            omega.clone().with("omega", 0.3).with("psi", 0.1).build(&g),
+            Err(InverseError::UnknownParameter {
+                mode: "constant_omega".into(),
+                parameter: "psi".into(),
+            })
+        );
+        // one name, two meanings: E4CV's constant_omega takes no parameter
+        let e4cv = preset("E4CV").unwrap();
+        assert_eq!(
+            ModeSpec::new("constant_omega").build(&e4cv),
+            e4c::constant_omega(&e4cv)
+        );
+    }
+
+    #[test]
+    fn degrees_convert_the_angles_alone() {
+        let g = preset("K6C").unwrap();
+        let degrees = [("x", 0.0), ("y", 1.0), ("z", 0.0), ("incidence", 30.0)];
+        let degrees = degrees.map(|(p, v)| (p.to_owned(), v));
+        let spec = ModeSpec::from_degrees(&g, "constant_incidence", degrees.clone()).unwrap();
+        assert_eq!(spec.parameters["y"], 1.0);
+        assert_eq!(spec.parameters["incidence"], 30f64.to_radians());
+        let back = spec.degrees(&g).unwrap();
+        assert_eq!(
+            back.keys().collect::<Vec<_>>(),
+            ["incidence", "x", "y", "z"]
+        );
+        for (p, v) in degrees {
+            assert!((back[&p] - v).abs() < 1e-12, "{p}");
         }
+        let unknown = ModeSpec::from_degrees(&g, "bissector_vertical", [("psi".to_owned(), 1.0)]);
+        assert_eq!(
+            unknown,
+            Err(InverseError::UnknownParameter {
+                mode: "bissector_vertical".into(),
+                parameter: "psi".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn errors_name_the_geometry_mode_and_parameter() {
+        let custom = Geometry::builder("custom")
+            .sample_rotation("omega", [0.0, -1.0, 0.0])
+            .detector_rotation("tth", [0.0, -1.0, 0.0])
+            .build()
+            .unwrap();
+        let e = ModeSpec::new("bissector").build(&custom).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "geometry \"custom\" is not a preset: it has no named modes"
+        );
+        let e6c = preset("E6C").unwrap();
+        let e = ModeSpec::new("bissector").build(&e6c).unwrap_err();
+        assert_eq!(e.to_string(), "E6C has no mode \"bissector\"");
+        let e = ModeSpec::new("psi_constant_vertical")
+            .with("h2", 1.0)
+            .build(&e6c)
+            .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "mode \"psi_constant_vertical\" needs parameter \"k2\""
+        );
+        let e = ModeSpec::new("bissector_vertical")
+            .with("h2", 1.0)
+            .build(&e6c)
+            .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "mode \"bissector_vertical\" takes no parameter \"h2\""
+        );
     }
 }
