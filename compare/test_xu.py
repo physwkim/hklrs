@@ -409,3 +409,22 @@ def test_kappa_plus_is_inverse_rotation():
         _, _, _, wrong, _ = _ref.forward(s, d, WL)
         if abs(ang[1]) > 1e-3 and abs(ang[1]) < 179.9:
             assert np.abs(M @ np.array(qc.point(*ang)) - wrong).max() > 1e-6
+
+
+def test_surface_frame_is_xu_experiment_frame():
+    """Sample.surface_frame against xu's HXRD(ipdir, ndir) transform, which
+    keeps ndir and the part of ipdir normal to it (experiment.py:1581-1605).
+    The default HXRD lab frame is the identity, so Transform is that
+    surface frame in xu axes, which M relabels; in_plane is not normal to
+    the surface in the sample frame."""
+    s = sample_for("E4CV")
+    ub = np.array(s.ub())
+    normal, in_plane = (1.0, 1.0, 1.0), (1.0, 0.0, 0.0)
+    frame = np.array(s.surface_frame(normal, in_plane))
+    with pytest.warns(UserWarning, match="not perpendicular"):
+        hx = xu.HXRD(ub @ in_plane, ub @ normal, wl=WL)
+    rng = np.random.default_rng(7)
+    for v in rng.normal(size=(5, 3)):
+        np.testing.assert_allclose(frame.T @ v, M @ hx.Transform(v), rtol=0, atol=1e-14)
+    with pytest.raises(ValueError, match="parallel"):
+        s.surface_frame(normal, (-2.0, -2.0, -2.0))
