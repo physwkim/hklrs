@@ -296,11 +296,11 @@ impl Config {
 
     /// An hklrs configuration; [`Config::from_hklpy2`] reads hklpy2's.
     pub fn from_yaml(text: &str) -> Result<Self, DiffError> {
-        let parse = |e: serde_yaml::Error| DiffError::ConfigParse {
+        let parse = |e: serde_saphyr::Error| DiffError::ConfigParse {
             format: "hklrs YAML",
             message: e.to_string(),
         };
-        let config: Self = serde_yaml::from_str(text).map_err(parse)?;
+        let config: Self = serde_saphyr::from_str(text).map_err(parse)?;
         config.check_schema("hklrs YAML")
     }
 
@@ -320,7 +320,7 @@ impl Config {
     }
 
     pub fn to_yaml(&self) -> String {
-        serde_yaml::to_string(self).expect("every field serializes")
+        serde_saphyr::to_string(self).expect("every field serializes")
     }
 
     /// `.json` is hklrs JSON; `.yml` and `.yaml` are hklpy2's when they

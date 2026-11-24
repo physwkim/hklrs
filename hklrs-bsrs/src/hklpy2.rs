@@ -8,6 +8,7 @@ use hklrs::nalgebra::Matrix3;
 use hklrs::presets::preset;
 use hklrs::{Geometry, Lattice, ModeParameters, ModeSpec, Orientation, Reflection, Sample};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 use crate::DiffError;
 use crate::config::{
@@ -115,7 +116,8 @@ struct Beam {
 
 /// Whether `text` is hklpy2's: a mapping with its `_header`.
 pub(crate) fn is_hklpy2(text: &str) -> bool {
-    serde_yaml::from_str::<serde_yaml::Mapping>(text).is_ok_and(|m| m.contains_key("_header"))
+    serde_saphyr::from_str::<BTreeMap<String, IgnoredAny>>(text)
+        .is_ok_and(|m| m.contains_key("_header"))
 }
 
 fn unsupported(field: &str, value: impl std::fmt::Debug) -> DiffError {
@@ -146,7 +148,7 @@ impl Config {
     /// `forward_solution_function` and `auxiliary_axes` have no counterpart
     /// and are not read; presets are rejected.
     pub fn from_hklpy2(text: &str) -> Result<Self, DiffError> {
-        let file: File = serde_yaml::from_str(text).map_err(|e| DiffError::ConfigParse {
+        let file: File = serde_saphyr::from_str(text).map_err(|e| DiffError::ConfigParse {
             format: FORMAT,
             message: e.to_string(),
         })?;

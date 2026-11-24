@@ -18,8 +18,7 @@ use hklrs::{InverseRequest, Lattice, ModeSpec, Orientation, Sample, Target, Wave
 use hklrs_bsrs::{
     Config, DiffError, Diffractometer, LuaDiffractometer, Measured, RealAxis, WavelengthSource,
 };
-use serde_json::Value;
-use serde_yaml::Mapping;
+use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
 const AXES: [&str; 4] = ["omega", "chi", "phi", "tth"];
@@ -192,18 +191,18 @@ const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.
 
 /// hklpy2_e4cv.yml with its hexagonal sample, whose UB is U·B and the UB of
 /// its orienting reflections r100 and r001, edited.
-fn hexagonal(edit: impl FnOnce(&mut Mapping)) -> String {
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&read("hklpy2_e4cv.yml")).unwrap();
-    edit(doc["samples"]["hexagonal"].as_mapping_mut().unwrap());
-    serde_yaml::to_string(&doc).unwrap()
+fn hexagonal(edit: impl FnOnce(&mut Map<String, Value>)) -> String {
+    let mut doc: Value = serde_saphyr::from_str(&read("hklpy2_e4cv.yml")).unwrap();
+    edit(doc["samples"]["hexagonal"].as_object_mut().unwrap());
+    serde_saphyr::to_string(&doc).unwrap()
 }
 
-fn set(sample: &mut Mapping, field: &str, value: impl serde::Serialize) {
-    sample.insert(field.into(), serde_yaml::to_value(value).unwrap());
+fn set(sample: &mut Map<String, Value>, field: &str, value: impl serde::Serialize) {
+    sample.insert(field.into(), serde_json::to_value(value).unwrap());
 }
 
 /// The hexagonal sample of the edited file, imported.
-fn hexagonal_imported(edit: impl FnOnce(&mut Mapping)) -> (Config, Arc<Diffractometer>) {
+fn hexagonal_imported(edit: impl FnOnce(&mut Map<String, Value>)) -> (Config, Arc<Diffractometer>) {
     let config = Config::from_hklpy2(&hexagonal(edit)).unwrap();
     let dx = e4cv();
     dx.load_config(&config).unwrap();
@@ -232,9 +231,9 @@ fn hklpy2_u_matching_the_reflections_is_kept_over_a_stale_ub() {
     // hklpy2's U setter leaves UB as it was (PY2-21)
     let (config, dx) = hexagonal_imported(|s| set(s, "UB", IDENTITY));
     let file = hexagonal(|_| ());
-    let file: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+    let file: Value = serde_saphyr::from_str(&file).unwrap();
     let file_u: [[f64; 3]; 3] =
-        serde_yaml::from_value(file["samples"]["hexagonal"]["U"].clone()).unwrap();
+        serde_json::from_value(file["samples"]["hexagonal"]["U"].clone()).unwrap();
     let sample = config.samples.iter().find(|s| s.name == "hexagonal");
     assert_eq!(sample.unwrap().u, file_u);
     assert_matrix(ub(&dx), oriented().0, 1e-9);
@@ -255,12 +254,12 @@ fn hklpy2_stale_ub_without_two_orienting_reflections_is_rejected() {
     let empty: [&str; 0] = [];
     let none = hexagonal(|s| {
         set(s, "UB", IDENTITY);
-        set(s, "reflections", Mapping::new());
+        set(s, "reflections", Map::new());
         set(s, "reflections_order", empty);
     });
     let one = hexagonal(|s| {
         set(s, "UB", IDENTITY);
-        s["reflections"].as_mapping_mut().unwrap().remove("r001");
+        s["reflections"].as_object_mut().unwrap().remove("r001");
         set(s, "reflections_order", ["r100"]);
     });
     // hklpy2 orients from the first two of reflections_order only
