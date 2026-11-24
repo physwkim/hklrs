@@ -8,7 +8,7 @@
 //! Needs the deposit with its raw scans zip extracted into `raw/`:
 //!
 //! ```text
-//! HKLRS_ZENODO_6787572=<deposit> cargo nextest run -p hklrs \
+//! HKLRS_ZENODO_6787572=<deposit> cargo nextest run -p hklrs --features hdf5 \
 //!     --run-ignored only --no-capture -E 'binary(binoculars_pt111)'
 //! ```
 //!

@@ -24,6 +24,7 @@ hdf5 = ["dep:rust-hdf5"]
 # μ of a material from xrt-rs (absorption::xrt); needs Rust 1.98
 xrt = ["dep:xrt-rs", "dep:ndarray"]
 
-[dev-dependencies]
-# tests/binoculars_pt111.rs reads the scans and the reference cube
-rust-hdf5 = { workspace = true }
+# reads the Zenodo scans and the reference cube through rust-hdf5
+[[test]]
+name = "binoculars_pt111"
+required-features = ["hdf5"]
