@@ -24,9 +24,12 @@ rust-hdf5 = { workspace = true, optional = true }
 [features]
 # Hdf5FrameReader, frames from areaDetector's HDF5 files
 hdf5 = ["hklrs/hdf5", "dep:rust-hdf5"]
+# tests/rsm_ioc.rs: bsrs's Channel Access devices against areaDetector's C
+# simDetector IOC, which tests/ioc/simdetector-ioc.sh builds and runs
+ioc = ["hdf5", "bsrs/ca"]
 
 [dev-dependencies]
 # Lua and the registry, to call the Lua methods as the queue server does
 bsrs = { version = "=0.6.2", default-features = false, features = ["host"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

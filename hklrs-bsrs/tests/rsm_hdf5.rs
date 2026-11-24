@@ -27,6 +27,7 @@ use hklrs_bsrs::{
     FailedFrame, FrameFailure, FrameReader, Hdf5FrameError, Hdf5FrameReader, ReadError,
     RsmCallback, RsmConfig, RsmValue,
 };
+use rust_hdf5::format::superblock::{FLAG_WRITE_ACCESS, SuperblockV2V3};
 use rust_hdf5::swmr::SwmrFileWriter;
 use rust_hdf5::{Complex32, H5Type};
 use serde_json::{Value, json};
@@ -498,6 +499,88 @@ fn a_metadata_checksum_mismatch_is_not_readable_yet() {
     writer.close();
     let expected: Vec<f64> = pixels(0).into_iter().map(f64::from).collect();
     assert_eq!(frame.data(), expected);
+}
+
+/// NDFileHDF5's file as `H5Fcreate` leaves it until it flushes the
+/// superblock (`H5Fint.c:1290-1306` of ADSupport's HDF5 1.10.1).
+#[test]
+fn an_empty_file_is_being_created() {
+    let dir = scratch("an_empty_file_is_being_created");
+    std::fs::write(dir.join("scan.h5"), b"").unwrap();
+    let resource = image_resource(&dir);
+    assert_eq!(
+        Hdf5FrameReader.frame(&resource, 0).unwrap_err(),
+        Hdf5FrameError::Creating {
+            path: dir.join("scan.h5")
+        }
+    );
+    assert!(not_yet(&resource, 0));
+}
+
+/// NDFileHDF5's file from `H5Fcreate` until it starts SWMR: its
+/// superblock's write-access flag set, the SWMR flag not
+/// (`H5Fint.c:1459-1461`), which libhdf5's SWMR reader refuses
+/// (`H5Fint.c:1478-1484`). Made here from a closed file whose frame reads.
+#[test]
+fn a_file_written_outside_swmr_is_being_created() {
+    let dir = scratch("a_file_written_outside_swmr_is_being_created");
+    images(&dir, 1).close();
+    let path = dir.join("scan.h5");
+    let mut superblock = SuperblockV2V3::decode(&std::fs::read(&path).unwrap()).unwrap();
+    superblock.file_consistency_flags = FLAG_WRITE_ACCESS;
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.write_all(&superblock.encode()).unwrap();
+    let resource = image_resource(&dir);
+    assert_eq!(
+        Hdf5FrameReader.frame(&resource, 0).unwrap_err(),
+        Hdf5FrameError::Creating { path }
+    );
+    assert!(not_yet(&resource, 0));
+}
+
+/// A dataset or a frame a SWMR writer has not written is not readable yet;
+/// once the writer has closed the file, what it lacks fails at once.
+#[test]
+fn what_a_closed_file_lacks_fails_at_once() {
+    let dir = scratch("what_a_closed_file_lacks_fails_at_once");
+    let writer = images(&dir, 1);
+    let frame = image_resource(&dir);
+    let dataset = ad_resource(uri(&dir), "/entry/data/other", &[1, 4, 6]);
+    assert!(not_yet(&frame, 1));
+    assert!(not_yet(&dataset, 0));
+    writer.close();
+    assert_eq!(
+        Hdf5FrameReader.frame(&frame, 1).unwrap_err(),
+        Hdf5FrameError::IndexOutOfRange {
+            index: 1,
+            frames: 1
+        }
+    );
+    assert!(!not_yet(&frame, 1));
+    assert!(!not_yet(&dataset, 0));
+}
+
+/// NDFileHDF5's dataset from its creation, one frame long, until a flush
+/// puts frame 0's chunk in the file (`NDFileHDF5Dataset.cpp:89`, 125): no
+/// frame to read, not its fill, while the writer may yet write it, nor
+/// once it has closed the file.
+#[test]
+fn a_frame_whose_chunk_is_not_in_the_file_is_not_read() {
+    let dir = scratch("a_frame_whose_chunk_is_not_in_the_file_is_not_read");
+    let mut stream = images(&dir, 0);
+    let extent = [1, SHAPE.0 as u64, SHAPE.1 as u64];
+    stream.writer.set_extent(stream.ds, &extent).unwrap();
+    stream.writer.flush().unwrap();
+    let resource = image_resource(&dir);
+    let unwritten = |e: Hdf5FrameError| match e {
+        Hdf5FrameError::Hdf5(why) => why.contains("[0, 0, 0] has not been written"),
+        _ => false,
+    };
+    assert!(unwritten(Hdf5FrameReader.frame(&resource, 0).unwrap_err()));
+    assert!(not_yet(&resource, 0));
+    stream.close();
+    assert!(unwritten(Hdf5FrameReader.frame(&resource, 0).unwrap_err()));
+    assert!(!not_yet(&resource, 0));
 }
 
 // -- errors, one each ---------------------------------------------------------
