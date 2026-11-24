@@ -28,3 +28,7 @@ xrt = ["dep:xrt-rs", "dep:ndarray"]
 [[test]]
 name = "binoculars_pt111"
 required-features = ["hdf5"]
+
+[[test]]
+name = "binoculars_pt111_hkl"
+required-features = ["hdf5"]
