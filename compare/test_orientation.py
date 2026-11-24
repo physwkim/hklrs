@@ -1,10 +1,12 @@
-"""hklrs Busing-Levy orientation against libhkl 5.1.9 (gi, live) and hklpy2.
+"""hklrs Busing-Levy and ux/uy/uz orientation against libhkl 5.1.9 (gi, live)
+and hklpy2.
 
 libhkl's B is wrong where c(beta) c(gamma) != c(alpha) (1 - s(beta) s(gamma))
 (HKL-12), so there its UB is expected to diverge; hklrs is then checked against
 a numpy Busing-Levy with the correct B.
 """
 import math
+import os
 import random
 
 import numpy as np
@@ -185,3 +187,69 @@ def test_parallel_reflections_raise():
     c = hklrs.Reflection(geo, (0, 1, 0), ang, 1.54)
     with pytest.raises(ValueError):
         hklrs.Sample.busing_levy("p", lat, a, c)
+
+
+def sample_ux_uy_uz_hkl(lat, angles):
+    """libhkl sample with ux, uy, uz set through their parameters, degrees."""
+    s = Hkl.Sample.new("u")
+    s.lattice_set(lattice_hkl(lat))
+    for value, get, put in zip(angles, (s.ux_get, s.uy_get, s.uz_get),
+                               (s.ux_set, s.uy_set, s.uz_set)):
+        p = get()
+        p.value_set(value, USER)
+        put(p)
+    return s
+
+
+# uy = +-90 is hkl_matrix_to_euler's gimbal-lock branch, +-180 the ends of
+# libhkl's ux/uy/uz range, 250 and -400 beyond it (its setters do not check)
+UXYZ_SPECIAL = [(0.0, 0.0, 0.0), (30.0, 90.0, -50.0), (-70.0, -90.0, 20.0),
+                (180.0, -180.0, 180.0), (250.0, -400.0, 100.0)]
+
+
+def test_from_ux_uy_uz_against_libhkl():
+    rng = random.Random("ux-uy-uz")
+    cases = UXYZ_SPECIAL + [tuple(rng.uniform(-180, 180) for _ in range(3))
+                            for _ in range(20)]
+    lat = CELLS["cubic"]
+    for angles in cases:
+        u_h = np.array(_mat(sample_ux_uy_uz_hkl(lat, angles).U_get()))
+        smp = hklrs.Sample.from_ux_uy_uz("u", hklrs.Lattice(*lat), *angles)
+        np.testing.assert_allclose(smp.u(), u_h, rtol=0, atol=1e-15, err_msg=str(angles))
+
+
+def test_from_ux_uy_uz_non_finite_raises():
+    lat = CELLS["cubic"]
+    for i in range(3):
+        angles = [10.0, 20.0, 30.0]
+        angles[i] = math.nan
+        with pytest.raises(ValueError):
+            hklrs.Sample.from_ux_uy_uz("u", hklrs.Lattice(*lat), *angles)
+        with pytest.raises(Exception, match="non-finite"):
+            sample_ux_uy_uz_hkl(lat, angles)
+
+
+ZENODO = "HKLRS_ZENODO_6787572"
+SIXS_63 = "raw/20190919_SIXS_beamline_SXRD_raw_data/align_ascan_omega_00063.nxs"
+
+
+def test_from_ux_uy_uz_sixs_scan_63():
+    """The file's Ux/Uy/Uz are degrees and its UB carries 2pi: libhkl, given
+    them in its user unit, and hklrs both rebuild the stored UB."""
+    deposit = os.environ.get(ZENODO)
+    if not deposit:
+        pytest.skip(f"{ZENODO} does not name the Zenodo 10.5281/zenodo.6787572 deposit")
+    path = os.path.join(deposit, SIXS_63)
+    assert os.path.exists(path), f"{ZENODO} is set but {path} is missing"
+    h5py = pytest.importorskip("h5py")
+    with h5py.File(path, "r") as f:
+        g = f["com/SIXS/i14-c-cx2-ex-diff-uhv"]
+        lat = tuple(float(g[k][0]) for k in ("A", "B", "C", "alpha", "beta", "gamma"))
+        angles = tuple(float(g[k][0]) for k in ("Ux", "Uy", "Uz"))
+        assert [g[k].attrs["units"] for k in ("Ux", "Uy", "Uz")] == [b"degree"] * 3
+        ub_file = g["UB"][()]
+    assert hkl12_holds(lat)
+    ub_h = np.array(_mat(sample_ux_uy_uz_hkl(lat, angles).UB_get()))
+    np.testing.assert_allclose(ub_h, ub_file, rtol=0, atol=1e-15)
+    smp = hklrs.Sample.from_ux_uy_uz("sixs", hklrs.Lattice(*lat), *angles)
+    np.testing.assert_allclose(smp.ub(), ub_file, rtol=0, atol=1e-14)

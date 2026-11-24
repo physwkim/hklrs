@@ -2,7 +2,7 @@
 
 use nalgebra::{Matrix3, Point3, Rotation3, UnitQuaternion, Vector3};
 
-use crate::{Error, Geometry, Lattice, Wavelength, scattering};
+use crate::{Error, Geometry, Lattice, Rad, Wavelength, scattering};
 
 /// Smallest sine of the angle between two reflections, in index space and in
 /// the measured sample frame, below which they do not define a plane.
@@ -87,6 +87,28 @@ impl Orientation {
         Ok(Self::Manual {
             u: UnitQuaternion::from_rotation_matrix(&r),
         })
+    }
+
+    /// Manual U from libhkl's sample parameters ux, uy, uz (the Ux/Uy/Uz of
+    /// SIXS NeXus files, in degrees there): U = Rx(ux)·Ry(uy)·Rz(uz), as
+    /// `hkl_matrix_init_from_euler` builds it. Any finite angle is taken;
+    /// libhkl's setters do not enforce its [-π, π] range either.
+    pub fn from_ux_uy_uz(ux: Rad, uy: Rad, uz: Rad) -> Result<Self, Error> {
+        let mut u = UnitQuaternion::identity();
+        for (what, angle, axis) in [
+            ("ux", ux, Vector3::x_axis()),
+            ("uy", uy, Vector3::y_axis()),
+            ("uz", uz, Vector3::z_axis()),
+        ] {
+            if !angle.0.is_finite() {
+                return Err(Error::NotFinite {
+                    what,
+                    value: angle.0,
+                });
+            }
+            u *= UnitQuaternion::from_axis_angle(&axis, angle.0);
+        }
+        Ok(Self::Manual { u })
     }
 
     /// Busing-Levy orientation. Rejects pairs that are parallel in index
@@ -191,6 +213,7 @@ impl Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Deg;
 
     fn triclinic() -> Lattice {
         Lattice::from_degrees(4.1, 5.3, 6.7, 82.0, 97.0, 101.0).unwrap()
@@ -219,6 +242,81 @@ mod tests {
         assert!(s.u().angle_to(&u) < 1e-12, "{}", s.u().angle_to(&u));
         let h = Vector3::new(0.3, -1.0, 2.5);
         assert!((s.hkl(&(u * (l.b_matrix() * h))) - h).abs().max() < 1e-12);
+    }
+
+    /// `hkl_matrix_init_from_euler` (hkl 7be4f79, hkl/hkl-matrix.c:225-248).
+    #[rustfmt::skip]
+    fn hkl_euler(x: f64, y: f64, z: f64) -> Matrix3<f64> {
+        let (a, b, c, d, e, f) = (x.cos(), x.sin(), y.cos(), y.sin(), z.cos(), z.sin());
+        let (ad, bd) = (a * d, b * d);
+        Matrix3::new(
+            c * e,           -c * f,          d,
+            bd * e + a * f,  -bd * f + a * e, -b * c,
+            -ad * e + b * f, ad * f + b * e,  a * c,
+        )
+    }
+
+    #[test]
+    fn from_ux_uy_uz_is_hkl_matrix_init_from_euler() {
+        use std::f64::consts::{FRAC_PI_2, PI};
+        // uy = ±π/2 is hkl_matrix_to_euler's gimbal-lock branch, ±π the ends
+        // of libhkl's parameter range, 4 and -7 beyond it
+        for (x, y, z) in [
+            (0.0, 0.0, 0.0),
+            (0.4, -1.1, 2.3),
+            (-2.9, 0.7, -0.2),
+            (0.3, FRAC_PI_2, -0.8),
+            (1.2, -FRAC_PI_2, 0.5),
+            (PI, -PI, PI),
+            (4.0, -7.0, 3.5),
+        ] {
+            let Orientation::Manual { u } =
+                Orientation::from_ux_uy_uz(Rad(x), Rad(y), Rad(z)).unwrap()
+            else {
+                unreachable!()
+            };
+            let d = (u.to_rotation_matrix().into_inner() - hkl_euler(x, y, z))
+                .abs()
+                .max();
+            assert!(d < 1e-15, "({x}, {y}, {z}): {d}");
+        }
+    }
+
+    #[test]
+    fn from_ux_uy_uz_rejects_non_finite() {
+        for (i, name) in ["ux", "uy", "uz"].into_iter().enumerate() {
+            for bad in [f64::NAN, f64::INFINITY] {
+                let mut a = [Rad(0.1); 3];
+                a[i] = Rad(bad);
+                assert!(matches!(
+                    Orientation::from_ux_uy_uz(a[0], a[1], a[2]),
+                    Err(Error::NotFinite { what, .. }) if what == name
+                ));
+            }
+        }
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn sixs_scan_63_ub_from_ux_uy_uz() {
+        // Zenodo 10.5281/zenodo.6787572,
+        // raw/20190919_SIXS_beamline_SXRD_raw_data/align_ascan_omega_00063.nxs,
+        // group com/SIXS/i14-c-cx2-ex-diff-uhv:
+        // A B C alpha beta gamma Ux Uy Uz (angles in degrees) and the UB
+        // stored beside them (Å⁻¹, with 2π); libhkl 5.1.9 rebuilds that UB
+        // from these values in its user unit, degrees, to 4.4e-16
+        let l = Lattice::from_degrees(2.77, 2.77, 6.789, 90.0, 90.0, 119.99999999999999)
+            .unwrap();
+        let [ux, uy, uz] = [-90.29433980209876, -0.9029479116987432, -18.058308163229945]
+            .map(|d| Deg(d).into());
+        let ub = Matrix3::new(
+            2.48987765404199,    1.9479891608534345,   -0.01458465459249198,
+            0.04341268599630173, 0.021708120810711745, 0.9253678275754821,
+            0.8117011120426884,  -1.7507430066639689,  -0.004753840188954861,
+        );
+        let s = Sample::new("sixs", l, Orientation::from_ux_uy_uz(ux, uy, uz).unwrap());
+        let d = (s.ub() - ub).abs().max();
+        assert!(d < 1e-14, "{d}");
     }
 
     #[test]
