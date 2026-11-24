@@ -7,7 +7,7 @@ use hklrs::grid::{Binning, Cube};
 use hklrs::nalgebra::{Matrix3, Rotation3};
 use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::projection::Projection;
-use hklrs::{Orientation, Sample, Wavelength};
+use hklrs::{Sample, Wavelength};
 use numpy::{PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -30,12 +30,9 @@ fn from_core(v: f64, angular: bool) -> f64 {
     if angular { v.to_degrees() } else { v }
 }
 
-/// `rows` as a rotation, held to the rule a manual U is
-/// (`Orientation::from_u_matrix`).
+/// `rows` as a rotation, held to `hklrs::proper_rotation`.
 fn rotation(rows: [[f64; 3]; 3]) -> PyResult<Rotation3<f64>> {
-    let m = Matrix3::from_fn(|i, j| rows[i][j]);
-    Orientation::from_u_matrix(&m).map_err(|e| PyValueError::new_err(format!("frame=: {e}")))?;
-    Ok(Rotation3::from_matrix_unchecked(m))
+    hklrs::proper_rotation("frame", &Matrix3::from_fn(|i, j| rows[i][j])).map_err(err)
 }
 
 fn projection(

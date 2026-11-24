@@ -45,7 +45,7 @@ pub use qmap::{
     Planes, Polarisation, QMap, Weights, absorption, detector_positions, polarisation, q_map,
     solid_angle,
 };
-pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample};
+pub use sample::{Orientation, PARALLEL_SIN, Reflection, Sample, proper_rotation};
 pub use sixs::sixs;
 pub use units::{Deg, Energy, HC_KEV_ANGSTROM, PerMetre, Rad, Wavelength};
 
