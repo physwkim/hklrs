@@ -1896,9 +1896,9 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rust-hdf5"
-version = "0.7.14"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d349316a4f12a62875104154c7377557ca51d0e9dcff7951cb235b6ff5bf9b0d"
+checksum = "9df159c3561362f3ad3da82c2f06d5ac8b011409e07d9c0932964cef69955177"
 dependencies = [
  "flate2",
  "lz4_flex",
