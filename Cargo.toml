@@ -18,7 +18,7 @@ serde_json = "1"
 # decoders for the filters areaDetector's NDFileHDF5 writes: zlib, LZ4,
 # bitshuffle/LZ4 and blosc with all six of its compressors; szip and
 # N-bit are always built.
-rust-hdf5 = { version = "0.7.14", default-features = false, features = ["deflate", "lz4", "blosc", "zstd"] }
+rust-hdf5 = { version = "0.7.15", default-features = false, features = ["deflate", "lz4", "blosc", "zstd"] }
 
 # cargo nextest run -p hklrs (inverse golden): 42 s at opt-level 0,
 # 1.8 s at 1.
