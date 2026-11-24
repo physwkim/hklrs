@@ -294,6 +294,16 @@ impl PySample {
     fn ub(&self) -> [[f64; 3]; 3] {
         rows(&self.0.ub())
     }
+
+    /// Surface axes as the columns of a rotation in the sample frame (rows
+    /// returned): z along UB·normal, x along UB·in_plane within the plane,
+    /// both Miller indices; surface coordinates of q are frameᵀ q.
+    fn surface_frame(&self, normal: [f64; 3], in_plane: [f64; 3]) -> PyResult<[[f64; 3]; 3]> {
+        self.0
+            .surface_frame(&Vector3::from(normal), &Vector3::from(in_plane))
+            .map(|f| rows(f.matrix()))
+            .map_err(err)
+    }
 }
 
 /// An E4C inverse mode, validated against the geometry it was built for.
