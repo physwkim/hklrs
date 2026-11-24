@@ -361,7 +361,7 @@ mod tests {
 
     use super::super::validate::Found;
     use super::super::{
-        InverseError, InverseRequest, Mode, Target, e6c, esrf_bm28_psic, solve as numeric, wrap,
+        InverseError, InverseRequest, Mode, ModeSpec, ModeTable, Target, solve as numeric, wrap,
     };
     use super::*;
     use crate::presets::{PRESETS, preset};
@@ -466,138 +466,44 @@ mod tests {
         assert_eq!(zaxis.arm, Arm::Own(own));
     }
 
-    /// Every hkl "hkl" engine mode of preset `name`, labelled, its
-    /// parameters arbitrary; MED2+3's also with the slit fit.
+    /// Every mode of preset `name`'s table and its psi engine, labelled,
+    /// their parameters arbitrary: a reference for psi, else a second
+    /// reflection or a surface normal.
     fn hkl_modes<'g>(name: &str, geo: &'g Geometry) -> Vec<(String, Mode<'g>)> {
-        use super::super::{
-            aps_04id_polar as polar, e4c, k4c, k6c, petra3_p09_eh2 as p09, petra3_p23_4c as p23,
-            soleil_nanoscopium_robot as robot, soleil_sirius_turret as turret,
-            soleil_sixs_med as med, zaxis,
-        };
-        let (h2, reference, psi) = (
-            Vector3::new(1.0, -1.0, 0.5),
-            Vector3::new(0.2, 0.3, 1.0),
-            0.4,
-        );
-        let surface = Vector3::new(0.1, 1.0, 0.2);
-        let modes = match name {
-            "TwoC" => vec![],
-            "K4CV" | "SOLEIL CRISTAL K4C" => vec![
-                k4c::bissector(geo),
-                k4c::constant_omega(geo, 0.3),
-                k4c::constant_chi(geo, 0.5),
-                k4c::constant_phi(geo, -0.4),
-                k4c::double_diffraction(geo, h2),
-                k4c::psi_constant(geo, reference, psi),
-            ],
-            "K6C" | "SOLEIL SIRIUS KAPPA" => vec![
-                k6c::bissector_vertical(geo),
-                k6c::constant_omega_vertical(geo, 0.3),
-                k6c::constant_chi_vertical(geo, 0.5),
-                k6c::constant_phi_vertical(geo, -0.4),
-                k6c::lifting_detector_kphi(geo),
-                k6c::lifting_detector_komega(geo),
-                k6c::lifting_detector_mu(geo),
-                k6c::double_diffraction_vertical(geo, h2),
-                k6c::bissector_horizontal(geo),
-                k6c::constant_phi_horizontal(geo, -0.4),
-                k6c::constant_kphi_horizontal(geo),
-                k6c::double_diffraction_horizontal(geo, h2),
-                k6c::psi_constant_vertical(geo, reference, psi),
-                k6c::constant_incidence(geo, surface, 0.2, 0.7),
-                k6c::psi_vertical_soleil_sirius_kappa(geo, reference, psi),
-            ],
-            "E4CV" | "E4CH" | "SOLEIL MARS" => vec![
-                e4c::bissector(geo),
-                e4c::constant_omega(geo),
-                e4c::constant_chi(geo),
-                e4c::constant_phi(geo),
-                e4c::double_diffraction(geo, h2),
-                e4c::psi_constant(geo, reference, psi),
-            ],
-            "E6C" => vec![
-                e6c::bissector_vertical(geo),
-                e6c::constant_omega_vertical(geo),
-                e6c::constant_chi_vertical(geo),
-                e6c::constant_phi_vertical(geo),
-                e6c::lifting_detector_phi(geo),
-                e6c::lifting_detector_omega(geo),
-                e6c::lifting_detector_mu(geo),
-                e6c::double_diffraction_vertical(geo, h2),
-                e6c::bissector_horizontal(geo),
-                e6c::double_diffraction_horizontal(geo, h2),
-                e6c::psi_constant_vertical(geo, reference, psi),
-                e6c::psi_constant_horizontal(geo, reference, psi),
-                e6c::constant_mu_horizontal(geo),
-            ],
-            "ESRF BM28 PSIC" | "ESRF ID01 PSIC" => vec![
-                esrf_bm28_psic::constant_nu_coplanar(geo),
-                esrf_bm28_psic::constant_delta_coplanar(geo),
-                esrf_bm28_psic::constant_eta_noncoplanar(geo),
-            ],
-            "ZAXIS" => vec![zaxis::zaxis(geo), zaxis::reflectivity(geo)],
-            "SOLEIL SIXS MED1+2" => vec![med::pitch_fixed(geo), med::delta_fixed(geo)],
-            "SOLEIL SIXS MED2+2" => vec![
-                med::mu_fixed(geo),
-                med::reflectivity(geo),
-                med::emergence_fixed(geo, surface, -0.3),
-            ],
-            "SOLEIL SIXS MED2+3" | "SOLEIL SIXS MED2+3 v2" => [
-                med::mu_fixed(geo),
-                med::gamma_fixed(geo),
-                med::emergence_fixed(geo, surface, -0.3),
-            ]
-            .into_iter()
-            .flat_map(|m| {
-                let m = m.unwrap();
-                [Ok(m.clone()), med::slits(m)]
-            })
-            .collect(),
-            "APS POLAR" => vec![
-                polar::constant_phi_horizontal(geo),
-                polar::zaxis_alpha_fixed(geo),
-                polar::zaxis_beta_fixed(geo),
-                polar::zaxis_alpha_eq_beta(geo),
-                polar::bissecting_horizontal(geo),
-                polar::constant_mu_horizontal(geo),
-                polar::constant_chi_horizontal(geo),
-                polar::lifting_detector_tau(geo),
-                polar::lifting_detector_mu(geo),
-                polar::lifting_detector_chi(geo),
-                polar::lifting_detector_phi(geo),
-                polar::psi_constant_horizontal(geo, reference, psi),
-                polar::psi_constant_vertical(geo, reference, psi),
-            ],
-            "PETRA3 P09 EH2" => vec![
-                p09::zaxis_alpha_fixed(geo),
-                p09::zaxis_beta_fixed(geo),
-                p09::zaxis_alpha_eq_beta(geo),
-                p09::bissecting_horizontal(geo),
-                p09::constant_omega_horizontal(geo),
-                p09::constant_chi_horizontal(geo),
-                p09::constant_phi_horizontal(geo),
-                p09::lifting_detector_mu(geo),
-                p09::lifting_detector_omega(geo),
-                p09::lifting_detector_chi(geo),
-                p09::lifting_detector_phi(geo),
-            ],
-            "PETRA3 P23 4C" => vec![
-                p23::bissector_vertical(geo),
-                p23::lifting_detector_omega_t(geo),
-                p23::lifting_detector_mu(geo),
-                p23::bissector_horizontal(geo),
-                p23::psi_constant(geo, reference, psi),
-            ],
-            "SOLEIL SIRIUS TURRET" => vec![turret::lifting_detector_thetah(geo)],
-            "SOLEIL NANOSCOPIUM ROBOT" => vec![
-                robot::lifting_detector_rz(geo),
-                robot::lifting_detector_rs(geo),
-                robot::lifting_detector_rx(geo),
-            ],
-            other => panic!("{other} maps but has no modes here"),
-        };
+        let table = ModeTable::of(name).unwrap();
+        let reference = [("h2", 0.2), ("k2", 0.3), ("l2", 1.0), ("psi", 0.4)];
+        let others = [
+            ("h2", 1.0),
+            ("k2", -1.0),
+            ("l2", 0.5),
+            ("x", 0.1),
+            ("y", 1.0),
+            ("z", 0.2),
+            ("omega", 0.3),
+            ("chi", 0.5),
+            ("phi", -0.4),
+            ("incidence", 0.2),
+            ("azimuth", 0.7),
+            ("emergence", -0.3),
+        ];
+        let modes = table.names().map(|mode| {
+            let parameters = table.parameters(mode).unwrap();
+            let psi = parameters.iter().any(|p| p.name == "psi");
+            let values: std::collections::BTreeMap<_, _> =
+                (if psi { &reference[..] } else { &others[..] })
+                    .iter()
+                    .copied()
+                    .collect();
+            parameters
+                .iter()
+                .fold(ModeSpec::new(mode), |s, p| s.with(p.name, values[p.name]))
+                .build(geo)
+        });
+        let psi = table
+            .psi()
+            .map(|psi| psi(geo, Vector3::new(0.2, 0.3, 1.0), 0.4));
         modes
-            .into_iter()
+            .chain(psi)
             .map(Result::unwrap)
             .map(|m| {
                 let slits = if m.slits().is_some() { " slits" } else { "" };
@@ -701,6 +607,7 @@ mod tests {
                 "APS POLAR: 4-circles constant phi horizontal",
                 "APS POLAR: psi constant horizontal",
                 "APS POLAR: psi constant vertical",
+                "APS POLAR: psi_vertical",
                 "APS POLAR: zaxis + alpha=beta",
                 "APS POLAR: zaxis + beta-fixed",
                 "E4CH: bissector",
@@ -737,7 +644,6 @@ mod tests {
                 "SOLEIL SIRIUS KAPPA: double_diffraction_vertical",
                 "SOLEIL SIXS MED1+2: delta_fixed",
                 "SOLEIL SIXS MED2+2: reflectivity",
-                "SOLEIL SIXS MED2+3: gamma_fixed",
                 "SOLEIL SIXS MED2+3: gamma_fixed slits",
                 "ZAXIS: reflectivity",
             ]

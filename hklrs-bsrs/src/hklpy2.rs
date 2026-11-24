@@ -6,13 +6,13 @@ use std::collections::BTreeMap;
 
 use hklrs::nalgebra::Matrix3;
 use hklrs::presets::preset;
-use hklrs::{Geometry, Lattice, ModeParameters, ModeSpec, Orientation, Reflection, Sample};
+use hklrs::{Geometry, Lattice, ModeTable, Orientation, Reflection, Sample};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
 use crate::DiffError;
 use crate::config::{
-    AxisConfig, Config, GeometryConfig, LatticeConfig, ModeConfig, PsiConfig, ReflectionConfig,
+    AxisConfig, Config, GeometryConfig, LatticeConfig, ModeConfig, ReflectionConfig,
     SCHEMA_VERSION, SampleConfig,
 };
 use crate::diffractometer::reflection;
@@ -212,7 +212,7 @@ impl Config {
             },
             samples,
             sample: file.sample_name,
-            mode: Some(mode(&file.solver.mode, &file.axes.extra_axes)?),
+            mode: Some(mode(&geometry, &file.solver.mode, &file.axes.extra_axes)?),
             wavelength: Some(file.beam.wavelength),
         })
     }
@@ -381,30 +381,26 @@ impl ReflectionFile {
     }
 }
 
-/// hklpy2 keeps one value per parameter name across modes; `name` takes
-/// those it needs. A name hklrs does not know fails when loaded.
-fn mode(name: &str, extras: &BTreeMap<String, f64>) -> Result<ModeConfig, DiffError> {
-    let extra = |p: &str| {
-        extras
-            .get(p)
-            .copied()
-            .ok_or_else(|| missing(format!("axes.extra_axes.{p}")))
-    };
-    let hkl2 = || -> Result<[f64; 3], DiffError> { Ok([extra("h2")?, extra("k2")?, extra("l2")?]) };
-    let mut mode = ModeConfig {
+/// hklpy2 keeps one value per parameter name across modes; mode `name` of
+/// `geometry`'s preset takes exactly those hkl declares for it.
+fn mode(
+    geometry: &Geometry,
+    name: &str,
+    extras: &BTreeMap<String, f64>,
+) -> Result<ModeConfig, DiffError> {
+    let declared = ModeTable::of(geometry.name())
+        .and_then(|table| table.parameters(name))
+        .map_err(|source| DiffError::Mode {
+            mode: name.to_owned(),
+            source,
+        })?;
+    let parameters = declared.iter().map(|p| {
+        let value = extras.get(p.name).copied();
+        let value = value.ok_or_else(|| missing(format!("axes.extra_axes.{}", p.name)))?;
+        Ok((p.name.to_owned(), value))
+    });
+    Ok(ModeConfig {
         name: name.to_owned(),
-        hkl2: None,
-        psi: None,
-    };
-    match ModeSpec::parameters(name) {
-        Some(ModeParameters::Plain) | None => {}
-        Some(ModeParameters::Hkl2) => mode.hkl2 = Some(hkl2()?),
-        Some(ModeParameters::Psi) => {
-            mode.psi = Some(PsiConfig {
-                reference: hkl2()?,
-                angle: extra("psi")?,
-            })
-        }
-    }
-    Ok(mode)
+        parameters: parameters.collect::<Result<_, DiffError>>()?,
+    })
 }

@@ -8,6 +8,7 @@ mod inverse_error;
 mod normalise;
 mod pseudo_set;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hklrs::absorption::xrt::Material;
@@ -315,7 +316,8 @@ impl PySample {
     }
 }
 
-/// An E4C inverse mode, validated against the geometry it was built for.
+/// An "hkl" engine mode of the geometry's preset, validated against the
+/// geometry it was built for.
 #[pyclass(name = "Mode", frozen)]
 struct PyMode {
     /// Shared, not copied: limits set on it after the mode is made apply.
@@ -333,40 +335,58 @@ impl PyMode {
     }
 }
 
+/// The mode table of the preset `g` is named after.
+fn mode_table(py: Python<'_>, g: &hklrs::Geometry) -> PyResult<&'static hklrs::ModeTable> {
+    hklrs::ModeTable::of(g.name()).map_err(|e| inverse_error::to_py(py, g, e))
+}
+
 #[pymethods]
 impl PyMode {
-    /// hkl's "hkl" engine mode by name, for a geometry with that engine's
-    /// axes. E4C: bissector, constant_omega, constant_chi, constant_phi,
-    /// double_diffraction, psi_constant. E6C: bissector_vertical,
-    /// constant_omega_vertical, constant_chi_vertical, constant_phi_vertical,
-    /// lifting_detector_phi, lifting_detector_omega, lifting_detector_mu,
-    /// double_diffraction_vertical, bissector_horizontal,
-    /// double_diffraction_horizontal, psi_constant_vertical,
-    /// psi_constant_horizontal, constant_mu_horizontal. double_diffraction*
-    /// needs `hkl2`, psi_constant* `reference` and `psi` (degrees). Axes a
-    /// mode does not write hold at the `current` passed to `solve`.
+    /// hkl's "hkl" engine mode `name` of the preset the geometry is named
+    /// after, with its parameters by hkl's names, angles in degrees:
+    /// `Mode.names(geometry)` lists the modes, `Mode.parameters(geometry,
+    /// name)` a mode's parameters. Axes a mode does not write hold at the
+    /// `current` passed to `solve`.
     #[new]
-    #[pyo3(signature = (geometry, name, hkl2=None, reference=None, psi=None))]
+    #[pyo3(signature = (geometry, name, **params))]
     fn new(
         py: Python<'_>,
         geometry: Bound<'_, PyGeometry>,
         name: &str,
-        hkl2: Option<[f64; 3]>,
-        reference: Option<[f64; 3]>,
-        psi: Option<f64>,
+        params: Option<HashMap<String, f64>>,
     ) -> PyResult<Self> {
+        let spec = {
+            let g = &geometry.try_borrow()?.0;
+            let params = params.unwrap_or_default();
+            hklrs::ModeSpec::from_degrees(g, name, params)
+                .map_err(|e| inverse_error::to_py(py, g, e))?
+        };
         let mode = Self {
             geometry: geometry.clone().unbind(),
-            spec: hklrs::ModeSpec {
-                name: name.to_owned(),
-                hkl2: hkl2.map(Vector3::from),
-                psi: reference
-                    .zip(psi)
-                    .map(|(r, psi)| (Vector3::from(r), psi.to_radians())),
-            },
+            spec,
         };
         mode.build(py, &geometry.try_borrow()?.0)?;
         Ok(mode)
+    }
+
+    /// The preset's mode names in hkl's order, its default first.
+    #[staticmethod]
+    fn names(py: Python<'_>, geometry: PyRef<'_, PyGeometry>) -> PyResult<Vec<&'static str>> {
+        Ok(mode_table(py, &geometry.0)?.names().collect())
+    }
+
+    /// Mode `name`'s parameters in hkl's order, as (name, is an angle in
+    /// degrees).
+    #[staticmethod]
+    fn parameters(
+        py: Python<'_>,
+        geometry: PyRef<'_, PyGeometry>,
+        name: &str,
+    ) -> PyResult<Vec<(&'static str, bool)>> {
+        let g = &geometry.0;
+        let parameters = mode_table(py, g)?.parameters(name);
+        let parameters = parameters.map_err(|e| inverse_error::to_py(py, g, e))?;
+        Ok(parameters.iter().map(|p| (p.name, p.angle)).collect())
     }
 
     #[getter]

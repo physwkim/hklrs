@@ -279,6 +279,7 @@ fn py2_2_an_unknown_mode_is_an_error_and_keeps_the_mode() {
     let unknown = Err(DiffError::Mode {
         mode: "nonsense".into(),
         source: InverseError::UnknownMode {
+            geometry: "E4CV".into(),
             name: "nonsense".into(),
         },
     });

@@ -1,16 +1,17 @@
 //! The Diffractometer's methods for Lua, on a type of their own: Lua names
 //! a method by its Rust name, and the device's typed methods keep theirs.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use bsrs::lua_methods;
 use futures::try_join;
+use hklrs::Lattice;
 use hklrs::nalgebra::Matrix3;
-use hklrs::{Lattice, ModeSpec};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::config::{Config, ModeConfig, Positions, PsiConfig, named, ordered};
+use crate::config::{Config, ModeConfig, Positions, named, ordered};
 use crate::diffractometer::rows;
 use crate::error::Fault;
 use crate::{DiffError, Diffractometer, Measured};
@@ -29,8 +30,9 @@ use crate::{DiffError, Diffractometer, Measured};
 ///   reflections, returns UB.
 /// - `set_lattice(a, b, c, alpha, beta, gamma)`: Å and degrees.
 /// - `set_ub(ub)`
-/// - `set_mode(name, params)`: `params` is `{}`, `{hkl2 = hkl}` or
-///   `{psi = {reference = hkl, angle = degrees}}`.
+/// - `set_mode(name, params)`: `params` is a table of the mode's parameters
+///   by hkl's names, angles in degrees, e.g. `{}` or
+///   `{h2 = 1, k2 = 0, l2 = 0, psi = 90}`.
 /// - `forward(positions)`: the hkl at `positions`.
 /// - `inverse(hkl, positions)`: the positions reaching `hkl`, closest to
 ///   `positions`.
@@ -80,13 +82,6 @@ use crate::{DiffError, Diffractometer, Measured};
 /// ```
 pub struct LuaDiffractometer {
     dx: Arc<Diffractometer>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModeParams {
-    hkl2: Option<[f64; 3]>,
-    psi: Option<PsiConfig>,
 }
 
 #[derive(Serialize)]
@@ -156,13 +151,9 @@ impl LuaDiffractometer {
     }
 
     #[lua_method]
-    fn set_mode(&self, name: String, params: ModeParams) -> Result<(), DiffError> {
-        let mode = ModeConfig {
-            name,
-            hkl2: params.hkl2,
-            psi: params.psi,
-        };
-        self.dx.set_mode(ModeSpec::from(&mode))
+    fn set_mode(&self, name: String, parameters: BTreeMap<String, f64>) -> Result<(), DiffError> {
+        let mode = ModeConfig { name, parameters };
+        self.dx.set_mode(mode.spec(&self.dx.geometry())?)
     }
 
     #[lua_method]

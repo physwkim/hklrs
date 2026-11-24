@@ -22,6 +22,7 @@ pub mod petra3_p09_eh2;
 pub mod petra3_p23_4c;
 pub mod petra3_p23_6c;
 pub mod pseudo;
+pub mod pyfai;
 pub mod soleil_nanoscopium_robot;
 pub mod soleil_sirius_turret;
 pub mod soleil_sixs_med;
@@ -38,7 +39,7 @@ use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use crate::{Error, Geometry, Wavelength};
 
 pub use mode::{Equation, Eulerian, Mode, Slits};
-pub use spec::{ModeParameters, ModeSpec};
+pub use spec::{ModeParameter, ModeSpec, ModeTable, PsiEngine};
 
 /// Relative excess of |Q| over 2k still solved, pulled onto 2k: UB·h alone
 /// rounds by ~1e-15, so a strict test would turn exact backscatter targets
@@ -132,10 +133,17 @@ pub enum InverseError {
     NotKappaArm { names: [String; 3] },
     #[error("a kappa equation needs a mode made with Mode::new_kappa")]
     NoKappaArm,
-    #[error("unknown mode {name:?}")]
-    UnknownMode { name: String },
-    #[error("mode {mode:?} needs {needs}")]
-    ModeParameter { mode: String, needs: &'static str },
+    #[error("geometry {geometry:?} is not a preset: it has no named modes")]
+    NotPreset { geometry: String },
+    #[error("{geometry} has no mode {name:?}")]
+    UnknownMode { geometry: String, name: String },
+    #[error("mode {mode:?} needs parameter {parameter:?}")]
+    MissingParameter {
+        mode: String,
+        parameter: &'static str,
+    },
+    #[error("mode {mode:?} takes no parameter {parameter:?}")]
+    UnknownParameter { mode: String, parameter: String },
     #[error(transparent)]
     Geometry(#[from] Error),
     #[error(

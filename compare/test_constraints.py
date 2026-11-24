@@ -12,8 +12,8 @@ Both limit held axes too; hklrs checks one at its current value, unwrapped,
 as the motor stands, where hklpy2 wraps it to its cut point first. So both
 return nothing for a held axis outside its limits, and they differ on purpose
 for one outside its window that its limits admit only once wrapped: hklpy2
-keeps every solution, hklrs none. Modes needing hkl2, reference or psi are
-left out: the filter does not read the equations.
+keeps every solution, hklrs none. Modes taking parameters are left out: the
+filter does not read the equations.
 """
 import functools
 import math

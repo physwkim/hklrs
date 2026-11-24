@@ -1,0 +1,1412 @@
+{
+ "hkl_version": "5.1.9",
+ "presets": {
+  "APS POLAR": {
+   "default": "4-circles constant phi horizontal",
+   "modes": [
+    {
+     "name": "4-circles constant phi horizontal",
+     "parameters": []
+    },
+    {
+     "name": "zaxis + alpha-fixed",
+     "parameters": []
+    },
+    {
+     "name": "zaxis + beta-fixed",
+     "parameters": []
+    },
+    {
+     "name": "zaxis + alpha=beta",
+     "parameters": []
+    },
+    {
+     "name": "4-circles bissecting horizontal",
+     "parameters": []
+    },
+    {
+     "name": "4-circles constant mu horizontal",
+     "parameters": []
+    },
+    {
+     "name": "4-circles constant chi horizontal",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector tau",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector mu",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector chi",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector phi",
+     "parameters": []
+    },
+    {
+     "name": "psi constant horizontal",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "psi constant vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "E4CH": {
+   "default": "bissector",
+   "modes": [
+    {
+     "name": "bissector",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega",
+     "parameters": []
+    },
+    {
+     "name": "constant_chi",
+     "parameters": []
+    },
+    {
+     "name": "constant_phi",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "E4CV": {
+   "default": "bissector",
+   "modes": [
+    {
+     "name": "bissector",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega",
+     "parameters": []
+    },
+    {
+     "name": "constant_chi",
+     "parameters": []
+    },
+    {
+     "name": "constant_phi",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "E6C": {
+   "default": "bissector_vertical",
+   "modes": [
+    {
+     "name": "bissector_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_chi_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_phi_vertical",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_phi",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_omega",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_mu",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "bissector_horizontal",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_horizontal",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "psi_constant_horizontal",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_mu_horizontal",
+     "parameters": []
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "ESRF BM28 PSIC": {
+   "default": "constant_nu_coplanar",
+   "modes": [
+    {
+     "name": "constant_nu_coplanar",
+     "parameters": []
+    },
+    {
+     "name": "constant_delta_coplanar",
+     "parameters": []
+    },
+    {
+     "name": "constant_eta_noncoplanar",
+     "parameters": []
+    }
+   ],
+   "psi": null
+  },
+  "ESRF ID01 PSIC": {
+   "default": "constant_nu_coplanar",
+   "modes": [
+    {
+     "name": "constant_nu_coplanar",
+     "parameters": []
+    },
+    {
+     "name": "constant_delta_coplanar",
+     "parameters": []
+    },
+    {
+     "name": "constant_eta_noncoplanar",
+     "parameters": []
+    }
+   ],
+   "psi": null
+  },
+  "K4CV": {
+   "default": "bissector",
+   "modes": [
+    {
+     "name": "bissector",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega",
+     "parameters": [
+      {
+       "name": "omega",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_chi",
+     "parameters": [
+      {
+       "name": "chi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_phi",
+     "parameters": [
+      {
+       "name": "phi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "double_diffraction",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "K6C": {
+   "default": "bissector_vertical",
+   "modes": [
+    {
+     "name": "bissector_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega_vertical",
+     "parameters": [
+      {
+       "name": "omega",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_chi_vertical",
+     "parameters": [
+      {
+       "name": "chi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_phi_vertical",
+     "parameters": [
+      {
+       "name": "phi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "lifting_detector_kphi",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_komega",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_mu",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "bissector_horizontal",
+     "parameters": []
+    },
+    {
+     "name": "constant_phi_horizontal",
+     "parameters": [
+      {
+       "name": "phi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_kphi_horizontal",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_horizontal",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_incidence",
+     "parameters": [
+      {
+       "name": "x",
+       "angle": false
+      },
+      {
+       "name": "y",
+       "angle": false
+      },
+      {
+       "name": "z",
+       "angle": false
+      },
+      {
+       "name": "incidence",
+       "angle": true
+      },
+      {
+       "name": "azimuth",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "PETRA3 P09 EH2": {
+   "default": "zaxis + alpha-fixed",
+   "modes": [
+    {
+     "name": "zaxis + alpha-fixed",
+     "parameters": []
+    },
+    {
+     "name": "zaxis + beta-fixed",
+     "parameters": []
+    },
+    {
+     "name": "zaxis + alpha=beta",
+     "parameters": []
+    },
+    {
+     "name": "4-circles bissecting horizontal",
+     "parameters": []
+    },
+    {
+     "name": "4-circles constant omega horizontal",
+     "parameters": []
+    },
+    {
+     "name": "4-circles constant chi horizontal",
+     "parameters": []
+    },
+    {
+     "name": "4-circles constant phi horizontal",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector mu",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector omega",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector chi",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector phi",
+     "parameters": []
+    }
+   ],
+   "psi": null
+  },
+  "PETRA3 P23 4C": {
+   "default": "bissector_vertical",
+   "modes": [
+    {
+     "name": "bissector_vertical",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_omega_t",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_mu",
+     "parameters": []
+    },
+    {
+     "name": "bissector_horizontal",
+     "parameters": []
+    },
+    {
+     "name": "psi_constant",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": null
+  },
+  "PETRA3 P23 6C": {
+   "default": "bissector_vertical",
+   "modes": [
+    {
+     "name": "bissector_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_chi_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_phi_vertical",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_phi",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_omega",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_mu",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "bissector_horizontal",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_horizontal",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "psi_constant_horizontal",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_mu_horizontal",
+     "parameters": []
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "SOLEIL CRISTAL K4C": {
+   "default": "bissector",
+   "modes": [
+    {
+     "name": "bissector",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega",
+     "parameters": [
+      {
+       "name": "omega",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_chi",
+     "parameters": [
+      {
+       "name": "chi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_phi",
+     "parameters": [
+      {
+       "name": "phi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "double_diffraction",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": null
+  },
+  "SOLEIL MARS": {
+   "default": "bissector",
+   "modes": [
+    {
+     "name": "bissector",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega",
+     "parameters": []
+    },
+    {
+     "name": "constant_chi",
+     "parameters": []
+    },
+    {
+     "name": "constant_phi",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "SOLEIL NANOSCOPIUM ROBOT": {
+   "default": "lifting detector rz",
+   "modes": [
+    {
+     "name": "lifting detector rz",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector rs",
+     "parameters": []
+    },
+    {
+     "name": "lifting detector rx",
+     "parameters": []
+    }
+   ],
+   "psi": null
+  },
+  "SOLEIL SIRIUS KAPPA": {
+   "default": "bissector_vertical",
+   "modes": [
+    {
+     "name": "bissector_vertical",
+     "parameters": []
+    },
+    {
+     "name": "constant_omega_vertical",
+     "parameters": [
+      {
+       "name": "omega",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_chi_vertical",
+     "parameters": [
+      {
+       "name": "chi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_phi_vertical",
+     "parameters": [
+      {
+       "name": "phi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "lifting_detector_kphi",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_komega",
+     "parameters": []
+    },
+    {
+     "name": "lifting_detector_mu",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "bissector_horizontal",
+     "parameters": []
+    },
+    {
+     "name": "constant_phi_horizontal",
+     "parameters": [
+      {
+       "name": "phi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_kphi_horizontal",
+     "parameters": []
+    },
+    {
+     "name": "double_diffraction_horizontal",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    },
+    {
+     "name": "psi_constant_vertical",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      },
+      {
+       "name": "psi",
+       "angle": true
+      }
+     ]
+    },
+    {
+     "name": "constant_incidence",
+     "parameters": [
+      {
+       "name": "x",
+       "angle": false
+      },
+      {
+       "name": "y",
+       "angle": false
+      },
+      {
+       "name": "z",
+       "angle": false
+      },
+      {
+       "name": "incidence",
+       "angle": true
+      },
+      {
+       "name": "azimuth",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": [
+    {
+     "name": "psi_vertical_soleil_sirius_kappa",
+     "parameters": [
+      {
+       "name": "h2",
+       "angle": false
+      },
+      {
+       "name": "k2",
+       "angle": false
+      },
+      {
+       "name": "l2",
+       "angle": false
+      }
+     ]
+    }
+   ]
+  },
+  "SOLEIL SIRIUS TURRET": {
+   "default": "lifting_detector_thetah",
+   "modes": [
+    {
+     "name": "lifting_detector_thetah",
+     "parameters": []
+    }
+   ],
+   "psi": null
+  },
+  "SOLEIL SIXS MED1+2": {
+   "default": "pitch_fixed",
+   "modes": [
+    {
+     "name": "pitch_fixed",
+     "parameters": []
+    },
+    {
+     "name": "delta_fixed",
+     "parameters": []
+    }
+   ],
+   "psi": null
+  },
+  "SOLEIL SIXS MED2+2": {
+   "default": "mu_fixed",
+   "modes": [
+    {
+     "name": "mu_fixed",
+     "parameters": []
+    },
+    {
+     "name": "reflectivity",
+     "parameters": []
+    },
+    {
+     "name": "emergence_fixed",
+     "parameters": [
+      {
+       "name": "x",
+       "angle": false
+      },
+      {
+       "name": "y",
+       "angle": false
+      },
+      {
+       "name": "z",
+       "angle": false
+      },
+      {
+       "name": "emergence",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": null
+  },
+  "SOLEIL SIXS MED2+3": {
+   "default": "mu_fixed",
+   "modes": [
+    {
+     "name": "mu_fixed",
+     "parameters": []
+    },
+    {
+     "name": "gamma_fixed",
+     "parameters": []
+    },
+    {
+     "name": "emergence_fixed",
+     "parameters": [
+      {
+       "name": "x",
+       "angle": false
+      },
+      {
+       "name": "y",
+       "angle": false
+      },
+      {
+       "name": "z",
+       "angle": false
+      },
+      {
+       "name": "emergence",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": null
+  },
+  "SOLEIL SIXS MED2+3 v2": {
+   "default": "mu_fixed",
+   "modes": [
+    {
+     "name": "mu_fixed",
+     "parameters": []
+    },
+    {
+     "name": "gamma_fixed",
+     "parameters": []
+    },
+    {
+     "name": "emergence_fixed",
+     "parameters": [
+      {
+       "name": "x",
+       "angle": false
+      },
+      {
+       "name": "y",
+       "angle": false
+      },
+      {
+       "name": "z",
+       "angle": false
+      },
+      {
+       "name": "emergence",
+       "angle": true
+      }
+     ]
+    }
+   ],
+   "psi": null
+  },
+  "TwoC": {
+   "default": null,
+   "modes": [],
+   "psi": null
+  },
+  "ZAXIS": {
+   "default": "zaxis",
+   "modes": [
+    {
+     "name": "zaxis",
+     "parameters": []
+    },
+    {
+     "name": "reflectivity",
+     "parameters": []
+    }
+   ],
+   "psi": null
+  }
+ }
+}

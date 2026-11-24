@@ -119,15 +119,27 @@ create_exception!(
 );
 create_exception!(
     hklrs,
-    UnknownMode,
+    NotPreset,
     InverseError,
-    "No mode has this name; carries name."
+    "The geometry is not a preset and has no named modes; carries geometry."
 );
 create_exception!(
     hklrs,
-    ModeParameter,
+    UnknownMode,
     InverseError,
-    "The mode needs a parameter it was not given; carries mode and needs."
+    "The geometry's preset has no mode of this name; carries geometry and name."
+);
+create_exception!(
+    hklrs,
+    MissingParameter,
+    InverseError,
+    "The mode needs a parameter it was not given; carries mode and parameter."
+);
+create_exception!(
+    hklrs,
+    UnknownParameter,
+    InverseError,
+    "The mode takes no parameter of this name; carries mode and parameter."
 );
 create_exception!(
     hklrs,
@@ -189,9 +201,15 @@ pub(crate) fn to_py(py: Python<'_>, geometry: &hklrs::Geometry, e: E) -> PyErr {
         E::EmergenceRange { emergence } => {
             raise!(EmergenceRange, "emergence" => emergence.to_degrees())
         }
-        E::UnknownMode { name } => raise!(UnknownMode, "name" => name),
-        E::ModeParameter { mode, needs } => {
-            raise!(ModeParameter, "mode" => mode, "needs" => needs)
+        E::NotPreset { geometry } => raise!(NotPreset, "geometry" => geometry),
+        E::UnknownMode { geometry, name } => {
+            raise!(UnknownMode, "geometry" => geometry, "name" => name)
+        }
+        E::MissingParameter { mode, parameter } => {
+            raise!(MissingParameter, "mode" => mode, "parameter" => parameter)
+        }
+        E::UnknownParameter { mode, parameter } => {
+            raise!(UnknownParameter, "mode" => mode, "parameter" => parameter)
         }
     }
 }
@@ -218,6 +236,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NotInStack", py.get_type::<NotInStack>())?;
     m.add("SlitsMoveDetector", py.get_type::<SlitsMoveDetector>())?;
     m.add("EmergenceRange", py.get_type::<EmergenceRange>())?;
+    m.add("NotPreset", py.get_type::<NotPreset>())?;
     m.add("UnknownMode", py.get_type::<UnknownMode>())?;
-    m.add("ModeParameter", py.get_type::<ModeParameter>())
+    m.add("MissingParameter", py.get_type::<MissingParameter>())?;
+    m.add("UnknownParameter", py.get_type::<UnknownParameter>())
 }

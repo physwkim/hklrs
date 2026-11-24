@@ -1,8 +1,8 @@
 //! hkl 5.1.9 pseudo-axis engine solves (golden/hkl_pseudo_set.py) through
-//! hklrs's modes for them: hkl's psi engine as `e4c::psi` and its kin, with
-//! hkl's hkl0 as the request's `Target::Hkl`; q, q2, tth2 and qper_qpar as
-//! `inverse::pseudo`'s under `Target::Detector`; eulerians under
-//! `Target::Eulerians`.
+//! hklrs's modes for them: hkl's psi engine as its preset's
+//! `ModeTable::psi`, with hkl's hkl0 as the request's `Target::Hkl`; q, q2,
+//! tth2 and qper_qpar as `inverse::pseudo`'s under `Target::Detector`;
+//! eulerians under `Target::Eulerians`.
 //!
 //! Every hkl solution is in the hklrs set within MATCH rad, and every hklrs
 //! solution holds the other axes and reads back to the target through
@@ -20,11 +20,12 @@ use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
 use hklrs::inverse::kappa::{Branch, KappaArm};
-use hklrs::inverse::{self, aps_04id_polar, e4c, e6c, k4c, k6c, petra3_p23_6c, soleil_sixs_med};
+use hklrs::inverse::{self, soleil_sixs_med};
 use hklrs::nalgebra::{Matrix3, Point3, Vector3};
 use hklrs::presets::{KAPPA_ALPHA_DEG, preset};
 use hklrs::{
-    Deg, Geometry, InverseError, InverseRequest, Mode, Target, Wavelength, pseudo, scattering,
+    Deg, Geometry, InverseError, InverseRequest, Mode, ModeTable, Target, Wavelength, pseudo,
+    scattering,
 };
 use serde_json::Value;
 
@@ -84,16 +85,8 @@ fn request<'g>(geo: &'g Geometry, case: &Value) -> (Mode<'g>, Target, Vec<f64>) 
     let (mode, target, read) = match case["engine"].as_str().unwrap() {
         "psi" => {
             let (reference, psi) = (vector(), rad(0));
-            let mode = match geometry {
-                "E4CV" | "E4CH" | "SOLEIL MARS" => e4c::psi(geo, reference, psi),
-                "K4CV" => k4c::psi(geo, reference, psi),
-                "E6C" => e6c::psi_vertical(geo, reference, psi),
-                "PETRA3 P23 6C" => petra3_p23_6c::psi_vertical(geo, reference, psi),
-                "K6C" => k6c::psi_vertical(geo, reference, psi),
-                "SOLEIL SIRIUS KAPPA" => k6c::psi_vertical_soleil_sirius_kappa(geo, reference, psi),
-                "APS POLAR" => aps_04id_polar::psi_vertical(geo, reference, psi),
-                g => panic!("psi on {g}"),
-            };
+            let engine = ModeTable::of(geometry).unwrap().psi();
+            let mode = engine.unwrap_or_else(|| panic!("psi on {geometry}"))(geo, reference, psi);
             let hkl0 = common::vec3(&case["hkl0"]);
             (mode, Target::Hkl(hkl0), vec![psi])
         }

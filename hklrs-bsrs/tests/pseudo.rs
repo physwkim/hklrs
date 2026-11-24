@@ -189,6 +189,38 @@ async fn a_pseudo_set_during_mv_hkl_leaves_the_setpoint_where_the_reals_went() {
     assert_close(&hkl(&dx).await, &[0.5, 0.0, 1.0], 1e-9);
 }
 
+/// A device on a preset starts in hkl's default mode for that preset and
+/// moves to an hkl in it.
+#[tokio::test]
+async fn a_preset_device_moves_in_hkls_default_mode() {
+    for (name, default, target) in [
+        ("K4CV", "bissector", [0.0, 0.0, 1.0]),
+        ("K6C", "bissector_vertical", [0.0, 0.0, 1.0]),
+        ("ZAXIS", "zaxis", [1.0, 0.0, 0.5]),
+        ("SOLEIL SIXS MED2+3", "mu_fixed", [1.0, 0.0, 0.5]),
+    ] {
+        let geometry = preset(name).unwrap();
+        let reals = geometry.axes().iter().map(|a| {
+            let real = Arc::new(SoftMotor::new(a.name(), Some(0.0))) as Arc<dyn RealAxis>;
+            (a.name(), real)
+        });
+        let sample = Sample::new(
+            "sample",
+            Lattice::cubic(LAMBDA).unwrap(),
+            Orientation::Manual {
+                u: UnitQuaternion::identity(),
+            },
+        );
+        let source = WavelengthSource::Fixed(Wavelength::new(LAMBDA).unwrap());
+        let dx = Diffractometer::new("dx", geometry.clone(), reals.collect(), source, sample);
+        let dx = Arc::new(dx.unwrap());
+        assert_eq!(dx.mode(), Some(ModeSpec::new(default)), "{name}");
+        let re = RunEngine::new(vec![]);
+        re.run_async(mv_hkl(dx.clone(), target)).await.unwrap();
+        assert_close(&hkl(&dx).await, &target, 1e-9);
+    }
+}
+
 #[tokio::test]
 async fn the_mode_decides_which_axes_move() {
     let dx = e4cv(soft(AT_001));
@@ -210,9 +242,9 @@ async fn the_mode_decides_which_axes_move() {
         dx.set_mode(ModeSpec::new("psi_constant")),
         Err(DiffError::Mode {
             mode: "psi_constant".into(),
-            source: InverseError::ModeParameter {
+            source: InverseError::MissingParameter {
                 mode: "psi_constant".into(),
-                needs: "reference and psi"
+                parameter: "h2"
             }
         })
     );
@@ -229,10 +261,7 @@ async fn the_mode_decides_which_axes_move() {
 }
 
 fn psi_constant(psi: f64) -> ModeSpec {
-    ModeSpec {
-        psi: Some((Vector3::z(), psi.to_radians())),
-        ..ModeSpec::new("psi_constant")
-    }
+    ModeSpec::new("psi_constant").with_psi(Vector3::z(), psi.to_radians())
 }
 
 #[tokio::test]

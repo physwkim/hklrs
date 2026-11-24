@@ -146,10 +146,9 @@ impl Trajectory {
                     Some(mode) => mode,
                     None => psi_mode(&snapshot.geometry)?,
                 };
-                let at = |psi: f64| ModeSpec {
-                    psi: Some((Vector3::from(reference), psi.to_radians())),
-                    ..ModeSpec::new(mode.as_str())
-                };
+                let reference = Vector3::from(reference);
+                let at =
+                    |psi: f64| ModeSpec::new(mode.as_str()).with_psi(reference, psi.to_radians());
                 Ok((psi.into_iter().map(|p| (hkl, at(p))).collect(), mode))
             }
         }
