@@ -13,7 +13,13 @@ rayon = { workspace = true }
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 rust-hdf5 = { workspace = true, optional = true }
+# d6213fa embeds the f1/f2 tables; 42a9772 and earlier read them from
+# their own source tree at run time.
+xrt-rs = { git = "https://github.com/physwkim/xrt-rs", rev = "d6213fa0e9168940f85487f6f923db7963d7a50a", optional = true }
+ndarray = { version = "0.16", optional = true }
 
 [features]
 # binoculars-ng cube files (grid::hdf5)
 hdf5 = ["dep:rust-hdf5"]
+# μ of a material from xrt-rs (absorption::xrt); needs Rust 1.98
+xrt = ["dep:xrt-rs", "dep:ndarray"]

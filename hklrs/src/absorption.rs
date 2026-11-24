@@ -6,20 +6,24 @@ use nalgebra::{Unit, UnitQuaternion, Vector3};
 use crate::units::positive;
 use crate::{Energy, Error, PerMetre};
 
+#[cfg(feature = "xrt")]
+pub mod xrt;
+
 /// Linear attenuation of a material at a photon energy. The core holds no
-/// material tables; a constant μ implements it directly.
+/// material tables; a constant μ implements it directly. A tabulated
+/// material has no μ outside its table.
 pub trait Attenuation {
-    fn mu(&self, energy: Energy) -> PerMetre;
+    fn mu(&self, energy: Energy) -> Result<PerMetre, Error>;
 }
 
 impl Attenuation for PerMetre {
-    fn mu(&self, _energy: Energy) -> PerMetre {
-        *self
+    fn mu(&self, _energy: Energy) -> Result<PerMetre, Error> {
+        Ok(*self)
     }
 }
 
 impl<A: Attenuation + ?Sized> Attenuation for &A {
-    fn mu(&self, energy: Energy) -> PerMetre {
+    fn mu(&self, energy: Energy) -> Result<PerMetre, Error> {
         (**self).mu(energy)
     }
 }
@@ -381,11 +385,11 @@ impl<A> Layer<A> {
 }
 
 impl<A: Attenuation> Layer<A> {
-    pub fn at(&self, energy: Energy) -> Layer {
-        Layer {
-            mu: self.mu.mu(energy),
+    pub fn at(&self, energy: Energy) -> Result<Layer, Error> {
+        Ok(Layer {
+            mu: self.mu.mu(energy)?,
             thickness: self.thickness,
-        }
+        })
     }
 }
 
@@ -420,12 +424,12 @@ impl<A> Default for DetectorPath<A> {
 
 impl<A: Attenuation> DetectorPath<A> {
     /// The path at `energy`, each μ evaluated once.
-    pub fn at(&self, energy: Energy) -> DetectorPath {
-        DetectorPath {
-            air: self.air.as_ref().map(|air| air.mu(energy)),
-            window: self.window.as_ref().map(|w| w.at(energy)),
-            sensor: self.sensor.as_ref().map(|s| s.at(energy)),
-        }
+    pub fn at(&self, energy: Energy) -> Result<DetectorPath, Error> {
+        Ok(DetectorPath {
+            air: self.air.as_ref().map(|air| air.mu(energy)).transpose()?,
+            window: self.window.as_ref().map(|w| w.at(energy)).transpose()?,
+            sensor: self.sensor.as_ref().map(|s| s.at(energy)).transpose()?,
+        })
     }
 }
 
@@ -921,7 +925,7 @@ mod tests {
     fn constant_mu_ignores_energy() {
         let mu = PerMetre::new(1234.5).unwrap();
         for kev in [1.0, 8.048, 100.0] {
-            assert_eq!(mu.mu(Energy::new(kev).unwrap()), mu);
+            assert_eq!(mu.mu(Energy::new(kev).unwrap()), Ok(mu));
         }
     }
 

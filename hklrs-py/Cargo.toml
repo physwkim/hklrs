@@ -3,7 +3,8 @@ name = "hklrs-py"
 description = "Python bindings of hklrs"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# hklrs's xrt feature, always on here
+rust-version = "1.98"
 license.workspace = true
 publish = false
 
@@ -12,6 +13,6 @@ name = "hklrs_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-hklrs = { path = "../hklrs" }
+hklrs = { path = "../hklrs", features = ["xrt"] }
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
 numpy = "0.28"

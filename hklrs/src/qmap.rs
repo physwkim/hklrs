@@ -255,11 +255,11 @@ pub fn absorption<A: Attenuation>(
     let sample = SlabFrame::new(
         &absorber.slab,
         &absorber.beam,
-        absorber.sample.mu(energy),
+        absorber.sample.mu(energy)?,
         &(poses.source * geometry.beam_direction()),
         &poses.sample.rotation,
     )?;
-    let path = absorber.detector.at(energy);
+    let path = absorber.detector.at(energy)?;
     let paths = detector
         .modules()
         .iter()
@@ -759,9 +759,9 @@ mod tests {
     struct Recording(RefCell<Vec<f64>>);
 
     impl Attenuation for Recording {
-        fn mu(&self, energy: Energy) -> PerMetre {
+        fn mu(&self, energy: Energy) -> Result<PerMetre, Error> {
             self.0.borrow_mut().push(energy.kev());
-            per_metre(1e3)
+            Ok(per_metre(1e3))
         }
     }
 

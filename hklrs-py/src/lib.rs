@@ -8,7 +8,10 @@ mod inverse_error;
 mod normalise;
 mod pseudo_set;
 
-use hklrs::absorption::{Absorber, Beam, DetectorPath, Face, Layer, Masked, Slab};
+use std::sync::Arc;
+
+use hklrs::absorption::xrt::Material;
+use hklrs::absorption::{Absorber, Attenuation, Beam, DetectorPath, Face, Layer, Masked, Slab};
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -1212,22 +1215,71 @@ impl PyBeam {
     }
 }
 
-fn per_metre(mu: f64) -> PyResult<hklrs::PerMetre> {
-    hklrs::PerMetre::new(mu).map_err(err)
+/// A material by its `formula`, (element, count per formula unit) pairs,
+/// and `density` (g/cm³), whose mu xrt gives from Chantler's total
+/// cross-sections at the beam energy.
+#[pyclass(name = "Material", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyMaterial(Arc<Material>);
+
+#[pymethods]
+impl PyMaterial {
+    #[new]
+    fn new(formula: Vec<(String, f64)>, density: f64) -> PyResult<Self> {
+        let formula: Vec<(&str, f64)> = formula.iter().map(|(e, q)| (e.as_str(), *q)).collect();
+        Material::new(&formula, density)
+            .map(|m| Self(Arc::new(m)))
+            .map_err(err)
+    }
+
+    /// Linear attenuation (1/m) at `wavelength` (Å).
+    fn mu(&self, wavelength: f64) -> PyResult<f64> {
+        let energy = hklrs::Wavelength::new(wavelength).map_err(err)?.energy();
+        self.0.mu(energy).map(|mu| mu.per_metre()).map_err(err)
+    }
 }
 
-fn layer(layer: Option<(f64, f64)>) -> PyResult<Option<Layer>> {
+/// A mu as Python gives it: 1/m at every energy, or a `Material`'s.
+#[derive(FromPyObject)]
+enum MuArg {
+    PerMetre(f64),
+    Material(PyMaterial),
+}
+
+enum Mu {
+    PerMetre(hklrs::PerMetre),
+    Material(Arc<Material>),
+}
+
+impl Attenuation for Mu {
+    fn mu(&self, energy: hklrs::Energy) -> Result<hklrs::PerMetre, hklrs::Error> {
+        match self {
+            Self::PerMetre(mu) => Ok(*mu),
+            Self::Material(m) => m.mu(energy),
+        }
+    }
+}
+
+fn attenuation(mu: MuArg) -> PyResult<Mu> {
+    match mu {
+        MuArg::PerMetre(mu) => hklrs::PerMetre::new(mu).map(Mu::PerMetre).map_err(err),
+        MuArg::Material(m) => Ok(Mu::Material(m.0)),
+    }
+}
+
+fn layer(layer: Option<(MuArg, f64)>) -> PyResult<Option<Layer<Mu>>> {
     layer
-        .map(|(mu, thickness)| Layer::new(per_metre(mu)?, thickness).map_err(err))
+        .map(|(mu, thickness)| Layer::new(attenuation(mu)?, thickness).map_err(err))
         .transpose()
 }
 
-/// What absorbs: the sample `slab` of linear attenuation `mu` (1/m) lit by
-/// `beam`, and on the way to each pixel `air` (1/m), a `window` transmitted
-/// and a `sensor` absorbed, each (mu 1/m, thickness m along the detector
-/// normal). An absent term weighs 1. Every mu is the same at all energies.
+/// What absorbs: the sample `slab` of linear attenuation `mu` lit by
+/// `beam`, and on the way to each pixel `air`, a `window` transmitted and a
+/// `sensor` absorbed, each (mu, thickness m along the detector normal). A
+/// mu is 1/m, the same at all energies, or a `Material`, taken at the beam
+/// energy. An absent term weighs 1.
 #[pyclass(name = "Absorber", frozen)]
-struct PyAbsorber(Absorber<hklrs::PerMetre>);
+struct PyAbsorber(Absorber<Mu>);
 
 #[pymethods]
 impl PyAbsorber {
@@ -1236,17 +1288,17 @@ impl PyAbsorber {
     fn new(
         slab: &PySlab,
         beam: &PyBeam,
-        mu: f64,
-        air: Option<f64>,
-        window: Option<(f64, f64)>,
-        sensor: Option<(f64, f64)>,
+        mu: MuArg,
+        air: Option<MuArg>,
+        window: Option<(MuArg, f64)>,
+        sensor: Option<(MuArg, f64)>,
     ) -> PyResult<Self> {
         Ok(Self(Absorber {
             slab: slab.0,
             beam: beam.0,
-            sample: per_metre(mu)?,
+            sample: attenuation(mu)?,
             detector: DetectorPath {
-                air: air.map(per_metre).transpose()?,
+                air: air.map(attenuation).transpose()?,
                 window: layer(window)?,
                 sensor: layer(sensor)?,
             },
@@ -1349,6 +1401,7 @@ fn hklrs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPixelDetector>()?;
     m.add_class::<PySlab>()?;
     m.add_class::<PyBeam>()?;
+    m.add_class::<PyMaterial>()?;
     m.add_class::<PyAbsorber>()?;
     submodule(m, "xu", |xu| {
         xu.add_class::<PyXuArea>()?;

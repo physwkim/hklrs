@@ -122,6 +122,9 @@ pub enum Error {
     RayParallel,
     #[error("a point detector has no extent for a ray to meet")]
     PointDetector,
+    #[cfg(feature = "xrt")]
+    #[error("material: {reason}")]
+    Material { reason: String },
     #[cfg(feature = "hdf5")]
     #[error("HDF5: {reason}")]
     Hdf5 { reason: String },
