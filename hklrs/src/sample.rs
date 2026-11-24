@@ -153,6 +153,39 @@ impl Sample {
             .solve_upper_triangular(&q_crystal)
             .expect("B has a positive diagonal for every valid Lattice")
     }
+
+    /// Surface axes as columns in the sample frame, from the current UB: z
+    /// along UB·`normal` (Miller indices of the surface plane), x along the
+    /// part of UB·`in_plane` (Miller indices) within that plane, y = z × x.
+    /// z is the lattice-plane normal; a miscut surface's own normal differs
+    /// from it by the miscut, which UB does not hold.
+    pub fn surface_frame(
+        &self,
+        normal: &Vector3<f64>,
+        in_plane: &Vector3<f64>,
+    ) -> Result<Rotation3<f64>, Error> {
+        for (what, v) in [("surface normal hkl", normal), ("in-plane hkl", in_plane)] {
+            if !(v.iter().all(|x| x.is_finite()) && v.norm() > 0.0) {
+                return Err(Error::ZeroVector { what: what.into() });
+            }
+        }
+        let ub = self.ub();
+        let (n, r) = (ub * normal, ub * in_plane);
+        let sin = sin_between(&n, &r);
+        // NaN when a cross product overflows
+        if sin.is_nan() || sin < PARALLEL_SIN {
+            return Err(Error::ParallelDirections {
+                what: "surface normal and in-plane hkl",
+            });
+        }
+        // triad's columns are (z, x, y); a cyclic shift keeps it proper
+        let t = triad(&n, &r);
+        Ok(Rotation3::from_matrix_unchecked(Matrix3::from_columns(&[
+            t.column(1).into_owned(),
+            t.column(2).into_owned(),
+            t.column(0).into_owned(),
+        ])))
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +271,61 @@ mod tests {
         assert_eq!(r.q_sample(), &s.q_sample);
         assert!(matches!(
             Reflection::measure(Vector3::x(), &geo, &[0.2, 0.0], wl, &p),
+            Err(Error::ZeroVector { .. })
+        ));
+    }
+
+    #[test]
+    fn surface_frame_puts_the_normal_on_z_and_in_plane_on_x() {
+        let (l, u) = (triclinic(), u_true());
+        let s = Sample::new("t", l, Orientation::Manual { u });
+        // in_plane is not perpendicular to normal in the sample frame
+        let (normal, in_plane) = (Vector3::new(1.0, 1.0, 1.0), Vector3::new(1.0, 0.0, 0.0));
+        let f = s.surface_frame(&normal, &in_plane).unwrap();
+        let m = f.matrix();
+        assert!((m.transpose() * m - Matrix3::identity()).abs().max() < 1e-14);
+        assert!((m.determinant() - 1.0).abs() < 1e-14);
+        let n = f.inverse() * (s.ub() * normal);
+        assert!(n.x.abs() < 1e-14 && n.y.abs() < 1e-14 && n.z > 0.0, "{n}");
+        let r = f.inverse() * (s.ub() * in_plane);
+        assert!(r.y.abs() < 1e-14 && r.x > 0.0, "{r}");
+        // only the directions count
+        let f2 = s.surface_frame(&(2.0 * normal), &(0.5 * in_plane)).unwrap();
+        assert!(f2.angle_to(&f) < 1e-14);
+    }
+
+    #[test]
+    fn surface_frame_of_a_vertical_surface_is_binoculars_rx() {
+        // binoculars QxQyQz on a VERTICAL surface (Python binoculars
+        // 93956b2, sixs.py:376-377) takes frame [[1,0,0],[0,0,1],[0,-1,0]]
+        // = Rx(−π/2): U = I, surface (010), x along (100)
+        let cubic = Lattice::from_degrees(3.92, 3.92, 3.92, 90.0, 90.0, 90.0).unwrap();
+        let s = Sample::new(
+            "t",
+            cubic,
+            Orientation::Manual {
+                u: UnitQuaternion::identity(),
+            },
+        );
+        let f = s.surface_frame(&Vector3::y(), &Vector3::x()).unwrap();
+        let rx = Matrix3::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0);
+        assert!((f.matrix() - rx).abs().max() < 1e-15, "{}", f.matrix());
+    }
+
+    #[test]
+    fn surface_frame_rejects_parallel_and_zero_hkl() {
+        let s = Sample::new("t", triclinic(), Orientation::Manual { u: u_true() });
+        let n = Vector3::new(1.0, 1.0, 1.0);
+        assert!(matches!(
+            s.surface_frame(&n, &(-2.0 * n)),
+            Err(Error::ParallelDirections { .. })
+        ));
+        assert!(matches!(
+            s.surface_frame(&n, &Vector3::zeros()),
+            Err(Error::ZeroVector { .. })
+        ));
+        assert!(matches!(
+            s.surface_frame(&Vector3::new(f64::NAN, 0.0, 1.0), &Vector3::x()),
             Err(Error::ZeroVector { .. })
         ));
     }
