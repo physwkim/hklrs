@@ -37,15 +37,12 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> Option<SolutionSet<'a>> {
         .iter()
         .map(|e| plane(system, e, &ki, &poses.sample.rotation))
         .collect::<Option<Vec<_>>>()?;
-    // The rotation of the stack's axes `range`, at `current`.
-    let turn = |range: &[usize]| {
-        range.iter().fold(UnitQuaternion::identity(), |r, &i| {
-            r * geometry.axes()[i].transform(current[i]).rotation
-        })
-    };
     let written: Vec<Vec<f64>> = match (&at[..], &planes[..]) {
         (&[p], &[(a, alpha)]) => {
-            let (outer, inner) = (turn(&stack[..p]), turn(&stack[p + 1..]));
+            let (outer, inner) = (
+                turn(geometry, current, &stack[..p]),
+                turn(geometry, current, &stack[p + 1..]),
+            );
             let axis = rotation(geometry, stack[p]).ok()?.1;
             solve_component(&axis, &(inner * beam), &(outer.inverse() * a), alpha)
                 .values()
@@ -54,21 +51,10 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> Option<SolutionSet<'a>> {
                 .collect()
         }
         (&[p1, p2], &[first, second]) => {
-            let outer = turn(&stack[..p1]);
-            let (between, inner) = (turn(&stack[p1 + 1..p2]), turn(&stack[p2 + 1..]));
-            let [a1, a2] = [p1, p2].map(|p| rotation(geometry, stack[p]).map(|r| r.1));
-            let (a1, a2) = (a1.ok()?, a2.ok()?);
-            let b = inner * beam;
+            let pair = Pair::new(geometry, [stack[p1], stack[p2]])?;
             let mut out = Vec::new();
             for t in meet(first, second)? {
-                let w = outer.inverse() * t;
-                let roots = solve_component(&a2, &b, &(between.inverse() * a1), w.dot(&a1));
-                for v2 in roots.values() {
-                    let turned = between * (arm(geometry, stack[p2], v2) * b);
-                    for v1 in spin(&a1, &turned, &w).values() {
-                        out.push(vec![v1, v2]);
-                    }
-                }
+                out.extend(pair.reach(current, &t).into_iter().map(Vec::from));
             }
             out
         }
@@ -90,9 +76,54 @@ pub(super) fn search<'a>(system: &'a System<'a>) -> Option<SolutionSet<'a>> {
     Some(set)
 }
 
-/// Axis `i` turned to `v`.
-fn arm(geometry: &Geometry, i: usize, v: f64) -> UnitQuaternion<f64> {
-    geometry.axes()[i].transform(v).rotation
+/// The rotation of the stack's axes `range` at `values`.
+fn turn(geometry: &Geometry, values: &[f64], range: &[usize]) -> UnitQuaternion<f64> {
+    range.iter().fold(UnitQuaternion::identity(), |r, &i| {
+        r * geometry.axes()[i].transform(values[i]).rotation
+    })
+}
+
+/// Two detector rotations that take k̂f where it must go: the inner by
+/// k̂f's component along the outer, the outer by spinning onto it.
+pub(super) struct Pair<'g> {
+    geometry: &'g Geometry,
+    /// Stack positions, outer first.
+    at: [usize; 2],
+    axes: [Vector3<f64>; 2],
+}
+
+impl<'g> Pair<'g> {
+    /// `None` unless `axes`, outer first, are rotations of the detector
+    /// stack.
+    pub(super) fn new(geometry: &'g Geometry, axes: [usize; 2]) -> Option<Self> {
+        let stack = geometry.detector_stack();
+        let [p1, p2] = axes.map(|i| stack.iter().position(|&s| s == i));
+        let [a1, a2] = axes.map(|i| rotation(geometry, i).map(|r| r.1));
+        Some(Self {
+            geometry,
+            at: [p1?, p2?],
+            axes: [a1.ok()?, a2.ok()?],
+        })
+    }
+
+    /// The pair's values, outer first, that turn k̂f to unit `kf`, the
+    /// stack's other axes at `values`.
+    pub(super) fn reach(&self, values: &[f64], kf: &Vector3<f64>) -> Vec<[f64; 2]> {
+        let (geometry, [p1, p2], [a1, a2]) = (self.geometry, self.at, self.axes);
+        let stack = geometry.detector_stack();
+        let outer = turn(geometry, values, &stack[..p1]);
+        let between = turn(geometry, values, &stack[p1 + 1..p2]);
+        let b = turn(geometry, values, &stack[p2 + 1..]) * geometry.beam_direction().into_inner();
+        let w = outer.inverse() * kf;
+        let mut out = Vec::new();
+        for v2 in solve_component(&a2, &b, &(between.inverse() * a1), w.dot(&a1)).values() {
+            let turned = between * (geometry.axes()[stack[p2]].transform(v2).rotation * b);
+            for v1 in spin(&a1, &turned, &w).values() {
+                out.push([v1, v2]);
+            }
+        }
+        out
+    }
 }
 
 /// `e` of `system` as a plane of k̂f, with k̂i and the sample rotation: the

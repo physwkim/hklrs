@@ -56,17 +56,22 @@ impl Problem {
     /// Every Q̂ in the lab the detector constraint allows. `Naz` leaves Q̂ free
     /// about the beam, so every caller routes it apart.
     fn detector(&self, d: &Detector) -> Vec<Vector3<f64>> {
-        let c2 = 1.0 - 2.0 * self.st * self.st;
+        // k̂f = (sin δ, cos δ cos ν, cos δ sin ν) has k̂f·ŷ = cos 2θ, so
+        // Q̂ = (k̂f − ŷ)/(2 sin θ) has y = −sin θ, taken as is: k̂f − ŷ
+        // cancels there.
         let q = |nu: f64, delta: f64| {
-            (you::kout(&[0.0, 0.0, 0.0, 0.0, nu, delta]) - Vector3::y()) / (2.0 * self.st)
+            let s = 2.0 * self.st;
+            Vector3::new(delta.sin() / s, -self.st, delta.cos() * nu.sin() / s)
         };
         match *d {
-            Detector::Delta(delta) => cos_eq(delta.cos(), c2)
+            Detector::Delta(delta) => self
+                .other_arm(delta)
                 .values()
                 .into_iter()
                 .map(|nu| q(nu, delta))
                 .collect(),
-            Detector::Nu(nu) => cos_eq(nu.cos(), c2)
+            Detector::Nu(nu) => self
+                .other_arm(nu)
                 .values()
                 .into_iter()
                 .map(|delta| q(nu, delta))
@@ -74,6 +79,25 @@ impl Problem {
             Detector::Qaz(qaz) => vec![self.at_qaz(qaz)],
             Detector::Naz(..) => unreachable!("naz fixes no lab Q̂"),
         }
+    }
+
+    /// x with cos x · cos `a` = cos 2θ: the other detector circle where one
+    /// is at `a`. acos of cos 2θ / cos a would lose a root near 0 or π to
+    /// rounding, so x comes from sin²(x/2) and cos²(x/2), each a product
+    /// without cancellation over cos a.
+    fn other_arm(&self, a: f64) -> Roots {
+        let cos_a = a.cos();
+        if cos_a.abs() < EPS {
+            return cos_eq(cos_a, 1.0 - 2.0 * self.st * self.st);
+        }
+        let (h, c, st) = ((a / 2.0).sin(), (a / 2.0).cos(), self.st);
+        let [sin2, cos2] = [(st - h) * (st + h), (c - st) * (c + st)].map(|p| p / cos_a);
+        // cos_eq's tolerance on cos x, 1e-9, on its half angles.
+        if sin2.min(cos2) < -0.5e-9 {
+            return Roots::Empty;
+        }
+        let x = 2.0 * sin2.max(0.0).sqrt().atan2(cos2.max(0.0).sqrt());
+        Roots::Two([x, -x])
     }
 
     /// Lab frame [Q̂, e₁, e₂] for Q̂ along `q`, e₁ the beam's part normal to
