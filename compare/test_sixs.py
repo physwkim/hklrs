@@ -41,10 +41,7 @@ def test_sixs_matches_binoculars(case):
     hklrs's rot (p_h + (sdd, 0, 0) - c_h); they differ by
     rot ((p_h - p_b) - (c_h - c_b) - c_b.x x)."""
     det, centre, out = calibrated(case)
-    if det.mask is None:
-        assert out.mask is None
-    else:
-        assert np.array_equal(out.mask, det.mask)
+    assert np.array_equal(out.mask, det.mask)
     rot = rx(case["detrot"])
     before = [((s, f), np.array(p)) for s, f, *p in case["before"]]
     assert before[4][0] == centre

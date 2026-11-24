@@ -141,7 +141,7 @@ def test_qsurface_is_binoculars_qxqyqz(binoculars, name):
 
     axes = cube.axes
     assert [a[0] for a in axes] == ["qx_surface", "qy_surface", "qz_surface"]
-    keep = np.ones(det.shape, bool) if det.mask is None else ~det.mask
+    keep = ~det.mask
     bins = [np.rint((q_last[..., k] - xmin) / DX).astype(int)[:, keep] for k, (xmin, _) in
             enumerate(g3)]
     shape = tuple(n for _, n in g3)

@@ -16,8 +16,8 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 # a saved configuration reads back bit for bit
 serde_json = { workspace = true, features = ["float_roundtrip"] }
-# unmaintained upstream; reads the YAML 1.1 hklpy2 writes, anchors included
-serde_yaml = "0.9"
+# reads the YAML hklpy2 (PyYAML) writes, anchors included
+serde-saphyr = { version = "2.2", default-features = false, features = ["serialize", "deserialize"] }
 thiserror = { workspace = true }
 rust-hdf5 = { workspace = true, optional = true }
 
