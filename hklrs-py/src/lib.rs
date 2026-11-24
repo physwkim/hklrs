@@ -287,6 +287,15 @@ impl PySample {
         Ok(Self(hklrs::Sample::new(name, lattice.0, o)))
     }
 
+    /// U from libhkl's sample parameters ux, uy, uz in degrees (a SIXS
+    /// NeXus file's Ux/Uy/Uz): U = Rx(ux)·Ry(uy)·Rz(uz).
+    #[staticmethod]
+    fn from_ux_uy_uz(name: &str, lattice: &PyLattice, ux: f64, uy: f64, uz: f64) -> PyResult<Self> {
+        let o = hklrs::Orientation::from_ux_uy_uz(radians(ux), radians(uy), radians(uz))
+            .map_err(err)?;
+        Ok(Self(hklrs::Sample::new(name, lattice.0, o)))
+    }
+
     fn u(&self) -> [[f64; 3]; 3] {
         rows(&self.0.u().to_rotation_matrix().into_inner())
     }
