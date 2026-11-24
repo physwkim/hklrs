@@ -542,6 +542,31 @@ mod tests {
         assert!((x - Point3::new(0.0, 1.0, 0.0)).norm() < 1e-15);
     }
 
+    /// XU-5: xu loads one global `kappa_dir` for every kappa circle, and one
+    /// of its variants reads it from an uninitialised buffer. Two kappa
+    /// circles with different axes each turn about their own.
+    #[test]
+    fn xu_5_each_kappa_circle_turns_about_its_own_axis() {
+        let a1 = crate::presets::kappa_axis(crate::Rad(50f64.to_radians()));
+        let a2 = crate::presets::kappa_axis(crate::Rad(-30f64.to_radians()));
+        let g = Geometry::builder("kk")
+            .sample_rotation("k1", a1)
+            .sample_rotation("k2", a2)
+            .build()
+            .unwrap();
+        let about = |axis: [f64; 3], v: f64| {
+            UnitQuaternion::from_axis_angle(&Unit::new_normalize(Vector3::from(axis)), v)
+        };
+        let (v1, v2) = (0.7, -1.2);
+        let got = g.poses(&[v1, v2]).unwrap().sample.rotation;
+        assert!(got.angle_to(&(about(a1, v1) * about(a2, v2))) < 1e-15);
+        for shared in [about(a1, v1) * about(a1, v2), about(a2, v1) * about(a2, v2)] {
+            assert!(got.angle_to(&shared) > 0.1);
+        }
+        let second = g.poses(&[0.0, v2]).unwrap().sample.rotation;
+        assert!(second.angle_to(&about(a2, v2)) < 1e-15);
+    }
+
     #[test]
     fn builder_rejects_conflicts() {
         let e = Geometry::builder("t")

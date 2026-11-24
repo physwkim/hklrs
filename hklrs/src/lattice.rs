@@ -204,11 +204,91 @@ mod tests {
         ));
     }
 
+    /// HKL-5: hkl accepts the cell (1, 1, 1, 0°, 0°, 0°) with V² = 0 and its
+    /// get_B then fails, leaving the caller's B unwritten.
     #[test]
-    fn cubic_b_is_diagonal() {
-        let b = Lattice::cubic(1.54).unwrap().b_matrix();
-        let k = TAU / 1.54;
-        assert!((b - Matrix3::from_diagonal_element(k)).abs().max() < 1e-15);
+    fn hkl_5_degenerate_cell_is_rejected_and_every_cell_has_a_b() {
+        assert_eq!(
+            Lattice::from_degrees(1.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            Err(Error::LatticeAngle {
+                name: "alpha",
+                value: 0.0
+            })
+        );
+        // γ = α + β is a flat cell: V² is exactly 0 at (30, 30, 60) and
+        // (60, 60, 120), which hkl's D < 0 test accepts; around it a cell is
+        // either rejected or has a positive volume and a finite B
+        for (alpha, beta) in [(30.0, 30.0), (60.0, 60.0), (45.0, 80.0), (89.0, 90.0)] {
+            for d in [-1e-9, -1e-13, 0.0, 1e-13, 1e-9] {
+                let gamma = alpha + beta + d;
+                match Lattice::from_degrees(1.0, 1.0, 1.0, alpha, beta, gamma) {
+                    Ok(l) => assert!(
+                        l.volume() > 0.0 && l.b_matrix().iter().all(|x| x.is_finite()),
+                        "({alpha}, {beta}, {gamma}): V {}",
+                        l.volume()
+                    ),
+                    Err(e) => assert!(matches!(e, Error::LatticeVolume { .. }), "{e}"),
+                }
+            }
+        }
+    }
+
+    /// PY2-8: hklpy2's `Lattice.B` divides the reciprocal matrix by the cell
+    /// volume again: B₀₀ = 0.01995 for a = 3, b = 5, c = 7 instead of 2π/3.
+    #[test]
+    fn py2_8_b_of_an_orthogonal_cell_is_two_pi_over_its_edges() {
+        for l in [Lattice::cubic(1.54), Lattice::orthorhombic(3.0, 5.0, 7.0)] {
+            let l = l.unwrap();
+            let got = l.b_matrix();
+            let want = TAU * Matrix3::from_diagonal(&Vector3::new(1.0 / l.a, 1.0 / l.b, 1.0 / l.c));
+            assert!((got - want).abs().max() < 1e-15, "{got}");
+        }
+    }
+
+    /// PY2-9: hklpy2 takes the lattice angles as degrees for B whatever
+    /// their unit. Hexagonal B in closed form, γ = 120° given as radians
+    /// and as degrees.
+    #[test]
+    fn py2_9_b_honours_the_lattice_angles() {
+        let (a, c) = (3.0, 5.0);
+        let s = 3f64.sqrt();
+        let want = TAU
+            * Matrix3::new(
+                2.0 / (a * s),
+                1.0 / (a * s),
+                0.0,
+                0.0,
+                1.0 / a,
+                0.0,
+                0.0,
+                0.0,
+                1.0 / c,
+            );
+        for l in [
+            Lattice::new(a, a, c, Rad(FRAC_PI_2), Rad(FRAC_PI_2), Rad(2.0 * PI / 3.0)),
+            Lattice::from_degrees(a, a, c, 90.0, 90.0, 120.0),
+            Lattice::hexagonal(a, c),
+        ] {
+            let got = l.unwrap().b_matrix();
+            assert!((got - want).abs().max() < 1e-14, "{got}");
+        }
+    }
+
+    /// PY2-10: hklpy2 tests γ for degeneracy by sin(γ) of the angle in
+    /// degrees, so a valid γ whose degree value is a multiple of π (π° or
+    /// 36π° ≈ 113.1°) is rejected as too close to 0 or 180°.
+    #[test]
+    fn py2_10_gamma_with_a_degree_value_on_a_multiple_of_pi_is_valid() {
+        for gamma in [PI, 36.0 * PI] {
+            let l = Lattice::from_degrees(4.0, 4.0, 4.0, 90.0, 90.0, gamma).unwrap();
+            close(l.gamma().0, gamma.to_radians(), 1e-15);
+            close(l.volume(), 64.0 * gamma.to_radians().sin(), 1e-12);
+            // Bᵀ B = (2π)² G⁻¹
+            let b = l.b_matrix();
+            let g_inv = l.metric().try_inverse().unwrap() * TAU * TAU;
+            let scale = g_inv.abs().max();
+            assert!((b.transpose() * b - g_inv).abs().max() < 1e-12 * scale);
+        }
     }
 
     #[test]

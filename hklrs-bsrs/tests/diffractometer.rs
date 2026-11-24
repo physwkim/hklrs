@@ -12,7 +12,7 @@ use bsrs::core::{ConfigureArgs, Document};
 use bsrs::engine::{DocumentSink, RunEngine};
 use hklrs::nalgebra::{Matrix3, UnitQuaternion};
 use hklrs::presets::preset;
-use hklrs::{Lattice, Orientation, Sample, Wavelength};
+use hklrs::{InverseError, Lattice, ModeSpec, Orientation, Sample, Wavelength};
 use hklrs_bsrs::{DiffError, Diffractometer, Measured, RealAxis, WavelengthSource};
 use serde_json::{Value, json};
 
@@ -244,18 +244,117 @@ fn py2_3_removing_another_sample_keeps_the_current_one() {
         })
     );
     assert_eq!(
-        dx.remove_sample("B"),
-        Err(DiffError::UnknownSample {
-            name: "B".into(),
-            known: vec!["sample".into()],
-        })
-    );
-    assert_eq!(
         dx.add_sample(cubic("sample", UnitQuaternion::identity())),
         Err(DiffError::DuplicateSample {
             name: "sample".into()
         })
     );
+}
+
+/// PY2-4: hklpy2's `remove_sample` documents no error for an unknown name
+/// and raises `KeyError`.
+#[test]
+fn py2_4_removing_an_unknown_sample_is_an_error() {
+    let dx = e4cv(&motors([0.0; 4]));
+    dx.add_sample(cubic("A", UnitQuaternion::identity()))
+        .unwrap();
+    dx.select_sample("A").unwrap();
+    assert_eq!(
+        dx.remove_sample("B"),
+        Err(DiffError::UnknownSample {
+            name: "B".into(),
+            known: vec!["A".into(), "sample".into()],
+        })
+    );
+    assert_eq!(dx.sample_names(), ["A", "sample"]);
+    assert_eq!(dx.current_sample().name, "A");
+}
+
+/// PY2-2: hklpy2's `core.mode = "nonsense"` returns normally and keeps the
+/// old mode.
+#[test]
+fn py2_2_an_unknown_mode_is_an_error_and_keeps_the_mode() {
+    let dx = e4cv(&motors([0.0; 4]));
+    dx.set_mode(ModeSpec::new("constant_phi")).unwrap();
+    let unknown = Err(DiffError::Mode {
+        mode: "nonsense".into(),
+        source: InverseError::UnknownMode {
+            name: "nonsense".into(),
+        },
+    });
+    assert_eq!(dx.set_mode(ModeSpec::new("nonsense")), unknown);
+    assert_eq!(dx.mode(), Some(ModeSpec::new("constant_phi")));
+    let values = HashMap::from([("e4cv_mode".to_owned(), json!("nonsense"))]);
+    assert_eq!(dx.configure(&values), unknown);
+    assert_eq!(dx.mode(), Some(ModeSpec::new("constant_phi")));
+}
+
+/// PY2-14: hklpy2's `set_solver` keeps the previous geometry's mode, and
+/// every solve then fails on it. A device's mode is one its geometry
+/// builds: E6C's default is its own, another geometry's mode or
+/// configuration is refused, and the device still solves after.
+#[test]
+fn py2_14_the_mode_is_always_one_the_geometry_builds() {
+    let geometry = preset("E6C").unwrap();
+    let reals = geometry
+        .axes()
+        .iter()
+        .map(|a| {
+            let real = Arc::new(SoftMotor::new(a.name(), Some(0.0))) as Arc<dyn RealAxis>;
+            (a.name(), real)
+        })
+        .collect();
+    let source = WavelengthSource::Fixed(wavelength());
+    let sample = cubic("sample", UnitQuaternion::identity());
+    let dx = Diffractometer::new("e6c", geometry.clone(), reals, source, sample).unwrap();
+    let default = Some(ModeSpec::new("bissector_vertical"));
+    assert_eq!(dx.mode(), default);
+    let solves = || dx.inverse([1.0, 0.0, 0.0], &[0.0; 6], wavelength()).is_ok();
+    assert!(solves());
+    assert!(matches!(
+        dx.set_mode(ModeSpec::new("bissector")),
+        Err(DiffError::Mode { .. })
+    ));
+    let e4cv_config = e4cv(&motors([0.0; 4])).config();
+    assert!(matches!(
+        dx.load_config(&e4cv_config),
+        Err(DiffError::ConfigGeometry { .. })
+    ));
+    assert_eq!(dx.mode(), default);
+    assert!(solves());
+}
+
+/// HKL-4: hkl's `UB_set` documents B as kept and fits the lattice: a = 5
+/// and UB = (2π/6)·R read back a = 6. `set_ub` keeps the lattice and
+/// refuses a UB that is no rotation of it.
+#[test]
+fn hkl_4_set_ub_keeps_the_lattice() {
+    let lattice = Lattice::cubic(5.0).unwrap();
+    let sample = Sample::new(
+        "sample",
+        lattice,
+        Orientation::Manual {
+            u: UnitQuaternion::identity(),
+        },
+    );
+    let dx = e4cv_with(
+        &motors([0.0; 4]),
+        WavelengthSource::Fixed(wavelength()),
+        sample,
+    );
+    let r = UnitQuaternion::from_euler_angles(0.3, -0.4, 1.2).to_rotation_matrix();
+    let before = dx.current_sample();
+    let e = dx.set_ub(&(TAU / 6.0 * r.matrix())).unwrap_err();
+    assert!(
+        matches!(e, DiffError::Core(hklrs::Error::NotRotation { .. })),
+        "{e}"
+    );
+    assert_eq!(dx.current_sample(), before);
+    let ub = r.matrix() * lattice.b_matrix();
+    dx.set_ub(&ub).unwrap();
+    let after = dx.current_sample();
+    assert_eq!(after.lattice, lattice);
+    assert!((after.ub() - ub).abs().max() < 1e-12);
 }
 
 #[tokio::test]

@@ -342,6 +342,68 @@ mod tests {
         assert!(d < 1e-14, "{d}");
     }
 
+    /// HKL-3: hkl's `hkl_matrix_to_euler` takes asin(M₀₂) unclamped, so a U
+    /// whose M₀₂ rounds to 1 + 2e-16 gives uy = NaN. U here never passes
+    /// through Euler angles: at that gimbal lock it stays finite and exact.
+    #[test]
+    fn hkl_3_u_at_the_gimbal_lock_with_m02_above_one_is_finite() {
+        use std::f64::consts::FRAC_PI_2;
+        let exact = hkl_euler(0.3, FRAC_PI_2, -0.8);
+        assert_eq!(exact[(0, 2)], 1.0);
+        let mut rounded = exact;
+        rounded[(0, 2)] = 1.0 + f64::EPSILON;
+        let s = Sample::new(
+            "t",
+            triclinic(),
+            Orientation::from_u_matrix(&rounded).unwrap(),
+        );
+        let d = (s.u().to_rotation_matrix().into_inner() - exact)
+            .abs()
+            .max();
+        assert!(d < 1e-15, "{d}");
+        assert!(s.ub().iter().all(|x| x.is_finite()));
+        // Busing-Levy onto the same U
+        let (l, u) = (triclinic(), s.u());
+        let o = Orientation::busing_levy(
+            measured(&l, &u, [1.0, 2.0, 3.0], 1.0),
+            measured(&l, &u, [-2.0, 1.0, 0.0], 1.0),
+        )
+        .unwrap();
+        let angle = Sample::new("t", l, o).u().angle_to(&u);
+        assert!(angle < 1e-12, "{angle}");
+    }
+
+    /// HKL-2: hkl calls UB singular when |det UB| < 1e-6 and then reads an
+    /// hkl it never wrote: E4CV at tth 20° reads (0, 0, 22.55) for a cubic
+    /// a = 100 but garbage for a = 1000 (det UB 2.5e-7). hkl and the
+    /// orientation of a cubic cell scale with a, whatever its size.
+    #[test]
+    fn hkl_2_hkl_and_orientation_hold_for_any_cell_size() {
+        let geo = crate::presets::preset("E4CV").unwrap();
+        let (lambda, u) = (1.54, u_true());
+        let wl = Wavelength::new(lambda).unwrap();
+        let point = Point3::from(geo.beam_direction().into_inner());
+        let values = geo.values_from_degrees(&[10.0, 0.0, 0.0, 20.0]).unwrap();
+        let q = scattering(&geo, &values, wl, &point).unwrap().q_sample;
+        for a in [1.54, 100.0, 1000.0, 1e4, 1e6] {
+            let l = Lattice::cubic(a).unwrap();
+            let identity = Orientation::Manual {
+                u: UnitQuaternion::identity(),
+            };
+            let hkl = Sample::new("t", l, identity).hkl(&q);
+            let want = 2.0 * 10f64.to_radians().sin() * a / lambda;
+            let d = (hkl - Vector3::new(0.0, 0.0, want)).abs().max();
+            assert!(d <= 1e-12 * want, "a = {a}: {hkl}");
+            let o = Orientation::busing_levy(
+                measured(&l, &u, [1.0, 0.0, 0.0], 1.0),
+                measured(&l, &u, [0.0, 1.0, 1.0], 1.0),
+            )
+            .unwrap();
+            let angle = Sample::new("t", l, o).u().angle_to(&u);
+            assert!(angle < 1e-12, "a = {a}: {angle}");
+        }
+    }
+
     #[test]
     fn primary_is_exact_secondary_sets_the_plane() {
         // the secondary direction is off by a rotation about the primary

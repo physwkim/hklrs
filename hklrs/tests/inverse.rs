@@ -103,8 +103,10 @@ fn bissector_finds_all_eight_branches() {
     assert_eq!(solutions.len(), 8, "{solutions:?}");
 }
 
+/// HKL-6: hkl restarts its solver from the process-global unseeded
+/// `rand()`, so a result depends on what solved before it, in any thread.
 #[test]
-fn same_request_gives_identical_list() {
+fn hkl_6_same_request_gives_identical_list() {
     for name in ["E4CV", "E4CH"] {
         let geo = preset(name).unwrap();
         let current = current(&geo);
@@ -117,12 +119,96 @@ fn same_request_gives_identical_list() {
                         .collect::<Vec<_>>()
                 })
             };
-            assert_eq!(
-                bits(req.solve()),
-                bits(req.solve()),
-                "{name} {}",
-                mode.name()
-            );
+            let first = bits(req.solve());
+            let _ = request(&mode, Vector3::new(-1.0, 1.0, 2.0), &current).solve();
+            let again = std::thread::scope(|s| s.spawn(|| bits(req.solve())).join().unwrap());
+            assert_eq!(first, bits(req.solve()), "{name} {}", mode.name());
+            assert_eq!(first, again, "{name} {} in another thread", mode.name());
+        }
+    }
+}
+
+/// HKL-7: hkl's zero-angle kf is +x whatever the source direction, so its
+/// inverse is wrong for any other beam. E4CV turned so the beam runs along
+/// z, with UB turned alike, has E4CV's solutions.
+#[test]
+fn hkl_7_inverse_follows_the_beam_direction() {
+    // x → z, z → −x, y kept
+    let turn = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -FRAC_PI_2);
+    let [omega, chi, phi, tth] = [
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0],
+    ];
+    let turned = Geometry::builder("E4CV along z")
+        .sample_rotation("omega", omega)
+        .sample_rotation("chi", chi)
+        .sample_rotation("phi", phi)
+        .detector_rotation("tth", tth)
+        .beam_direction([0.0, 0.0, 1.0])
+        .build()
+        .unwrap();
+    assert!((turn * Vector3::x() - Vector3::z()).norm() < 1e-15);
+    assert!((turn * Vector3::z() + Vector3::x()).norm() < 1e-15);
+    let e4cv = preset("E4CV").unwrap();
+    let current = current(&e4cv);
+    let mut solved = 0;
+    for (mode, turned_mode) in modes(&e4cv).iter().zip(modes(&turned)) {
+        for t in TARGETS {
+            let hkl = Vector3::from(t);
+            let want = request(mode, hkl, &current).solve();
+            let got = InverseRequest {
+                ub: turn.to_rotation_matrix().into_inner() * ub(),
+                ..request(&turned_mode, hkl, &current)
+            }
+            .solve();
+            let close = match (&want, &got) {
+                (Ok(w), Ok(g)) => {
+                    solved += 1;
+                    w.len() == g.len()
+                        && w.iter()
+                            .zip(g)
+                            .all(|(a, b)| a.iter().zip(b).all(|(x, y)| wrap(x - y).abs() < 1e-9))
+                }
+                (w, g) => w == g,
+            };
+            assert!(close, "{} {hkl}: {want:?} vs {got:?}", mode.name());
+        }
+    }
+    // 21 of the 24 solve in E4CV
+    assert!(solved >= 21, "{solved}");
+}
+
+/// HKL-8: hkl's K4CV eulerians list items keep the sample quaternion from
+/// before the solve, 1.50 and 2.15 away from the solution's for (10, 100,
+/// 30) and (10, −60, 200). A solution's sample rotation is the E4CV
+/// rotation of the target eulerians. (10, 100, 30) has χ = 2α, where the
+/// two kappa images meet: a multiple root, `Degenerate` here.
+#[test]
+fn hkl_8_eulerians_solutions_turn_the_sample_to_the_target() {
+    let geo = preset("K4CV").unwrap();
+    let e4cv = preset("E4CV").unwrap();
+    let arm = ["komega", "kappa", "kphi"].map(|n| geo.axis_index(n).unwrap());
+    let mode = Mode::new_kappa(&geo, "eulerians", arm, &arm, vec![]).unwrap();
+    let current = current(&geo);
+    for target in [[10.0, 80.0, 30.0], [10.0, -60.0, 200.0]] {
+        let eulerians = target.map(f64::to_radians);
+        let want = e4cv
+            .poses(&[eulerians[0], eulerians[1], eulerians[2], 0.0])
+            .unwrap()
+            .sample
+            .rotation;
+        let solutions = InverseRequest {
+            target: Target::Eulerians(eulerians),
+            ..request(&mode, Vector3::x(), &current)
+        }
+        .solve()
+        .unwrap();
+        assert!(!solutions.is_empty());
+        for s in &solutions {
+            let got = geo.poses(s).unwrap().sample.rotation;
+            assert!(got.angle_to(&want) < 1e-12, "{target:?} {s:?}");
         }
     }
 }
@@ -164,18 +250,105 @@ fn held_axis_never_moves() {
     }
 }
 
+/// HKL-17: hkl checks |UB·h| ≤ 2k only in modes whose operations table
+/// has `set`, so (7 0 0) for a = 4.1 at 1.54 Å is "unreachable" in E4C but
+/// "none of the functions were solved" in 10 E6C, 5 K4CV and 12 K6C modes.
 #[test]
-fn unreachable_target_is_err_for_every_mode() {
+fn hkl_17_unreachable_target_is_err_for_every_mode() {
+    let hkl = Vector3::new(7.0, 0.0, 0.0);
+    let q = (ub() * hkl).norm();
+    let q_max = 2.0 * wavelength().wavenumber();
+    let unreachable = |mode: Result<Mode, InverseError>, current: &[f64]| {
+        let mode = mode.unwrap();
+        assert_eq!(
+            request(&mode, hkl, current).solve(),
+            Err(InverseError::Unreachable { q, q_max }),
+            "{}",
+            mode.name()
+        );
+    };
     for name in ["E4CV", "E4CH"] {
         let geo = preset(name).unwrap();
         let current = current(&geo);
-        let hkl = Vector3::new(6.0, 0.0, 0.0);
-        let q = (ub() * hkl).norm();
-        let q_max = 2.0 * wavelength().wavenumber();
         for mode in modes(&geo) {
+            unreachable(Ok(mode), &current);
+        }
+    }
+    let (hkl2, reference) = (Vector3::new(1.0, 1.0, 0.0), Vector3::new(0.0, 0.0, 1.0));
+    let six = [5.0, 10.0, 20.0, 30.0, 15.0, 40.0];
+    let geo = preset("E6C").unwrap();
+    let at = geo.values_from_degrees(&six).unwrap();
+    for mode in [
+        e6c::bissector_vertical(&geo),
+        e6c::constant_omega_vertical(&geo),
+        e6c::constant_chi_vertical(&geo),
+        e6c::constant_phi_vertical(&geo),
+        e6c::lifting_detector_phi(&geo),
+        e6c::lifting_detector_omega(&geo),
+        e6c::lifting_detector_mu(&geo),
+        e6c::double_diffraction_vertical(&geo, hkl2),
+        e6c::bissector_horizontal(&geo),
+        e6c::double_diffraction_horizontal(&geo, hkl2),
+        e6c::psi_constant_vertical(&geo, reference, 0.4),
+        e6c::psi_constant_horizontal(&geo, reference, 0.4),
+        e6c::constant_mu_horizontal(&geo),
+    ] {
+        unreachable(mode, &at);
+    }
+    let geo = preset("K4CV").unwrap();
+    let four = current(&geo);
+    for mode in [
+        k4c::bissector(&geo),
+        k4c::constant_omega(&geo, 0.2),
+        k4c::constant_chi(&geo, 0.3),
+        k4c::constant_phi(&geo, 0.4),
+        k4c::double_diffraction(&geo, hkl2),
+        k4c::psi_constant(&geo, reference, 0.4),
+    ] {
+        unreachable(mode, &four);
+    }
+    let geo = preset("K6C").unwrap();
+    let at = geo.values_from_degrees(&six).unwrap();
+    for mode in [
+        k6c::bissector_vertical(&geo),
+        k6c::constant_omega_vertical(&geo, 0.2),
+        k6c::constant_chi_vertical(&geo, 0.3),
+        k6c::constant_phi_vertical(&geo, 0.4),
+        k6c::lifting_detector_kphi(&geo),
+        k6c::lifting_detector_komega(&geo),
+        k6c::lifting_detector_mu(&geo),
+        k6c::double_diffraction_vertical(&geo, hkl2),
+        k6c::bissector_horizontal(&geo),
+        k6c::constant_phi_horizontal(&geo, 0.4),
+        k6c::constant_kphi_horizontal(&geo),
+        k6c::double_diffraction_horizontal(&geo, hkl2),
+        k6c::psi_constant_vertical(&geo, reference, 0.4),
+        k6c::constant_incidence(&geo, reference, 0.1, 0.2),
+    ] {
+        unreachable(mode, &at);
+    }
+}
+
+/// PY2-7: hklpy2's th_tth backend takes asin(qλ/4π) unchecked, so q = 13 at
+/// λ = 1 escapes as `ValueError: math domain error` instead of "no
+/// solution". hklrs has no th_tth geometry (TwoC has no modes); a Q-sample
+/// target beyond 2k is unreachable in every E4C mode.
+#[test]
+fn py2_7_q_beyond_two_k_is_unreachable() {
+    let wavelength = Wavelength::new(1.0).unwrap();
+    let q_max = 2.0 * wavelength.wavenumber();
+    for name in ["E4CV", "E4CH"] {
+        let geo = preset(name).unwrap();
+        let current = current(&geo);
+        for mode in modes(&geo) {
+            let req = InverseRequest {
+                wavelength,
+                target: Target::QSample(Vector3::new(13.0, 0.0, 0.0)),
+                ..request(&mode, Vector3::x(), &current)
+            };
             assert_eq!(
-                request(&mode, hkl, &current).solve(),
-                Err(InverseError::Unreachable { q, q_max }),
+                req.solve(),
+                Err(InverseError::Unreachable { q: 13.0, q_max }),
                 "{name} {}",
                 mode.name()
             );
