@@ -12,6 +12,8 @@ step below xmin, so global bin k is node k. Binned regions are not compared:
 xu places a Nav pixel on its block's first pixel (test_xu, XU-13).
 Run with the py2 interpreter: python -I -m pytest compare
 """
+import re
+
 import numpy as np
 import pytest
 
@@ -35,6 +37,8 @@ from test_xu import (  # noqa: F401  (fixtures: name, kappa_axis_in_xu_frame)
 xu = pytest.importorskip("xrayutilities")
 
 DX = 2.0**-10  # exact, so xu's (xmax - xmin) / (n - 1) is DX to the bit
+# (name, kind, step, anchor) of each axis in a "grids differ" message
+AXES = r'\("(\w+)", "(\w+)", ([^,]+), ([^)]+)\)'
 FRAMES = 5
 STEP = 0.02  # degrees on the innermost sample axis per frame
 COUNT_TIME = 2.0  # a power of two, so halving xu's mean is exact
@@ -149,6 +153,27 @@ def test_angle_axes_are_degrees():
     assert int(cube.contributions.sum()) == tth.size
 
 
+def test_a_grid_mismatch_gives_angle_axes_in_degrees():
+    """Adding to a cube of other angle binnings is refused with both grids
+    in degrees, as they went in."""
+    geo = hklrs.Geometry.preset("E4CV")
+    det = hklrs_area(params(AREA_BASE, {}))
+    ang = angles("E4CV", 1, "frame_map_angles")[0]
+    raw = np.ones(hklrs.q_map(geo, ang, WL, det)[0].shape)
+    cube = fm.Cube()
+    fm.FrameMap(geo, det, [(0.5, 0.25)] * 3, "angles").add(cube, ang, WL, raw)
+    with pytest.raises(ValueError, match="^grids differ") as e:
+        fm.FrameMap(geo, det, [(0.2, 0.25)] * 3, "angles").add(cube, ang, WL, raw)
+    m = str(e.value)
+    axes = [(n, k, float(s), float(a)) for n, k, s, a in re.findall(AXES, m)]
+    assert axes == [
+        (n, "angle", pytest.approx(s), pytest.approx(0.25))
+        for s in (0.5, 0.2)
+        for n in ("delta_lab", "gamma_lab", "tth")
+    ], m
+    assert int(cube.contributions.sum()) == raw.size
+
+
 def custom_setup():
     geo = hklrs.Geometry.preset("E4CV")
     det = hklrs_area(params(AREA_BASE, {}))
@@ -243,6 +268,16 @@ def test_custom_planes_are_held_to_the_axes(returns, error, match):
     with pytest.raises(error, match=match):
         m.add(cube, ang, WL, np.ones(det.shape))
     assert cube.axes == []
+
+
+def test_an_angle_without_a_bin_is_in_degrees():
+    geo, det, ang = custom_setup()
+    p = fm.Custom(lambda planes, context: (planes[0], np.full_like(planes[1], np.nan)),
+                  [("a", "linear"), ("b", "angle")])
+    m = fm.FrameMap(geo, det, [(DX, 0.0), (0.25, 0.0)], p)
+    with pytest.raises(ValueError) as e:
+        m.add(fm.Cube(), ang, WL, np.ones(det.shape))
+    assert str(e.value) == "coordinate NaN° has no bin of width 0.25°"
 
 
 def test_custom_setup_is_refused():

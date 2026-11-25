@@ -7,8 +7,8 @@
 //! The input configuration is the cubes' own: centralpixel 205,177 (fast,
 //! slow), sdd 1.170 m, detrot 90°, attenuation_coefficient 1.87.
 //!
-//! - Lattice: bin k is centred on k·res in both, `Binning::new(res,
-//!   -res/2)` here, and the steps are the same double.
+//! - Lattice: bin k is centred on k·res in both, `Binning::new(Linear,
+//!   res, -res/2)` here, and the steps are the same double.
 //! - Extent: binoculars sizes each axis from ⌊min/res⌋ to ⌈max/res⌉ over
 //!   every pixel of every frame it projects, masked or of weight 0
 //!   (space.py:47-57, :766-769), so its axes have planes no pixel is binned
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use hklrs::frame_map::{FrameMap, MappedFrame};
-use hklrs::grid::{Binning, Bounds, Projected};
+use hklrs::grid::{Binning, Bounds, CoordKind, Projected};
 use hklrs::normalise::{FrameScalars, NormalisedFrame, PixelFields, Region};
 use hklrs::presets::preset;
 use hklrs::projection::Projection;
@@ -218,7 +218,7 @@ pub fn compare(
     assert_eq!(axes, ["mu", "omega", "delta", "gamma"]);
     let binnings: Vec<Binning> = resolution
         .iter()
-        .map(|&r| Binning::new(r, -r / 2.0).unwrap())
+        .map(|&r| Binning::new(CoordKind::Linear, r, -r / 2.0).unwrap())
         .collect();
     let map = FrameMap::new(
         geometry,

@@ -124,13 +124,14 @@ fn setup(doc: &Value, c: &Value) -> Setup {
     } else {
         at3(k, &c["at"])
     };
+    let kind = kind(c);
     Setup {
         cut: Cut::new(
-            kind(c),
+            kind,
             intdir(c["intdir"].as_str().unwrap()),
             at,
             dis,
-            Binning::new(dx, anchor).unwrap(),
+            Binning::new(kind.coord().kind(), dx, anchor).unwrap(),
         )
         .unwrap(),
         wl: Wavelength::new(f(&doc["wavelength"])).unwrap(),
@@ -339,7 +340,7 @@ fn a_nan_raw_count_is_masked_by_the_normaliser_and_counted_by_reason() {
 }
 
 #[test]
-fn merge_of_two_halves_is_the_whole_and_checks_binning() {
+fn merge_of_two_halves_is_the_whole_and_checks_the_cut() {
     let doc = load("xu_cuts.json");
     let c = doc["cases"]
         .as_array()
@@ -364,6 +365,7 @@ fn merge_of_two_halves_is_the_whole_and_checks_binning() {
             .accumulate(s.wl, fp, zip(&s.q[a..b], px2[a..b].to_vec()))
             .unwrap();
         let both = lo.clone().merge(hi.clone()).unwrap();
+        assert_eq!(both.cut(), &s.cut);
         assert_eq!(both.skipped(), whole.skipped());
         assert_eq!(both.bins().count(), whole.bins().count());
         for ((k1, x), (k2, y)) in both.bins().zip(whole.bins()) {
@@ -380,12 +382,14 @@ fn merge_of_two_halves_is_the_whole_and_checks_binning() {
                 .all(|((_, x), (_, y))| close(x.counts, y.counts))
         );
     }
+    // the same cut binned twice as wide
+    let b = s.cut.binning();
     let other = Cut::new(
-        CutKind::Radial,
-        IntDir::Omega,
-        [0.0; 3],
-        1.0,
-        Binning::new(0.5, 0.0).unwrap(),
+        s.cut.kind(),
+        s.cut.intdir(),
+        at3("radial", &c["at"]),
+        s.cut.half_width(),
+        Binning::new(s.cut.kind().coord().kind(), 2.0 * b.step(), b.anchor()).unwrap(),
     )
     .unwrap();
     let a = s
@@ -395,7 +399,10 @@ fn merge_of_two_halves_is_the_whole_and_checks_binning() {
     let b = other
         .accumulate(s.wl, Footprint::Point, std::iter::empty())
         .unwrap();
-    assert!(a.clone().merge(b).is_err());
+    assert!(matches!(
+        a.clone().merge(b),
+        Err(CutError::Value(hklrs::Error::GridMismatch { .. }))
+    ));
     let w = s
         .cut
         .accumulate(s.wl, Footprint::Width(0.1), std::iter::empty())

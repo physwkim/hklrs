@@ -17,6 +17,8 @@ use rayon::prelude::*;
 use crate::normalise::{Normalised, NormalisedFrame};
 use crate::{Error, Image};
 
+pub mod fuzzy;
+use fuzzy::{Footprint, Pieces};
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
 
@@ -29,11 +31,14 @@ pub struct Binning {
 }
 
 impl Binning {
-    pub fn new(step: f64, anchor: f64) -> Result<Self, Error> {
+    /// Bins of width `step` from `anchor` on a coordinate of `kind`, which
+    /// only names the unit of a refused step.
+    pub fn new(kind: CoordKind, step: f64, anchor: f64) -> Result<Self, Error> {
         if !(step.is_finite() && step > 0.0) {
-            return Err(Error::NotPositive {
+            return Err(Error::Width {
                 what: "bin step",
                 value: step,
+                kind,
             });
         }
         if !anchor.is_finite() {
@@ -53,19 +58,13 @@ impl Binning {
         self.anchor
     }
 
-    /// The bin rule: global bin ⌊(v − anchor)/step⌋.
-    pub fn bin(&self, v: f64) -> Result<i64, Error> {
+    /// The bin rule: global bin ⌊(v − anchor)/step⌋; `None` when that is
+    /// not an `i64` (NaN, or too far from the anchor).
+    pub fn bin(&self, v: f64) -> Option<i64> {
         let k = ((v - self.anchor) / self.step).floor();
         // 2⁶³ is exact in f64; NaN fails both comparisons
         const LIMIT: f64 = 9_223_372_036_854_775_808.0;
-        if (-LIMIT..LIMIT).contains(&k) {
-            Ok(k as i64)
-        } else {
-            Err(Error::NoBin {
-                value: v,
-                step: self.step,
-            })
-        }
+        (-LIMIT..LIMIT).contains(&k).then_some(k as i64)
     }
 
     /// Lower edge of global bin `k`.
@@ -74,9 +73,11 @@ impl Binning {
     }
 }
 
-/// What a projection coordinate measures, which fixes the unit it is
-/// shown in: an angle is radians in hklrs and degrees in Python; a linear
-/// coordinate (Å⁻¹, r.l.u., an index) is shown as it is.
+/// What a coordinate measures, which fixes the unit it is shown in: an
+/// angle is radians in hklrs and degrees in Python; a linear coordinate
+/// (Å⁻¹, r.l.u., an index, a translation in m) is shown as it is. An error
+/// that reports such a value carries its kind, so Python shows the value
+/// in its own unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoordKind {
     Angle,
@@ -189,18 +190,20 @@ impl Axis {
         })
     }
 
-    fn describe(&self) -> (String, f64, f64) {
-        describe(&self.coord, self.binning)
+    fn describe(&self) -> (Coord, Binning) {
+        (self.coord.clone(), self.binning)
     }
 }
 
 /// One frame in projection coordinates: per dimension its coordinate,
-/// which the projection gives, and its values over the shape of the pixels
-/// it was projected from.
+/// which the projection gives, its values over the shape of the pixels it
+/// was projected from, and the footprint that lays a pixel on its bins (a
+/// point unless [`with_footprint`](Self::with_footprint) says otherwise).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Projected {
     coords: Vec<Coord>,
     planes: Vec<Image<f64>>,
+    footprints: Vec<Footprint>,
 }
 
 impl Projected {
@@ -215,7 +218,12 @@ impl Projected {
         for p in &planes {
             p.check("projection plane", shape)?;
         }
-        Ok(Self { coords, planes })
+        let footprints = vec![Footprint::Point; coords.len()];
+        Ok(Self {
+            coords,
+            planes,
+            footprints,
+        })
     }
 
     pub fn coords(&self) -> &[Coord] {
@@ -233,14 +241,6 @@ impl Projected {
 
     pub fn pixels(&self) -> usize {
         self.planes[0].data().len()
-    }
-
-    /// Global bins of pixel `i` into `out`.
-    fn bins(&self, binnings: &[Binning], i: usize, out: &mut [i64]) -> Result<(), Error> {
-        for ((k, b), plane) in out.iter_mut().zip(binnings).zip(&self.planes) {
-            *k = b.bin(plane.data()[i])?;
-        }
-        Ok(())
     }
 
     fn check_binnings(&self, binnings: &[Binning]) -> Result<(), Error> {
@@ -270,24 +270,21 @@ fn unmasked(
         .collect())
 }
 
-/// The unmasked pixels of one frame and their global bins, flattened
-/// pixel-major. Every pixel is checked here, before any state changes.
+/// The unmasked pixels of one frame laid by their footprints on
+/// `binnings`. Every pixel is checked here, before any state changes.
 fn binned(
     binnings: &[Binning],
     points: &Projected,
     pixels: &NormalisedFrame,
-) -> Result<(Vec<Normalised>, Vec<i64>), Error> {
+) -> Result<Pieces, Error> {
     points.check_binnings(binnings)?;
     let taken = unmasked(points, pixels)?;
-    let mut values = Vec::with_capacity(taken.len());
-    let mut bins = Vec::with_capacity(taken.len() * binnings.len());
-    let mut k = vec![0; binnings.len()];
+    let mut pieces = Pieces::with_capacity(binnings.len(), taken.len());
     for (i, n) in taken {
-        points.bins(binnings, i, &mut k)?;
-        values.push(n);
-        bins.extend_from_slice(&k);
+        let coords = points.planes.iter().map(|p| p.data()[i]);
+        pieces.push(n, &points.coords, &points.footprints, binnings, coords)?;
     }
-    Ok((values, bins))
+    Ok(pieces)
 }
 
 /// (first, last) per dimension of flattened `bins`, `None` when empty.
@@ -335,8 +332,8 @@ impl Bounds {
                 right: describe_coords(&points.coords, &self.binnings),
             });
         }
-        let (_, bins) = binned(&self.binnings, points, pixels)?;
-        let Some(frame) = span(self.binnings.len(), &bins) else {
+        let pieces = binned(&self.binnings, points, pixels)?;
+        let Some(frame) = span(self.binnings.len(), pieces.bins()) else {
             return Ok(());
         };
         match &mut self.seen {
@@ -366,15 +363,11 @@ impl Bounds {
     }
 }
 
-fn describe(coord: &Coord, binning: Binning) -> (String, f64, f64) {
-    (coord.name().to_owned(), binning.step, binning.anchor)
-}
-
-fn describe_coords(coords: &[Coord], binnings: &[Binning]) -> Vec<(String, f64, f64)> {
+fn describe_coords(coords: &[Coord], binnings: &[Binning]) -> Vec<(Coord, Binning)> {
     coords
         .iter()
-        .zip(binnings)
-        .map(|(c, b)| describe(c, *b))
+        .cloned()
+        .zip(binnings.iter().copied())
         .collect()
 }
 
@@ -497,9 +490,10 @@ impl Cube {
     }
 
     /// Adds every unmasked pixel of `pixels`, the normalised frame of
-    /// `points`, to the bin it falls in. The axes stay as they are; returns
-    /// how many unmasked pixels fell outside them and were not added. On
-    /// error the cube is unchanged.
+    /// `points`, to the bins its footprint reaches. The axes stay as they
+    /// are: the part of a footprint outside them is not added. Returns how
+    /// many unmasked pixels were not wholly inside. On error the cube is
+    /// unchanged.
     pub fn add(&mut self, points: &Projected, pixels: &NormalisedFrame) -> Result<usize, Error> {
         let (rows, outside) = self.placed(points, pixels)?;
         self.sums().deposit(&rows);
@@ -563,20 +557,19 @@ impl Cube {
         }
     }
 
-    /// The unmasked pixels of one frame inside the axes, (offset, value) in
-    /// pixel order, and how many fell outside.
+    /// The pieces of one frame's unmasked pixels inside the axes in pixel
+    /// order, and how many pixels were not wholly inside.
     fn placed(
         &self,
         points: &Projected,
         pixels: &NormalisedFrame,
-    ) -> Result<(Vec<(usize, Normalised)>, usize), Error> {
+    ) -> Result<(Vec<Row>, usize), Error> {
         if self.is_empty() {
             return Ok((Vec::new(), unmasked(points, pixels)?.len()));
         }
         let binnings: Vec<Binning> = self.axes.iter().map(|a| a.binning).collect();
         self.check_grid(&points.coords, &binnings)?;
-        let (values, bins) = binned(&binnings, points, pixels)?;
-        Ok(self.rows(&bins, &values))
+        Ok(self.rows(&binned(&binnings, points, pixels)?))
     }
 
     /// One-pass filling: widens the axes to take every unmasked pixel of
@@ -592,29 +585,35 @@ impl Cube {
         if !self.is_empty() {
             self.check_grid(&points.coords, binnings)?;
         }
-        let (values, bins) = binned(binnings, points, pixels)?;
-        let Some(span) = span(binnings.len(), &bins) else {
+        let pieces = binned(binnings, points, pixels)?;
+        let Some(span) = span(binnings.len(), pieces.bins()) else {
             return Ok(());
         };
         let axes = union(&self.axes, &axes_over(&points.coords, binnings, &span)?)?;
         if axes != self.axes {
             *self = Self::zeros(axes)?.with(self);
         }
-        let (rows, outside) = self.rows(&bins, &values);
+        let (rows, outside) = self.rows(&pieces);
         debug_assert_eq!(outside, 0, "the axes span every unmasked pixel");
         self.sums().deposit(&rows);
         Ok(())
     }
 
-    /// (offset, value) of each of `values` whose row of flattened `bins`
-    /// lies inside the axes, in row order, and how many rows did not.
-    fn rows(&self, bins: &[i64], values: &[Normalised]) -> (Vec<(usize, Normalised)>, usize) {
-        let rows: Vec<_> = bins
-            .chunks_exact(self.axes.len())
-            .zip(values)
-            .filter_map(|(k, &n)| Some((self.offset(k)?, n)))
-            .collect();
-        let outside = values.len() - rows.len();
+    /// The pieces inside the axes as rows, in piece order, and how many
+    /// pixels had a piece outside.
+    fn rows(&self, pieces: &Pieces) -> (Vec<Row>, usize) {
+        let mut rows = Vec::with_capacity(pieces.len());
+        let mut outside = 0;
+        for (n, ps) in pieces.pixels() {
+            let mut inside = true;
+            for (k, share) in ps {
+                match self.offset(k) {
+                    Some(off) => rows.push((off, share, n)),
+                    None => inside = false,
+                }
+            }
+            outside += usize::from(!inside);
+        }
         (rows, outside)
     }
 
@@ -653,6 +652,9 @@ impl Cube {
     }
 }
 
+/// One piece of a pixel: (offset, share, value).
+type Row = (usize, f64, Normalised);
+
 /// The sums of a cube's bins from offset `lo` on, as many as the slices
 /// hold.
 struct Sums<'a> {
@@ -681,13 +683,14 @@ impl<'a> Sums<'a> {
         }
     }
 
-    /// Adds each value to the bin at its offset: its counts, its weight and
-    /// one contribution, as a bin of a cut takes a pixel.
-    fn deposit(&mut self, rows: &[(usize, Normalised)]) {
-        for &(off, n) in rows {
+    /// Adds each piece to the bin at its offset: its share of the counts
+    /// and of the weight, and one contribution, as a bin of a cut takes a
+    /// pixel.
+    fn deposit(&mut self, rows: &[Row]) {
+        for &(off, share, n) in rows {
             let i = off - self.lo;
-            self.photons[i] += n.counts();
-            self.weight[i] += n.weight().get();
+            self.photons[i] += share * n.counts();
+            self.weight[i] += share * n.weight().get();
             self.contributions[i] += 1;
         }
     }
@@ -729,7 +732,7 @@ mod tests {
     const TWO: &[&str] = &["x", "y"];
 
     fn unit() -> Binning {
-        Binning::new(1.0, 0.0).unwrap()
+        Binning::new(CoordKind::Linear, 1.0, 0.0).unwrap()
     }
 
     fn linear(names: &[&'static str]) -> Vec<Coord> {
@@ -797,7 +800,7 @@ mod tests {
             assert_eq!(b.bin(edge - 1e-12).unwrap(), k - 1, "below {edge}");
             assert_eq!(b.edge(k), edge);
         }
-        let shifted = Binning::new(0.5, 0.25).unwrap();
+        let shifted = Binning::new(CoordKind::Linear, 0.5, 0.25).unwrap();
         assert_eq!(shifted.bin(0.25).unwrap(), 0);
         assert_eq!(shifted.bin(0.2499).unwrap(), -1);
         assert_eq!(shifted.bin(0.75).unwrap(), 1);
@@ -808,7 +811,7 @@ mod tests {
         // anchor −½ gives binoculars' bins centred on the integers; the two
         // rules then differ only on the edges, which rint sends to the even
         // neighbour (0.5 down, 1.5 up) and floor always up.
-        let centred = Binning::new(1.0, -0.5).unwrap();
+        let centred = Binning::new(CoordKind::Linear, 1.0, -0.5).unwrap();
         let mut differ = Vec::new();
         for v in [-1.5, -0.5, 0.5, 1.5, 2.5, 0.49, 1.51, -0.7, 3.0] {
             let (f, r) = (centred.bin(v).unwrap(), rint_bin(v, 1.0));
@@ -822,14 +825,22 @@ mod tests {
     }
 
     #[test]
-    fn values_without_a_bin_are_errors() {
+    fn values_without_a_bin_have_none() {
         let b = unit();
         for v in [f64::NAN, f64::INFINITY, -f64::INFINITY, 1e300] {
-            assert!(matches!(b.bin(v), Err(Error::NoBin { .. })), "{v}");
+            assert_eq!(b.bin(v), None, "{v}");
         }
-        assert!(Binning::new(0.0, 0.0).is_err());
-        assert!(Binning::new(f64::NAN, 0.0).is_err());
-        assert!(Binning::new(1.0, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn a_bin_step_is_refused_on_its_coordinate_kind() {
+        for (kind, step) in [(CoordKind::Angle, 0.0), (CoordKind::Linear, f64::NAN)] {
+            assert!(matches!(
+                Binning::new(kind, step, 0.0),
+                Err(Error::Width { what: "bin step", kind: k, .. }) if k == kind
+            ));
+        }
+        assert!(Binning::new(CoordKind::Linear, 1.0, f64::INFINITY).is_err());
     }
 
     #[test]
@@ -934,7 +945,7 @@ mod tests {
         let dims = cube(ONE, &[&[0.0]], &[1.0]);
         let mut step = Cube::default();
         step.add_growing(
-            &[unit(), Binning::new(0.5, 0.0).unwrap()],
+            &[unit(), Binning::new(CoordKind::Linear, 0.5, 0.0).unwrap()],
             &points(TWO, &[&[0.0, 0.0]]),
             &unweighted(&[1.0]),
         )
@@ -942,7 +953,7 @@ mod tests {
         let mut anchor = Cube::default();
         anchor
             .add_growing(
-                &[unit(), Binning::new(1.0, 0.5).unwrap()],
+                &[unit(), Binning::new(CoordKind::Linear, 1.0, 0.5).unwrap()],
                 &points(TWO, &[&[0.0, 0.0]]),
                 &unweighted(&[1.0]),
             )
@@ -953,6 +964,33 @@ mod tests {
                 Err(Error::GridMismatch { .. })
             ));
         }
+    }
+
+    /// Grids that differ only in a coordinate's kind name it in the error,
+    /// at every site that refuses them.
+    #[test]
+    fn a_grid_mismatch_names_the_coordinate_kind() {
+        let angle = points_of(vec![Coord::angle("x")], &[&[0.5]]);
+        let line = points(ONE, &[&[0.5]]);
+        let one = unweighted(&[1.0]);
+        let mismatch = Error::GridMismatch {
+            left: vec![(Coord::linear("x"), unit())],
+            right: vec![(Coord::angle("x"), unit())],
+        };
+        let a = cube(ONE, &[&[0.5]], &[1.0]);
+        let mut b = Cube::default();
+        b.add_growing(&[unit()], &angle, &one).unwrap();
+        assert_eq!(a.clone().merge(b), Err(mismatch.clone()));
+        assert_eq!(a.clone().add(&angle, &one), Err(mismatch.clone()));
+        assert_eq!(
+            a.clone().add_growing(&[unit()], &angle, &one),
+            Err(mismatch.clone())
+        );
+        let mut bounds = Bounds::new(vec![unit()]);
+        bounds.include(&line, &one).unwrap();
+        assert_eq!(bounds.include(&angle, &one), Err(mismatch.clone()));
+        let text = mismatch.to_string();
+        assert!(text.contains("Linear") && text.contains("Angle"), "{text}");
     }
 
     /// An angle and a linear coordinate of one name and binning are two
@@ -1002,7 +1040,7 @@ mod tests {
             row(&[pixel(1.0, 0.5), Err(Masked::Unlit), pixel(3.0, 2.0)]),
             row(&[pixel(0.1, 0.5), Err(Masked::Unlit), pixel(0.3, 2.0)]),
         ];
-        let binnings = vec![Binning::new(0.75, 0.1).unwrap(), unit()];
+        let binnings = vec![Binning::new(CoordKind::Linear, 0.75, 0.1).unwrap(), unit()];
         let mut bounds = Bounds::new(binnings.clone());
         for (f, px) in frames.iter().zip(&pixels) {
             bounds.include(f, px).unwrap();

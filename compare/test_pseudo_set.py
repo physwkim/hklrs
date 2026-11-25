@@ -483,6 +483,15 @@ def test_solve_and_pseudo_solve_raise_one_type_per_error(error):
     assert raised == [getattr(hklrs, error)] * 4
 
 
+def test_an_inverse_error_message_is_in_degrees_and_its_attributes_exact():
+    g = hklrs.Geometry.preset("K4CV")
+    mode = hklrs.PseudoMode(g, "eulerians", [10.0, 120.0, 20.0])
+    with pytest.raises(hklrs.ChiOutOfReach) as e:
+        hklrs.pseudo_solve(mode, WL, [0.0] * len(g.axis_names))
+    assert str(e.value) == "|chi| = 120° exceeds the kappa reach 2·alpha = 100°"
+    assert e.value.chi == math.degrees(math.radians(120.0)) != 120.0
+
+
 def test_mode_and_pseudo_mode_raise_one_type_per_error():
     """As above for the error a mode raises when it is made."""
     g = hklrs.Geometry.preset("E4CV")

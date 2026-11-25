@@ -169,3 +169,9 @@ def test_lattice_b_matrix(lat):
     for hkl in ([1, 0, 0], [0, 0, 1], [1, 2, 3]):
         d = 2 * math.pi / np.linalg.norm(b @ hkl)
         assert hklrs.Lattice(*lat).d_spacing(hkl) == pytest.approx(d, rel=1e-12)
+
+
+def test_a_refused_lattice_angle_is_in_degrees():
+    with pytest.raises(ValueError) as e:
+        hklrs.Lattice(5, 5, 5, 90, 90, -30.5)
+    assert str(e.value) == "lattice angle gamma = -30.5° is outside (0°, 180°)"

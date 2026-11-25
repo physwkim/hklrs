@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use super::normalise::{PyFrameScalars, PyPixelFields, PyRegion};
-use super::{PyGeometry, PyPixelDetector, PySample, err, image, unit, xu_options};
+use super::{PyGeometry, PyPixelDetector, PySample, err, image, literal, unit, xu_options};
 
 /// A value of a coordinate of `kind` from Python's units to the core's:
 /// degrees to radians for an angle.
@@ -31,6 +31,30 @@ fn from_core(v: f64, kind: CoordKind) -> f64 {
         CoordKind::Angle => v.to_degrees(),
         CoordKind::Linear => v,
     }
+}
+
+/// The message of `Error::GridMismatch` in Python's units.
+pub(crate) fn grid_mismatch(left: &[(Coord, Binning)], right: &[(Coord, Binning)]) -> String {
+    let axes = |axes: &[(Coord, Binning)]| {
+        let axis = |(c, b): &(Coord, Binning)| {
+            let kind = match c.kind() {
+                CoordKind::Angle => "angle",
+                CoordKind::Linear => "linear",
+            };
+            format!(
+                "({:?}, {kind:?}, {}, {})",
+                c.name(),
+                literal(b.step(), c.kind()),
+                literal(b.anchor(), c.kind())
+            )
+        };
+        format!("[{}]", axes.iter().map(axis).collect::<Vec<_>>().join(", "))
+    };
+    format!(
+        "grids differ: {} vs {} (name, kind, step, anchor; degrees for an angle)",
+        axes(left),
+        axes(right)
+    )
 }
 
 /// `rows` as a rotation, held to `hklrs::proper_rotation`.
@@ -346,7 +370,7 @@ impl PyFrameMap {
                 // a binning past the projection's dimensions, which
                 // FrameMap::new refuses, has no kind to convert by
                 let kind = coords.get(i).map_or(CoordKind::Linear, Coord::kind);
-                Binning::new(to_core(step, kind), to_core(anchor, kind))
+                Binning::new(kind, to_core(step, kind), to_core(anchor, kind))
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(err)?;

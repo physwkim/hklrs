@@ -40,7 +40,7 @@ use bsrs::protocols_async::{
 };
 use futures::StreamExt;
 use hklrs::frame_map::FrameMap;
-use hklrs::grid::Binning;
+use hklrs::grid::{Binning, CoordKind};
 use hklrs::nalgebra::Vector3;
 use hklrs::normalise::{PixelFields, Region};
 use hklrs::presets::preset;
@@ -318,7 +318,7 @@ fn frame_map() -> FrameMap {
         &detector,
         &Region::new(0..HEIGHT, 0..WIDTH, (2, 2)),
         PixelFields::new(),
-        vec![Binning::new(0.01, 0.0).unwrap(); 3],
+        vec![Binning::new(CoordKind::Linear, 0.01, 0.0).unwrap(); 3],
     )
     .unwrap()
 }

@@ -1,8 +1,8 @@
 //! The hklrs Cube against binoculars-ng 7be4f79's own accumulation of a
 //! synthetic 20-frame K6C komega scan in qx, qy, qz
-//! (golden/bin_7be4f79_cube.c). Bins are `Binning::new(res, -res/2)`, the
-//! bins binoculars centres on multiples of res. Images are integers and
-//! weights powers of two, so photons compare exactly.
+//! (golden/bin_7be4f79_cube.c). Bins are `Binning::new(Linear, res,
+//! -res/2)`, the bins binoculars centres on multiples of res. Images are
+//! integers and weights powers of two, so photons compare exactly.
 //!
 //! The normaliser takes binoculars' corrected intensity, image·weight/flat
 //! with flat 1, as each frame's raw counts and has nothing to weigh them
@@ -15,7 +15,7 @@ use common::{f, load};
 use std::ops::Range;
 
 use hklrs::frame_map::{FrameMap, MappedFrame};
-use hklrs::grid::{Binning, Bounds, Cube};
+use hklrs::grid::{Binning, Bounds, CoordKind, Cube};
 use hklrs::nalgebra::Vector3;
 use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::presets::preset;
@@ -75,7 +75,7 @@ fn scan() -> Scan {
         .unwrap();
     let binnings = list("resolutions")
         .iter()
-        .map(|&r| Binning::new(r, -r / 2.0).unwrap())
+        .map(|&r| Binning::new(CoordKind::Linear, r, -r / 2.0).unwrap())
         .collect();
     let map = FrameMap::new(
         geometry,

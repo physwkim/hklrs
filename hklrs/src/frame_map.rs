@@ -118,7 +118,7 @@ mod tests {
     use nalgebra::Vector3;
 
     use super::*;
-    use crate::grid::Coord;
+    use crate::grid::{Coord, CoordKind};
     use crate::presets::preset;
     use crate::projection::Custom;
 
@@ -136,7 +136,7 @@ mod tests {
     }
 
     fn binnings(n: usize) -> Vec<Binning> {
-        vec![Binning::new(0.01, 0.0).unwrap(); n]
+        vec![Binning::new(CoordKind::Linear, 0.01, 0.0).unwrap(); n]
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod tests {
                 &raw_detector(),
                 &Region::new(0..4, 0..6, (2, 3)),
                 PixelFields::new(),
-                vec![Binning::new(1.0, -0.5).unwrap(); n],
+                vec![Binning::new(CoordKind::Linear, 1.0, -0.5).unwrap(); n],
             )
         };
         assert_eq!(

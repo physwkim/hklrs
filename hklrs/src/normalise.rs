@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn from_values_weights_reach_the_cut_as_a_ratio_of_sums() {
         use crate::cut::{Cut, CutKind, Footprint, IntDir};
-        use crate::grid::Binning;
+        use crate::grid::{Binning, CoordKind};
         let det = detector((1, 4));
         let (_, red) = Region::new(0..1, 0..4, (1, 1)).apply(&det).unwrap();
         let w = Weights::from_values(
@@ -813,7 +813,7 @@ mod tests {
             IntDir::Q,
             [0.0; 3],
             1.0,
-            Binning::new(1.0, 0.0).unwrap(),
+            Binning::new(CoordKind::Linear, 1.0, 0.0).unwrap(),
         )
         .unwrap();
         // pixels 0, 1 at Qz 0.25, 0.75 (one bin), 2, 3 at 1.25, 1.75 (the next)

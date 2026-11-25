@@ -47,9 +47,10 @@ fn layout(reason: String) -> Error {
     Error::CubeFile { reason }
 }
 
-/// binoculars' bins of width `step`: bin k centred on k·step.
-fn binoculars(step: f64) -> Result<Binning, Error> {
-    Binning::new(step, -step / 2.0)
+/// binoculars' bins of width `step` on a coordinate of `kind`: bin k
+/// centred on k·step.
+fn binoculars(kind: CoordKind, step: f64) -> Result<Binning, Error> {
+    Binning::new(kind, step, -step / 2.0)
 }
 
 /// Bin indices are stored as doubles; beyond 2^53 they would not read
@@ -81,7 +82,7 @@ pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Er
             return Err(layout(format!("axis name {name:?} is not a link name")));
         }
         let (step, anchor) = (a.binning.step, a.binning.anchor);
-        if a.binning != binoculars(step)? {
+        if a.binning != binoculars(a.coord.kind(), step)? {
             return Err(Error::CubeFileAnchor {
                 axis: name.to_owned(),
                 step,
@@ -237,14 +238,9 @@ fn axis(ds: &H5Dataset, name: &str) -> Result<(usize, Axis), Error> {
             "axis {name:?}: first bin {first} is past last bin {last}"
         )));
     }
-    Ok((
-        index,
-        Axis::spanning(
-            &Coord::new(name.to_owned(), kind(ds, name)?),
-            binoculars(step)?,
-            (first, last),
-        )?,
-    ))
+    let coord = Coord::new(name.to_owned(), kind(ds, name)?);
+    let binning = binoculars(coord.kind(), step)?;
+    Ok((index, Axis::spanning(&coord, binning, (first, last))?))
 }
 
 /// The kind of the axis `ds`: angle where its `kind` attribute says so,
@@ -285,7 +281,12 @@ mod tests {
 
     fn spanning(name: &str, step: f64, anchor: f64, bins: (i64, i64)) -> Axis {
         let coord = Coord::new(name.to_owned(), CoordKind::Linear);
-        Axis::spanning(&coord, Binning::new(step, anchor).unwrap(), bins).unwrap()
+        Axis::spanning(
+            &coord,
+            Binning::new(coord.kind(), step, anchor).unwrap(),
+            bins,
+        )
+        .unwrap()
     }
 
     /// binoculars drops one-bin axes (BIN-14) and cannot save an empty
@@ -311,7 +312,12 @@ mod tests {
         let tth = Coord::angle("tth");
         let c = cube(vec![
             spanning("q", 0.5, -0.25, (0, 2)),
-            Axis::spanning(&tth, super::binoculars(0.25).unwrap(), (3, 5)).unwrap(),
+            Axis::spanning(
+                &tth,
+                super::binoculars(CoordKind::Angle, 0.25).unwrap(),
+                (3, 5),
+            )
+            .unwrap(),
         ]);
         let p = path("kinds");
         write(&p, &c, "").unwrap();

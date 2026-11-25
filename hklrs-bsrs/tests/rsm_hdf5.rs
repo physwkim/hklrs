@@ -17,7 +17,7 @@ use bsrs::event_model::{
     StreamResource,
 };
 use hklrs::frame_map::FrameMap;
-use hklrs::grid::{Binning, Cube};
+use hklrs::grid::{Binning, CoordKind, Cube};
 use hklrs::nalgebra::Vector3;
 use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::presets::preset;
@@ -65,7 +65,7 @@ fn frame_map() -> FrameMap {
         &detector,
         &Region::new(0..4, 0..6, (2, 2)),
         PixelFields::new(),
-        vec![Binning::new(0.01, 0.0).unwrap(); 3],
+        vec![Binning::new(CoordKind::Linear, 0.01, 0.0).unwrap(); 3],
     )
     .unwrap()
 }
