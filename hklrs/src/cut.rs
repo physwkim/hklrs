@@ -19,6 +19,7 @@ use nalgebra::Vector3;
 
 use crate::absorption::Masked;
 use crate::grid::Binning;
+pub use crate::grid::fuzzy::Footprint;
 use crate::normalise::Normalised;
 use crate::{Error, Wavelength};
 
@@ -283,20 +284,6 @@ impl Cut {
     }
 }
 
-/// How a pixel's weight is laid on the cut axis.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Footprint {
-    /// All of it in the bin of the pixel's coordinate.
-    Point,
-    /// A pixel spans `width` along the cut, centred on its coordinate (same
-    /// units as the coordinate), and its counts and weight are shared out
-    /// over the bins it overlaps in proportion to the overlap: xu's
-    /// `FuzzyGridder1D`, whose fractions these are. A bin of the global
-    /// lattice exists wherever the footprint reaches, so unlike xu nothing
-    /// is clamped at a grid end.
-    Width(f64),
-}
-
 /// What one bin of a cut holds. The two sums stay apart.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Bin {
@@ -464,14 +451,7 @@ impl Cut {
         footprint: Footprint,
         pixels: impl IntoIterator<Item = (Vector3<f64>, Result<Normalised, Masked>)>,
     ) -> Result<CutResult, Error> {
-        if let Footprint::Width(w) = footprint
-            && !(w.is_finite() && w > 0.0)
-        {
-            return Err(Error::NotPositive {
-                what: "footprint width",
-                value: w,
-            });
-        }
+        footprint.check()?;
         let mut out = CutResult {
             binning: self.binning,
             footprint,
@@ -495,30 +475,13 @@ impl Cut {
                 out.skipped.outside += 1;
                 continue;
             }
-            let b = self.binning;
-            match footprint {
-                Footprint::Point => match b.bin(c.along) {
-                    Ok(k) => out.put(k, 1.0, &n),
-                    Err(_) => out.skipped.no_coordinate += 1,
-                },
-                Footprint::Width(w) => {
-                    let (lo, hi) = (c.along - w / 2.0, c.along + w / 2.0);
-                    let (Ok(k0), Ok(k1)) = (b.bin(lo), b.bin(hi)) else {
-                        out.skipped.no_coordinate += 1;
-                        continue;
-                    };
-                    for k in k0..=k1 {
-                        let f = if k0 == k1 {
-                            1.0
-                        } else {
-                            (hi.min(b.edge(k + 1)) - lo.max(b.edge(k))) / w
-                        };
-                        // a footprint ending exactly on an edge has no part in the bin above
-                        if f > 0.0 {
-                            out.put(k, f, &n);
-                        }
+            match footprint.reach(self.binning, c.along) {
+                Ok(reach) => {
+                    for (k, f) in reach.shares() {
+                        out.put(k, f, &n);
                     }
                 }
+                Err(_) => out.skipped.no_coordinate += 1,
             }
         }
         Ok(out)

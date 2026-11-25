@@ -17,6 +17,7 @@ use rayon::prelude::*;
 use crate::normalise::{Normalised, NormalisedFrame};
 use crate::{Error, Image};
 
+pub mod fuzzy;
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
 
