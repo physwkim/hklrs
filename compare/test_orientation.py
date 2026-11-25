@@ -5,6 +5,7 @@ libhkl's B is wrong where c(beta) c(gamma) != c(alpha) (1 - s(beta) s(gamma))
 (HKL-12), so there its UB is expected to diverge; hklrs is then checked against
 a numpy Busing-Levy with the correct B.
 """
+import ctypes
 import math
 import os
 import random
@@ -16,6 +17,7 @@ import _ref
 import hklrs
 from test_hkl import UNIT, USER, Hkl, hkl_case  # noqa: F401  (Hkl: gi imported there)
 
+LIBC = ctypes.CDLL(None)
 CELLS = {
     "cubic": (5.431020511, 5.431020511, 5.431020511, 90.0, 90.0, 90.0),
     "hexagonal": (3.0, 3.0, 5.0, 90.0, 90.0, 120.0),
@@ -26,6 +28,10 @@ WAVELENGTHS = (1.54, 0.71)
 SEEDS = (0, 1)
 MAX_TRIES = 200
 X = _ref.X
+# Held axes where the all-zero start degenerates the default mode: BM28's
+# constant_nu_coplanar writes eta, phi, delta, which at chi = 0 all turn about -y
+# and reach only U B h with no y component; at chi = 90 phi turns about -z.
+HELD = {"ESRF BM28 PSIC": {"chi": 90.0}}
 
 
 def hkl12_holds(lat):
@@ -87,6 +93,8 @@ def two_reflections(preset, cell, wl, seed):
     geo.wavelength_set(wl, USER)
     names = list(geo.axis_names_get())
     units = [geo.axis_get(n).user_unit_get() for n in names]
+    held = HELD.get(preset, {})
+    geo.axis_values_set([held.get(n, v) for n, v in zip(names, geo.axis_values_get(USER))], USER)
     det = Hkl.Detector.factory_new(Hkl.DetectorType(0))
     true = Hkl.Sample.new("true")
     true.lattice_set(lattice_hkl(lat))
@@ -97,6 +105,8 @@ def two_reflections(preset, cell, wl, seed):
     eng = el.engine_get_by_name("hkl")
     mode = eng.current_mode_get()
     b = _ref.b_matrix(*lat)
+    # libhkl's solver restarts draw from libc rand(), shared by the whole process
+    LIBC.srand(rng.randint(1, 2**30))
     picked = []
     for _ in range(MAX_TRIES):
         h = [rng.randint(-4, 4) for _ in range(3)]

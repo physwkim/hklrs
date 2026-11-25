@@ -15,6 +15,7 @@ for one outside its window that its limits admit only once wrapped: hklpy2
 keeps every solution, hklrs none. Modes taking parameters are left out: the
 filter does not read the equations.
 """
+import ctypes
 import functools
 import math
 import random
@@ -28,6 +29,7 @@ from test_hkl import Hkl, mat
 pytest.importorskip("hklpy2")
 from hklpy2.diffract import creator  # noqa: E402
 
+LIBC = ctypes.CDLL(None)
 LATTICE = (5.431, 5.431, 5.431, 90.0, 90.0, 90.0)
 WL = 1.54
 SEEDS = range(6)
@@ -123,6 +125,7 @@ class Case:
         # hklpy2's simulated motors refuse positions outside [-180, 180]
         self.start = [turn(v + self.rng.uniform(-20, 20)) if i in self.written else v
                       for i, v in enumerate(self.axes)]
+        self.c_seed = self.rng.randint(1, 2**30)
 
     def set(self, name, limits, cut=None):
         """Both sides' limits and, when given, cut point of axis `name`."""
@@ -143,6 +146,8 @@ class Case:
 
     def hklpy2(self):
         self.f.move_reals(dict(zip(self.names, self.start)))
+        # libhkl's solver restarts draw from libc rand(), shared by the whole process
+        LIBC.srand(self.c_seed)
         return [list(p) for p in self.f.core.forward(dict(zip("hkl", self.hkl)))]
 
     def accepted(self, sol):
