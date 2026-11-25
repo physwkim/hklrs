@@ -18,8 +18,8 @@ use std::f64::consts::{PI, TAU};
 use nalgebra::Vector3;
 
 use crate::absorption::Masked;
-use crate::grid::Binning;
 pub use crate::grid::fuzzy::Footprint;
+use crate::grid::{Binning, Coord};
 use crate::normalise::Normalised;
 use crate::{Error, Wavelength};
 
@@ -57,6 +57,8 @@ pub enum CutError {
     IntDir { kind: &'static str, intdir: IntDir },
     #[error("cut results have different footprints: {left:?} vs {right:?}")]
     Footprint { left: Footprint, right: Footprint },
+    #[error("cut results are of different cuts on one axis: {left:?} vs {right:?}")]
+    Cut { left: Box<Cut>, right: Box<Cut> },
     #[error(transparent)]
     Value(#[from] Error),
 }
@@ -365,18 +367,18 @@ impl Skipped {
 }
 
 /// The sums of one cut, per global bin of its [`Binning`], sparse and
-/// ascending.
+/// ascending, with the cut and footprint that made them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CutResult {
-    binning: Binning,
+    cut: Cut,
     footprint: Footprint,
     bins: BTreeMap<i64, Bin>,
     skipped: Skipped,
 }
 
 impl CutResult {
-    pub fn binning(&self) -> Binning {
-        self.binning
+    pub fn cut(&self) -> &Cut {
+        &self.cut
     }
 
     pub fn footprint(&self) -> Footprint {
@@ -402,17 +404,28 @@ impl CutResult {
         self.bins.iter().map(|(k, b)| (*k, b.intensity()))
     }
 
-    /// The sum of two results of the same binning and footprint, for
-    /// frames accumulated apart. A result with no pixel at all is the
-    /// identity.
+    /// The sum of two results of the same cut and footprint, for frames
+    /// accumulated apart. A result with no pixel at all is the identity.
+    /// Cuts on different axes (coordinate or binning) are a
+    /// [`Error::GridMismatch`]; on one axis but another position, window
+    /// or integration direction, a [`CutError::Cut`].
     pub fn merge(mut self, other: Self) -> Result<Self, CutError> {
-        if self.binning != other.binning {
-            let name = |b: Binning| vec![("cut".to_owned(), b.step(), b.anchor())];
-            return Err(Error::GridMismatch {
-                left: name(self.binning),
-                right: name(other.binning),
+        if self.cut != other.cut {
+            let axis = |c: &Cut| (c.kind.coord(), c.binning);
+            let (left, right) = (axis(&self.cut), axis(&other.cut));
+            if left != right {
+                let describe =
+                    |(c, b): (Coord, Binning)| vec![(c.name().to_owned(), b.step(), b.anchor())];
+                return Err(Error::GridMismatch {
+                    left: describe(left),
+                    right: describe(right),
+                }
+                .into());
             }
-            .into());
+            return Err(CutError::Cut {
+                left: Box::new(self.cut),
+                right: Box::new(other.cut),
+            });
         }
         if self.footprint != other.footprint {
             return Err(CutError::Footprint {
@@ -453,7 +466,7 @@ impl Cut {
     ) -> Result<CutResult, Error> {
         footprint.check()?;
         let mut out = CutResult {
-            binning: self.binning,
+            cut: self.clone(),
             footprint,
             bins: BTreeMap::new(),
             skipped: Skipped::default(),
@@ -489,6 +502,15 @@ impl Cut {
 }
 
 impl CutKind {
+    /// The coordinate along a cut of this kind: an angle for Omega, Radial
+    /// and TwoTheta, a length in Q for the others.
+    pub fn coord(&self) -> Coord {
+        match self {
+            CutKind::Omega | CutKind::Radial | CutKind::TwoTheta => Coord::angle(self.name()),
+            _ => Coord::linear(self.name()),
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             CutKind::Qz => "Qz",
@@ -693,6 +715,47 @@ mod tests {
         let c = Cut::new(kind, IntDir::Q, [0.0; 3], 1.0, binning()).unwrap();
         let got = c.cutting(&Vector3::new(0.3, 1.4, 5.0), lam());
         assert!((got.along - 5.0).abs() < 1e-15 && (got.perp - 0.5).abs() < 1e-15);
+    }
+
+    /// A result records its cut, and merges only with a result of the
+    /// same cut: another kind is another axis, another position or window
+    /// alone is another cut on that axis.
+    #[test]
+    fn a_merge_refuses_another_kind_position_or_window_alone() {
+        let cut = |kind, at, half_width| {
+            Cut::new(kind, IntDir::TwoTheta, at, half_width, binning()).unwrap()
+        };
+        let sums = |c: &Cut| {
+            c.accumulate(lam(), Footprint::Point, std::iter::empty())
+                .unwrap()
+        };
+        let base = cut(CutKind::Qz, [0.0, 2.0, 0.0], 0.1);
+        let a = sums(&base);
+        assert_eq!(a.cut(), &base);
+        assert_eq!(a.clone().merge(sums(&base)), Ok(a.clone()));
+        for kind in [CutKind::Qx, CutKind::Omega] {
+            let other = cut(kind, [0.0, 2.0, 0.0], 0.1);
+            assert_eq!(
+                a.clone().merge(sums(&other)),
+                Err(Error::GridMismatch {
+                    left: vec![("Qz".to_owned(), 0.5, 0.0)],
+                    right: vec![(kind.coord().name().to_owned(), 0.5, 0.0)],
+                }
+                .into())
+            );
+        }
+        for other in [
+            cut(CutKind::Qz, [0.0, 2.5, 0.0], 0.1),
+            cut(CutKind::Qz, [0.0, 2.0, 0.0], 0.2),
+        ] {
+            assert_eq!(
+                a.clone().merge(sums(&other)),
+                Err(CutError::Cut {
+                    left: Box::new(base.clone()),
+                    right: Box::new(other),
+                })
+            );
+        }
     }
 
     #[test]

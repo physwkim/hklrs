@@ -6,7 +6,7 @@
 
 use hklrs::absorption::{Masked, Weight};
 use hklrs::cut::{Cut, CutKind, CutResult, Footprint, IntDir};
-use hklrs::grid::Binning;
+use hklrs::grid::{Binning, CoordKind};
 use hklrs::nalgebra::Vector3;
 use hklrs::normalise::Normalised;
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -40,7 +40,7 @@ fn reason(code: u8) -> PyResult<Option<Masked>> {
 }
 
 fn angular_along(k: &CutKind) -> bool {
-    matches!(k, CutKind::Omega | CutKind::Radial | CutKind::TwoTheta)
+    k.coord().kind() == CoordKind::Angle
 }
 
 /// How a pixel's weight is laid on the cut axis: at its coordinate, or over
@@ -248,10 +248,7 @@ impl PyCut {
         let result = py
             .detach(|| self.cut.accumulate(wl, fp, pixels))
             .map_err(err)?;
-        Ok(PyCutResult {
-            result,
-            angular: self.angular_along,
-        })
+        Ok(PyCutResult { result })
     }
 
     fn __repr__(&self) -> String {
@@ -269,7 +266,6 @@ impl PyCut {
 #[pyclass(name = "CutResult", frozen)]
 struct PyCutResult {
     result: CutResult,
-    angular: bool,
 }
 
 impl PyCutResult {
@@ -293,10 +289,9 @@ impl PyCutResult {
     /// Bin centres along the cut, degrees for an angular cut.
     #[getter]
     fn centres<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        let b = self.result.binning();
-        self.column(py, |k, _| {
-            from_core(b.edge(k) + b.step() / 2.0, self.angular)
-        })
+        let cut = self.result.cut();
+        let (b, angular) = (cut.binning(), angular_along(&cut.kind()));
+        self.column(py, |k, _| from_core(b.edge(k) + b.step() / 2.0, angular))
     }
 
     #[getter]
@@ -340,19 +335,15 @@ impl PyCutResult {
         Ok(d)
     }
 
-    /// The sum of two results of the same binning and footprint, for frames
+    /// The sum of two results of the same cut and footprint, for frames
     /// accumulated apart.
     fn merge(&self, other: &PyCutResult) -> PyResult<PyCutResult> {
-        if self.angular != other.angular {
-            return Err(PyValueError::new_err("results of different cut kinds"));
-        }
         Ok(PyCutResult {
             result: self
                 .result
                 .clone()
                 .merge(other.result.clone())
                 .map_err(cut_err)?,
-            angular: self.angular,
         })
     }
 

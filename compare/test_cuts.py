@@ -214,11 +214,25 @@ def test_merge_of_two_halves_is_the_whole():
             np.testing.assert_allclose(m.weights, whole.weights, rtol=1e-12)
             assert m.skipped == whole.skipped
         assert whole.skipped["Unlit"] == len(reasons[::7])
-    other = hc.Cut("qz", "q", 0.4, (0.1, 0.0), at=[0.02, 2.0, 0.0])
     a = accumulate(cut, q, inten, hc.Footprint.point())
-    with pytest.raises(ValueError):
-        a.merge(accumulate(other, q, inten, hc.Footprint.point()))
-    with pytest.raises(ValueError):
+    # another binning or kind is another axis; another position or window
+    # alone is another cut on the same axis
+    refused = {
+        "grids differ": [
+            hc.Cut("qz", "q", 0.4, (0.1, 0.0), at=[0.02, 2.0, 0.0]),
+            hc.Cut("qx", "q", 0.4, (0.05, 0.0), at=[0.02, 2.0, 0.0]),
+            hc.Cut("omega", "2theta", 0.4, (0.05, 0.0), at=[0.02, 2.0, 5.0]),
+        ],
+        "different cuts": [
+            hc.Cut("qz", "q", 0.4, (0.05, 0.0), at=[0.02, 2.1, 0.0]),
+            hc.Cut("qz", "q", 0.3, (0.05, 0.0), at=[0.02, 2.0, 0.0]),
+        ],
+    }
+    for match, others in refused.items():
+        for other in others:
+            with pytest.raises(ValueError, match=match):
+                a.merge(accumulate(other, q, inten, hc.Footprint.point()))
+    with pytest.raises(ValueError, match="footprints"):
         a.merge(accumulate(cut, q, inten, hc.Footprint.width(0.03)))
 
 
