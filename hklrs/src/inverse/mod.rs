@@ -2,10 +2,14 @@
 //!
 //! A Q target gives the three hkl equations R_sample·q = k̂f − k̂i, with q in
 //! units of k = 2π/λ and k̂f the detector rotation applied to the beam
-//! direction (a detector at infinity, as in hkl); [`Target::Eulerians`]
-//! three equations of the kappa arm's rotation; [`Target::Detector`] none. The mode's extra [`Equation`]s close the system over its written
-//! axes, and its [`Slits`], if any, are turned into the surface after. Other
-//! axes stay at `current`.
+//! direction (a detector at infinity, as in hkl). Where no written axis
+//! turns the sample or the beam, Q and k̂i stay where `current` puts them,
+//! so the target fixes k̂f = k̂i + R_sample·q: it must lie on the Ewald
+//! sphere, and gives the two equations of k̂f's direction.
+//! [`Target::Eulerians`] gives three equations of the kappa arm's rotation;
+//! [`Target::Detector`] none. The mode's extra [`Equation`]s close the
+//! system over its written axes, and its [`Slits`], if any, are turned into
+//! the surface after. Other axes stay at `current`.
 
 mod analytic;
 pub mod aps_04id_polar;
@@ -34,9 +38,9 @@ pub mod zaxis;
 
 use std::f64::consts::{PI, TAU};
 
-use nalgebra::{Matrix3, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Unit, UnitQuaternion, Vector3};
 
-use crate::{Error, Geometry, Wavelength};
+use crate::{Error, Geometry, Poses, Wavelength};
 
 pub use mode::{Equation, Eulerian, Mode, Slits};
 pub use spec::{ModeParameter, ModeSpec, ModeTable, PsiEngine};
@@ -63,13 +67,22 @@ pub enum Target {
 }
 
 impl Target {
-    /// How many equations the target itself gives.
-    fn rows(&self) -> usize {
+    /// How many equations the target itself gives `mode`.
+    fn rows(&self, mode: &Mode) -> usize {
         match self {
+            Target::Hkl(_) | Target::QSample(_) if fixes_kf(mode) => 2,
             Target::Hkl(_) | Target::QSample(_) | Target::Eulerians(_) => 3,
             Target::Detector => 0,
         }
     }
+}
+
+/// No written axis of `mode` turns the sample or the beam: a Q target fixes
+/// k̂f in the lab.
+fn fixes_kf(mode: &Mode) -> bool {
+    let g = mode.geometry();
+    let turns = |i: &usize| g.sample_stack().contains(i) || g.source_stack().contains(i);
+    !mode.written().iter().any(turns)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +111,11 @@ pub enum InverseError {
     Unreachable { q: f64, q_max: f64 },
     #[error("no axis values satisfy the mode")]
     NoSolution,
+    #[error(
+        "Q = {q:?} Å⁻¹ misses the Ewald sphere by {miss} Å⁻¹, and no written axis turns \
+         the sample or the beam"
+    )]
+    OffEwaldSphere { q: [f64; 3], miss: f64 },
     #[error("{what} is not finite")]
     NonFinite { what: &'static str },
     #[error("{what} is zero")]
@@ -209,10 +227,10 @@ impl<'a> InverseRequest<'a> {
     /// they pass the reach gate.
     fn system(&self) -> Result<system::System<'a>, InverseError> {
         let geometry = self.mode.geometry();
-        geometry.poses(self.current)?;
+        let poses = geometry.poses(self.current)?;
         finite(self.ub.as_slice(), "UB")?;
         let (written, extra) = (self.mode.written().len(), self.mode.extra());
-        let equations = self.target.rows() + extra.len();
+        let equations = self.target.rows(self.mode) + extra.len();
         if written != equations {
             return Err(InverseError::EquationCount { written, equations });
         }
@@ -222,11 +240,11 @@ impl<'a> InverseRequest<'a> {
         let goal = match self.target {
             Target::Hkl(h) => {
                 finite(h.as_slice(), "target hkl")?;
-                q_goal(self.ub * h, q_max)?
+                self.q_goal(self.ub * h, &poses)?
             }
             Target::QSample(q) => {
                 finite(q.as_slice(), "target Q")?;
-                q_goal(q, q_max)?
+                self.q_goal(q, &poses)?
             }
             Target::Detector => system::Goal::Detector,
             Target::Eulerians(eulerians) => {
@@ -253,6 +271,39 @@ impl<'a> InverseRequest<'a> {
             self.current,
         ))
     }
+
+    /// The goal of Q = `q` in the sample frame, Å⁻¹, pulled onto 2k past
+    /// the reach gate: R_sample·q = k̂f − k̂i in units of k, or k̂f itself
+    /// where the mode [`fixes_kf`], `poses` those of `current`.
+    fn q_goal(&self, q: Vector3<f64>, poses: &Poses) -> Result<system::Goal, InverseError> {
+        let k = self.wavelength.wavenumber();
+        let q_max = 2.0 * k;
+        let q_norm = q.norm();
+        reach(q_norm, q_max)?;
+        let pulled = if q_norm > q_max {
+            q * (q_max / q_norm)
+        } else {
+            q
+        } / k;
+        if fixes_kf(self.mode) {
+            let ki = poses.source * self.mode.geometry().beam_direction().into_inner();
+            let kf = ki + poses.sample.rotation * pulled;
+            let miss = kf.norm() - 1.0;
+            if miss.abs() > REACH {
+                return Err(InverseError::OffEwaldSphere {
+                    q: q.into(),
+                    miss: miss * k,
+                });
+            }
+            return Ok(system::Goal::ray(Unit::new_normalize(kf)));
+        }
+        // k̂f = k̂i then, which leaves the sample rotation free in any mode
+        // that turns it.
+        if q_norm == 0.0 {
+            return Err(InverseError::Degenerate);
+        }
+        Ok(system::Goal::Q(pulled))
+    }
 }
 
 /// `Unreachable` for a |Q| of `q` Å⁻¹ beyond `q_max` = 2k.
@@ -262,22 +313,6 @@ fn reach(q: f64, q_max: f64) -> Result<(), InverseError> {
     } else {
         Ok(())
     }
-}
-
-/// `q` in units of k as the goal, pulled onto 2k past the reach gate.
-fn q_goal(q: Vector3<f64>, q_max: f64) -> Result<system::Goal, InverseError> {
-    let q_norm = q.norm();
-    reach(q_norm, q_max)?;
-    // k̂f = k̂i then, which leaves the sample rotation free in any mode.
-    if q_norm == 0.0 {
-        return Err(InverseError::Degenerate);
-    }
-    let q = if q_norm > q_max {
-        q * (q_max / q_norm)
-    } else {
-        q
-    };
-    Ok(system::Goal::Q(q * (2.0 / q_max)))
 }
 
 /// The largest |Q| the extra equations ask for, Å⁻¹: a qper and the qpar

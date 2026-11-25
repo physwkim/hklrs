@@ -268,6 +268,7 @@ fn constraints(system: &System, map: &Map, cradle: Option<&Cradle>) -> Option<Ve
 pub(super) fn search<'a>(system: &'a System<'a>) -> Option<SolutionSet<'a>> {
     match system.goal() {
         Goal::Q(q) => you_search(system, q),
+        Goal::Ray { .. } => None,
         Goal::Detector => detector::search(system),
         Goal::Arm { eulerians, .. } => arm_search(system, eulerians),
     }

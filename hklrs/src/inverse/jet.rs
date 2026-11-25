@@ -34,6 +34,18 @@ impl Scalar {
             d: self.d.iter().zip(&o.d).map(|(a, b)| a - b).collect(),
         }
     }
+
+    pub fn div(&self, o: &Scalar) -> Scalar {
+        Scalar {
+            v: self.v / o.v,
+            d: self
+                .d
+                .iter()
+                .zip(&o.d)
+                .map(|(a, b)| (a * o.v - self.v * b) / (o.v * o.v))
+                .collect(),
+        }
+    }
 }
 
 impl Vec3 {

@@ -205,6 +205,23 @@ def test_unreachable_raises(preset, mode):
             hklrs.pick(m, rig.sample, h, WL, start)
 
 
+def test_off_ewald_sphere_raises_with_q_and_miss():
+    """PYFAI turns no sample axis, so pyfai_default takes k_f from the
+    target: an hkl off the Ewald sphere raises OffEwaldSphere, carrying its
+    Q (sample frame) and the miss |k_i + Q| - k, Å⁻¹."""
+    g = hklrs.Geometry.preset("PYFAI")
+    sample = hklrs.Sample("pyfai", hklrs.Lattice(*LATTICE))
+    m = hklrs.Mode(g, "pyfai_default")
+    h = (0.3, -0.2, 0.4)
+    q = np.array(sample.ub()) @ h
+    k = 2 * math.pi / WL
+    for f in (hklrs.solve, hklrs.pick):
+        with pytest.raises(hklrs.OffEwaldSphere) as e:
+            f(m, sample, h, WL, [0.0] * 6)
+        assert e.value.q == pytest.approx(q, abs=1e-12)
+        assert e.value.miss == pytest.approx(np.linalg.norm(q + [k, 0, 0]) - k, abs=1e-12)
+
+
 def test_mode_raises_unknown_names_and_missing_parameters_by_type():
     """Mode reads its name and parameters through the core's ModeSpec: an
     unknown name, a missing and an unknown parameter raise its variants'

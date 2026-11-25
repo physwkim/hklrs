@@ -397,6 +397,38 @@ fn q_sample_target_matches_hkl_target() {
     assert_eq!(by_hkl, by_q);
 }
 
+/// A mode that turns neither the sample nor the beam: the target fixes k̂f,
+/// the sample where `current` has it, so it solves where it lies on the
+/// Ewald sphere and fails otherwise.
+#[test]
+fn a_mode_turning_no_sample_takes_kf_from_the_target() {
+    let geo = preset("E6C").unwrap();
+    let written = ["gamma", "delta"].map(|a| geo.axis_index(a).unwrap());
+    let mode = Mode::new(&geo, "detector", &written, vec![]).unwrap();
+    let at = geo
+        .values_from_degrees(&[5.0, 20.0, 40.0, -30.0, 15.0, 35.0])
+        .unwrap();
+    let poses = geo.poses(&at).unwrap();
+    let beam = geo.beam_direction().into_inner();
+    let k = wavelength().wavenumber();
+    let q = (poses.detector.rotation * beam - poses.source * beam) * k;
+    let hkl = ub().try_inverse().unwrap() * (poses.sample.rotation.inverse() * q);
+    let mut current = at.clone();
+    current[written[0]] = 0.1;
+    current[written[1]] = 0.2;
+    let solutions = request(&mode, hkl, &current).solve().unwrap();
+    for s in &solutions {
+        assert_solution(&mode, &hkl, &current, s);
+    }
+    let reached = |s: &Vec<f64>| written.iter().all(|&i| wrap(s[i] - at[i]).abs() < 1e-9);
+    assert!(solutions.iter().any(reached), "{solutions:?}");
+    let off = request(&mode, hkl * 1.01, &current).solve();
+    assert!(
+        matches!(off, Err(InverseError::OffEwaldSphere { .. })),
+        "{off:?}"
+    );
+}
+
 #[test]
 fn psi_of_a_psi_constant_solution_is_its_parameter() {
     let geo = preset("E4CV").unwrap();

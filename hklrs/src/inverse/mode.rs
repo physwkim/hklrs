@@ -6,7 +6,7 @@ use super::kappa::{KappaAxes, restrict};
 use super::{InverseError, finite};
 use crate::{Axis, AxisKind, Geometry};
 
-/// An equation a mode adds to the three hkl equations. Angles in rad,
+/// An equation a mode adds to the target's equations. Angles in rad,
 /// vectors in Miller indices but for surface normals, in the sample-holder
 /// frame.
 #[derive(Clone, Debug, PartialEq)]

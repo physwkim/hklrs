@@ -15,6 +15,13 @@ create_exception!(
 );
 create_exception!(
     hklrs,
+    OffEwaldSphere,
+    InverseError,
+    "No written axis turns the sample or the beam and the target is off the Ewald sphere; \
+     carries q (sample frame) and miss, |k_i + Q| - k (Å⁻¹)."
+);
+create_exception!(
+    hklrs,
     NoSolution,
     InverseError,
     "No axis values satisfy the mode."
@@ -168,6 +175,7 @@ pub(crate) fn to_py(py: Python<'_>, geometry: &hklrs::Geometry, e: E) -> PyErr {
     }
     match e {
         E::Unreachable { q, q_max } => raise!(Unreachable, "q" => q, "q_max" => q_max),
+        E::OffEwaldSphere { q, miss } => raise!(OffEwaldSphere, "q" => q, "miss" => miss),
         E::NoSolution => raise!(NoSolution),
         E::NoSolutionInLimits(outside) => match outside
             .iter()
@@ -229,6 +237,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("InverseError", py.get_type::<InverseError>())?;
     m.add("Unreachable", py.get_type::<Unreachable>())?;
+    m.add("OffEwaldSphere", py.get_type::<OffEwaldSphere>())?;
     m.add("NoSolution", py.get_type::<NoSolution>())?;
     m.add("NoSolutionInLimits", py.get_type::<NoSolutionInLimits>())?;
     m.add("GeometryError", py.get_type::<GeometryError>())?;
