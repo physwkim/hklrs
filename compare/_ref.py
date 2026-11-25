@@ -138,7 +138,8 @@ PRESET_STACKS = {
                            [("beta", MY), ("gamma", Z), ("delta", MY), ("eta_a", MX)]),
     "SOLEIL SIXS MED2+3 v2": ([("mu", Z), ("omega", MY)],
                               [("gamma", Z), ("delta", MY), ("eta_a", MX)]),
-    # dtx moves the detector point; hkl's default kf skips holder translations (HKL-15)
+    # dtx slides the detector along the arm, so it moves off-axis pixels but not the
+    # central ray, the only one hkl reads
     "SOLEIL CRISTAL K4C": ([("komega", MY), ("kappa", KAPPA), ("kphi", MY)],
                            [("tth", MY), ("dtx", Translation(X))]),
     # r is a length no code reads (HKL-35)
