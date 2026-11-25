@@ -7,7 +7,11 @@
 //! QX_QY_QZ on a HORIZONTAL surface with uq = 0 (:826-848), `QSurface` the
 //! same on any surface and uq, `QparQper` qcustom QPAR_QPER (:923-947),
 //! `Hkl` the hkl space (:1507-1570), `Angles` the angles space (:341-389).
-//! `QLab` has none.
+//! `QLab` has none. binoculars' plug-in projections that derive from these
+//! (HK, Stereo, the polar ones) are a [`Custom`] on one of them.
+
+use std::fmt;
+use std::sync::Arc;
 
 use nalgebra::{Rotation3, Unit, Vector3};
 
@@ -42,6 +46,137 @@ pub enum Projection {
     /// at zero source and z up: delta_lab = atan2(z, x), gamma_lab =
     /// atan2(y, √(x²+z²)), and tth the angle from the incident beam.
     Angles,
+    /// A user's function of another projection's planes.
+    Custom(Custom),
+}
+
+/// The frame a custom projection's function is called for: its geometry,
+/// axis values (radians / metres, the geometry's order) and wavelength.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameContext<'a> {
+    pub geometry: &'a Geometry,
+    pub values: &'a [f64],
+    pub wavelength: Wavelength,
+}
+
+/// A custom projection's function: the base projection's planes of one
+/// frame to one plane per coordinate, each of the base's shape, in hklrs
+/// units (radians for an angle).
+pub type CustomFn =
+    dyn Fn(&Projected, &FrameContext<'_>) -> Result<Vec<Image<f64>>, Error> + Send + Sync;
+
+/// Coordinates a user's function computes, once per frame, from a base
+/// projection's planes; the base fixes the frame they are taken in.
+#[derive(Clone)]
+pub struct Custom {
+    base: Box<Projection>,
+    coords: Vec<Coord>,
+    f: Arc<CustomFn>,
+}
+
+impl Custom {
+    /// `f` computes `coords`, which are at least one and of distinct names,
+    /// from `base`'s planes.
+    pub fn new(
+        base: Projection,
+        coords: Vec<Coord>,
+        f: impl Fn(&Projected, &FrameContext<'_>) -> Result<Vec<Image<f64>>, Error>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<Self, Error> {
+        if coords.is_empty() {
+            return Err(Error::NoCoords);
+        }
+        for (i, c) in coords.iter().enumerate() {
+            if coords[..i].iter().any(|d| d.name() == c.name()) {
+                return Err(Error::CoordRepeated {
+                    name: c.name().to_owned(),
+                });
+            }
+        }
+        Ok(Self {
+            base: Box::new(base),
+            coords,
+            f: Arc::new(f),
+        })
+    }
+
+    pub fn base(&self) -> &Projection {
+        &self.base
+    }
+
+    fn project(
+        &self,
+        geometry: &Geometry,
+        values: &[f64],
+        wavelength: Wavelength,
+        detector: &PixelDetector,
+    ) -> Result<Vec<Image<f64>>, Error> {
+        let base = self.base.project(geometry, values, wavelength, detector)?;
+        let context = FrameContext {
+            geometry,
+            values,
+            wavelength,
+        };
+        let planes = (self.f)(&base, &context)?;
+        for p in &planes {
+            p.check("custom projection plane", base.shape())?;
+        }
+        Ok(planes)
+    }
+}
+
+/// The same function, coordinates and base: a function is compared by
+/// identity, so only a clone equals the original.
+impl PartialEq for Custom {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.f, &other.f) && self.coords == other.coords && self.base == other.base
+    }
+}
+
+impl fmt::Debug for Custom {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Custom")
+            .field("base", &self.base)
+            .field("coords", &self.coords)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The error a custom projection's function failed with, kept whole so a
+/// caller can take back the original, as hklrs-py re-raises a Python
+/// exception. Equal only to a clone of itself.
+#[derive(Clone)]
+pub struct ProjectionError(Arc<dyn std::error::Error + Send + Sync>);
+
+impl ProjectionError {
+    pub fn new(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self(Arc::new(e))
+    }
+
+    /// The original error, to downcast.
+    pub fn get_ref(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        &*self.0
+    }
+}
+
+impl PartialEq for ProjectionError {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for ProjectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for ProjectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
 }
 
 impl Projection {
@@ -77,6 +212,7 @@ impl Projection {
             Self::Hkl(_) => HKL,
             Self::QparQper { .. } => QPAR_QPER,
             Self::Angles => ANGLES,
+            Self::Custom(c) => &c.coords,
         }
     }
 
@@ -136,6 +272,7 @@ impl Projection {
                     ]
                 })
             }
+            Self::Custom(c) => c.project(geometry, values, wavelength, detector)?,
         };
         Projected::new(self.coords().to_vec(), planes)
     }
@@ -302,5 +439,176 @@ mod tests {
         for (x, y) in v.iter().zip([FRAC_PI_2, 0.0, FRAC_PI_2]) {
             assert!((x - y).abs() < 1e-12, "{v:?}");
         }
+    }
+
+    /// |Q| and the 2θ it gives at the frame's wavelength, on QSample.
+    fn q_tth() -> Custom {
+        Custom::new(
+            Projection::QSample,
+            vec![Coord::linear("q"), Coord::angle("tth_q")],
+            |base, frame| {
+                let [x, y, z] = [0, 1, 2].map(|k| &base.planes()[k]);
+                let q = Image::from_fn(base.shape(), |s, j| {
+                    Vector3::new(x.get(s, j), y.get(s, j), z.get(s, j)).norm()
+                });
+                let k = frame.wavelength.wavenumber();
+                let tth = Image::from_fn(q.shape(), |s, j| 2.0 * (q.get(s, j) / (2.0 * k)).asin());
+                Ok(vec![q, tth])
+            },
+        )
+        .unwrap()
+    }
+
+    /// A custom projection's planes are its function's of the base's, and
+    /// a cube takes its coordinates, name and kind, as declared.
+    #[test]
+    fn a_custom_projection_is_its_function_of_the_base() {
+        let (g, values, wavelength, d) = setup();
+        let p = Projection::Custom(q_tth());
+        let out = p.project(&g, &values, wavelength, &d).unwrap();
+        assert_eq!(out.coords(), [Coord::linear("q"), Coord::angle("tth_q")]);
+        let q = Projection::QSample
+            .project(&g, &values, wavelength, &d)
+            .unwrap();
+        let angles = Projection::Angles
+            .project(&g, &values, wavelength, &d)
+            .unwrap();
+        let (slow, fast) = d.shape();
+        for (s, j) in (0..slow).flat_map(|s| (0..fast).map(move |j| (s, j))) {
+            let norm = Vector3::from_fn(|k, _| q.planes()[k].get(s, j)).norm();
+            assert_eq!(out.planes()[0].get(s, j), norm);
+            let tth = angles.planes()[2].get(s, j);
+            assert!((out.planes()[1].get(s, j) - tth).abs() < 1e-12, "{s} {j}");
+        }
+        let mut cube = Cube::default();
+        let binnings = vec![Binning::new(1e-3, 0.0).unwrap(); 2];
+        let one = Normalised::new(1.0, Weight::new(1.0, Masked::Opaque));
+        cube.add_growing(&binnings, &out, &Image::from_fn(out.shape(), |_, _| one))
+            .unwrap();
+        let kinds: Vec<CoordKind> = cube.axes().iter().map(|a| a.kind()).collect();
+        assert_eq!(kinds, [CoordKind::Linear, CoordKind::Angle]);
+    }
+
+    /// The function sees the frame it is called for: geometry, axis values
+    /// and wavelength.
+    #[test]
+    fn a_custom_function_sees_the_frame() {
+        let (g, values, wavelength, d) = setup();
+        let c = Custom::new(Projection::QLab, vec![Coord::linear("v")], |base, frame| {
+            let komega = frame.geometry.values_to_degrees(frame.values)?[1];
+            let v = komega + frame.wavelength.angstrom();
+            Ok(vec![Image::from_fn(base.shape(), |_, _| v)])
+        })
+        .unwrap();
+        let out = Projection::Custom(c)
+            .project(&g, &values, wavelength, &d)
+            .unwrap();
+        let v = 20.0f64.to_radians().to_degrees() + 1.54;
+        assert!(out.planes()[0].data().iter().all(|&x| x == v));
+    }
+
+    #[derive(Debug)]
+    struct Refused;
+
+    impl fmt::Display for Refused {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("refused")
+        }
+    }
+
+    impl std::error::Error for Refused {}
+
+    /// Per frame: a plane count other than the coordinates', a plane of
+    /// another shape than the base's, and the function's own error, which
+    /// comes back whole.
+    #[test]
+    fn a_custom_function_is_held_to_its_coordinates() {
+        let (g, values, wavelength, d) = setup();
+        let run = |f: fn(&Projected) -> Result<Vec<Image<f64>>, Error>| {
+            let coords = vec![Coord::linear("a"), Coord::linear("b")];
+            let c = Custom::new(Projection::QSample, coords, move |base, _| f(base)).unwrap();
+            Projection::Custom(c).project(&g, &values, wavelength, &d)
+        };
+        fn plane(shape: (usize, usize)) -> Image<f64> {
+            Image::from_fn(shape, |_, _| 0.0)
+        }
+        let e = run(|b| Ok(vec![plane(b.shape())])).unwrap_err();
+        assert_eq!(
+            e,
+            Error::Dimensions {
+                expected: 2,
+                got: 1
+            }
+        );
+        let e = run(|_| Ok(vec![plane((4, 3)); 2])).unwrap_err();
+        assert_eq!(
+            e,
+            Error::ShapeMismatch {
+                what: "custom projection plane",
+                shape: (4, 3),
+                expected: (3, 4)
+            }
+        );
+        let e = run(|_| Err(Error::Projection(ProjectionError::new(Refused)))).unwrap_err();
+        let Error::Projection(p) = &e else {
+            panic!("{e:?}")
+        };
+        assert!(p.get_ref().downcast_ref::<Refused>().is_some());
+        assert_eq!(e.to_string(), "custom projection: refused");
+        assert_eq!(e, e.clone());
+        assert_ne!(e, Error::Projection(ProjectionError::new(Refused)));
+    }
+
+    /// A NaN coordinate has no bin: the frame is refused whole and the
+    /// cube keeps what it held.
+    #[test]
+    fn a_non_finite_custom_coordinate_refuses_the_frame() {
+        let (g, values, wavelength, d) = setup();
+        let c = Custom::new(Projection::QSample, vec![Coord::linear("x")], |base, _| {
+            let x = &base.planes()[0];
+            Ok(vec![Image::from_fn(x.shape(), |s, j| {
+                if (s, j) == (1, 2) {
+                    f64::NAN
+                } else {
+                    x.get(s, j)
+                }
+            })])
+        })
+        .unwrap();
+        let out = Projection::Custom(c)
+            .project(&g, &values, wavelength, &d)
+            .unwrap();
+        let mut cube = Cube::default();
+        let binnings = [Binning::new(1e-3, 0.0).unwrap()];
+        let one = Normalised::new(1.0, Weight::new(1.0, Masked::Opaque));
+        let e = cube
+            .add_growing(&binnings, &out, &Image::from_fn(out.shape(), |_, _| one))
+            .unwrap_err();
+        assert!(
+            matches!(e, Error::NoBin { value, .. } if value.is_nan()),
+            "{e:?}"
+        );
+        assert_eq!(cube, Cube::default());
+    }
+
+    #[test]
+    fn custom_coordinates_are_some_of_distinct_names() {
+        let none = |_: &Projected, _: &FrameContext<'_>| Ok(Vec::new());
+        let e = Custom::new(Projection::QSample, Vec::new(), none).unwrap_err();
+        assert_eq!(e, Error::NoCoords);
+        let twice = vec![Coord::linear("a"), Coord::linear("b"), Coord::angle("a")];
+        let e = Custom::new(Projection::QSample, twice, none).unwrap_err();
+        assert_eq!(e, Error::CoordRepeated { name: "a".into() });
+    }
+
+    /// Only a clone equals a custom projection: the same code in another
+    /// closure is another function.
+    #[test]
+    fn a_custom_projection_equals_its_clones() {
+        let (a, b) = (q_tth(), q_tth());
+        assert_eq!(a, a.clone());
+        assert_ne!(a, b);
+        assert_eq!(a.base(), &Projection::QSample);
+        assert!(format!("{a:?}").contains("tth_q"), "{a:?}");
     }
 }

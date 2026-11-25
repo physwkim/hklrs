@@ -147,3 +147,119 @@ def test_angle_axes_are_degrees():
     assert a + first * s <= tth.min() + 1e-9
     assert tth.max() - 1e-9 < a + (first + size) * s
     assert int(cube.contributions.sum()) == tth.size
+
+
+def custom_setup():
+    geo = hklrs.Geometry.preset("E4CV")
+    det = hklrs_area(params(AREA_BASE, {}))
+    ang = angles("E4CV", 1, "frame_map_custom")[0]
+    return geo, det, ang
+
+
+def test_custom_identity_is_its_base():
+    """A custom projection handing qsample's planes back as they came bins
+    every pixel as qsample does, to the bit."""
+    geo, det, ang = custom_setup()
+    q = np.stack(hklrs.q_map(geo, ang, WL, det), axis=-1)
+    g3 = grid(q[None])
+    binnings = [(DX, xmin - DX / 2) for xmin, _ in g3]
+    raw = np.arange(q[..., 0].size, dtype=float).reshape(q.shape[:2])
+    axes = [("qx", "linear"), ("qy", "linear"), ("qz", "linear")]
+    p = fm.Custom(lambda planes, context: planes, axes)
+    cubes = [fm.Cube(), fm.Cube()]
+    for cube, projection in zip(cubes, ["qsample", p]):
+        fm.FrameMap(geo, det, binnings, projection).add(cube, ang, WL, raw)
+    assert cubes[0].axes == cubes[1].axes
+    np.testing.assert_array_equal(cubes[0].photons, cubes[1].photons)
+    np.testing.assert_array_equal(cubes[0].contributions, cubes[1].contributions)
+
+
+def test_custom_angles_are_degrees_both_ways():
+    """An "angles" base reaches the function in degrees, the function sees
+    the frame's axes and wavelength, and an axis declared an angle is
+    returned, binned and read back in degrees."""
+    geo, det, ang = custom_setup()
+    q = np.linalg.norm(np.stack(hklrs.q_map(geo, ang, WL, det), axis=-1), axis=-1)
+    tth = np.degrees(2 * np.arcsin(q * WL / (4 * np.pi)))
+    seen = []
+
+    def two_theta(planes, context):
+        seen.append((planes, context.axes, context.wavelength))
+        return (planes[2],)
+
+    p = fm.Custom(two_theta, [("two_theta", "angle")], base="angles")
+    step, anchor = 0.5, 0.25
+    cube = fm.Cube()
+    fm.FrameMap(geo, det, [(step, anchor)], p).add(cube, ang, WL, np.ones(tth.shape))
+    (planes, axes, wl), = seen
+    assert len(planes) == 3 and all(a.shape == tth.shape and a.dtype == np.float64 for a in planes)
+    np.testing.assert_allclose(planes[2], tth, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(axes, ang, rtol=1e-15, atol=1e-13)
+    assert wl == WL
+    (name, s, a, first, size), = cube.axes
+    assert name == "two_theta"
+    assert (s, a) == (pytest.approx(step, rel=1e-15), pytest.approx(anchor, rel=1e-15))
+    assert a + first * s <= tth.min() + 1e-9 and tth.max() - 1e-9 < a + (first + size) * s
+    assert int(cube.contributions.sum()) == tth.size
+
+
+class Refused(Exception):
+    pass
+
+
+def test_custom_function_exception_is_raised_as_it_was():
+    geo, det, ang = custom_setup()
+    raised = Refused("no")
+
+    def refuse(planes, context):
+        raise raised
+
+    m = fm.FrameMap(geo, det, [(DX, 0.0)], fm.Custom(refuse, [("x", "linear")]))
+    cube = fm.Cube()
+    with pytest.raises(Refused) as e:
+        m.add(cube, ang, WL, np.ones(det.shape))
+    assert e.value is raised
+    assert cube.axes == [] and int(cube.contributions.sum()) == 0
+
+
+@pytest.mark.parametrize(
+    "returns, error, match",
+    [
+        (lambda p: (p[0],), ValueError, r"^expected 2 dimensions"),
+        (lambda p: (p[0][:-1], p[1][:-1]), ValueError, r"^custom projection plane shape"),
+        (lambda p: (p[0], p[1].astype(np.float32)), TypeError, r"plane 1 is a 2-D float32 array"),
+        (lambda p: (p[0], p[1][0]), TypeError, r"plane 1 is a 1-D float64 array"),
+        (lambda p: p[0], TypeError, r"plane 0 is a 1-D float64 array"),
+        (lambda p: (p[0], list(p[1])), TypeError, r"plane 1 is <class 'list'>"),
+        (lambda p: (p[0], np.where(p[1] > p[1].min(), p[1], np.nan)), ValueError, r"has no bin"),
+    ],
+    ids=["count", "shape", "float32", "1-D", "bare", "list", "nan"],
+)
+def test_custom_planes_are_held_to_the_axes(returns, error, match):
+    geo, det, ang = custom_setup()
+    p = fm.Custom(lambda planes, context: returns(planes), [("a", "linear"), ("b", "linear")])
+    m = fm.FrameMap(geo, det, [(DX, 0.0)] * 2, p)
+    cube = fm.Cube()
+    with pytest.raises(error, match=match):
+        m.add(cube, ang, WL, np.ones(det.shape))
+    assert cube.axes == []
+
+
+def test_custom_setup_is_refused():
+    geo, det, _ = custom_setup()
+    f = lambda planes, context: planes  # noqa: E731
+    with pytest.raises(ValueError, match="at least one coordinate"):
+        fm.Custom(f, [])
+    with pytest.raises(ValueError, match=r'"a" appears twice'):
+        fm.Custom(f, [("a", "linear"), ("a", "angle")])
+    with pytest.raises(ValueError, match=r'kind "degrees"'):
+        fm.Custom(f, [("a", "degrees")])
+    with pytest.raises(TypeError, match="not callable"):
+        fm.Custom(None, [("a", "linear")])
+    with pytest.raises(ValueError, match="sample= with"):
+        fm.Custom(f, [("a", "linear")], base="hkl")
+    p = fm.Custom(f, [("a", "linear"), ("b", "linear")])
+    with pytest.raises(ValueError, match=r"^expected 2 dimensions, one per projection axis, got 3"):
+        fm.FrameMap(geo, det, [(DX, 0.0)] * 3, p)
+    with pytest.raises(ValueError, match="takes its base's"):
+        fm.FrameMap(geo, det, [(DX, 0.0)] * 2, p, normal=[0, 0, 1])

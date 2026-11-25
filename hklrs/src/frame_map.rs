@@ -118,7 +118,9 @@ mod tests {
     use nalgebra::Vector3;
 
     use super::*;
+    use crate::grid::Coord;
     use crate::presets::preset;
+    use crate::projection::Custom;
 
     /// K6C mu, komega, kappa, kphi, gamma, delta, degrees.
     const READBACKS: [f64; 6] = [3.0, 20.0, -30.0, 40.0, 12.0, 25.0];
@@ -160,6 +162,56 @@ mod tests {
             ),
             "{e:?}"
         );
+    }
+
+    /// A custom projection's binnings are one per coordinate of its own,
+    /// not its base's, and its function gets the binned detector's planes.
+    #[test]
+    fn a_custom_projection_bins_its_own_coordinates() {
+        let custom = Custom::new(
+            Projection::QSample,
+            vec![Coord::linear("qx"), Coord::linear("pixels")],
+            |base, _| {
+                let n = |s, j| (s * base.shape().1 + j) as f64;
+                Ok(vec![
+                    base.planes()[0].clone(),
+                    Image::from_fn(base.shape(), n),
+                ])
+            },
+        )
+        .unwrap();
+        let new = |n| {
+            FrameMap::new(
+                preset("K6C").unwrap(),
+                Projection::Custom(custom.clone()),
+                &raw_detector(),
+                &Region::new(0..4, 0..6, (2, 3)),
+                PixelFields::new(),
+                vec![Binning::new(1.0, -0.5).unwrap(); n],
+            )
+        };
+        assert_eq!(
+            new(3).unwrap_err(),
+            Error::Dimensions {
+                expected: 2,
+                got: 3
+            }
+        );
+        let map = new(2).unwrap();
+        let raw = Image::new((4, 6), vec![1.0; 24]).unwrap();
+        let wavelength = Wavelength::new(1.54).unwrap();
+        let frame = map
+            .map(&READBACKS, wavelength, &raw, &FrameScalars::new())
+            .unwrap();
+        assert_eq!(frame.points().shape(), (2, 2));
+        let mut cube = Cube::default();
+        map.add(&mut cube, &frame).unwrap();
+        let pixels = &cube.axes()[1];
+        assert_eq!(
+            (pixels.name(), pixels.first(), pixels.size()),
+            ("pixels", 0, 4)
+        );
+        assert_eq!(cube.photons().iter().sum::<f64>(), 24.0);
     }
 
     /// A 2×2-binned roi: the coordinates are those of the binned detector's

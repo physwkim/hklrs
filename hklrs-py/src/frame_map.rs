@@ -1,17 +1,18 @@
 //! `hklrs.frame_map`: detector frames into a cube, the step a live map and
 //! a batch reduction share. Angle coordinates, as the "angles"
-//! projection's, and so their binnings and cube axes, are degrees here.
+//! projection's or a custom one's declared so, and so their binnings and
+//! cube axes, are degrees here.
 
 use hklrs::frame_map::FrameMap;
-use hklrs::grid::{Binning, Coord, CoordKind, Cube};
+use hklrs::grid::{Binning, Coord, CoordKind, Cube, Projected};
 use hklrs::nalgebra::{Matrix3, Rotation3};
 use hklrs::normalise::{FrameScalars, PixelFields, Region};
-use hklrs::projection::Projection;
-use hklrs::{Sample, Wavelength};
+use hklrs::projection::{Custom, FrameContext, Projection, ProjectionError};
+use hklrs::{Error, Image, Sample, Wavelength};
 use numpy::{PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArray2};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use super::normalise::{PyFrameScalars, PyPixelFields, PyRegion};
 use super::{PyGeometry, PyPixelDetector, PySample, err, image, unit, xu_options};
@@ -67,6 +68,145 @@ fn projection(
         }
     };
     Ok(p)
+}
+
+/// A Python exception raised in a custom function, carried through the core.
+fn wrapped(e: PyErr) -> Error {
+    Error::Projection(ProjectionError::new(e))
+}
+
+/// `e` as a Python exception: one a custom function raised as it was
+/// raised, any other a ValueError.
+fn unwrapped(py: Python<'_>, e: Error) -> PyErr {
+    if let Error::Projection(p) = &e
+        && let Some(raised) = p.get_ref().downcast_ref::<PyErr>()
+    {
+        return raised.clone_ref(py);
+    }
+    err(e)
+}
+
+/// The frame a custom function is called for: `axes` as given to
+/// `FrameMap.add` (degrees / metres, to rounding), `wavelength` in Å.
+#[pyclass(name = "FrameContext", module = "hklrs.frame_map", frozen, get_all)]
+struct PyFrameContext {
+    axes: Vec<f64>,
+    wavelength: f64,
+}
+
+/// One frame of a custom projection: `function(planes, context)` in
+/// Python's units, its returned planes in the core's, one per `kinds`.
+fn call(
+    py: Python<'_>,
+    function: &Py<PyAny>,
+    base: &Projected,
+    frame: &FrameContext<'_>,
+    kinds: &[CoordKind],
+) -> Result<Vec<Image<f64>>, Error> {
+    let planes = base
+        .coords()
+        .iter()
+        .zip(base.planes())
+        .map(|(c, p)| {
+            let v = p.data().iter().map(|&v| from_core(v, c.kind())).collect();
+            PyArray1::from_vec(py, v).reshape([p.shape().0, p.shape().1])
+        })
+        .collect::<PyResult<Vec<_>>>()
+        .map_err(wrapped)?;
+    let context = PyFrameContext {
+        axes: frame.geometry.values_to_degrees(frame.values)?,
+        wavelength: frame.wavelength.angstrom(),
+    };
+    let args = (PyTuple::new(py, planes).map_err(wrapped)?, context);
+    let out = function.call1(py, args).map_err(wrapped)?;
+    let out = out
+        .bind(py)
+        .extract::<Vec<Bound<'_, PyAny>>>()
+        .map_err(wrapped)?
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.extract::<PyReadonlyArray2<'_, f64>>().map_err(|_| {
+                let got = match (p.getattr("ndim"), p.getattr("dtype")) {
+                    (Ok(n), Ok(d)) => format!("a {n}-D {d} array"),
+                    _ => p.get_type().to_string(),
+                };
+                PyTypeError::new_err(format!(
+                    "custom projection plane {i} is {got}, not a 2-D float64 array"
+                ))
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()
+        .map_err(wrapped)?;
+    if out.len() != kinds.len() {
+        return Err(Error::Dimensions {
+            expected: kinds.len(),
+            got: out.len(),
+        });
+    }
+    out.iter()
+        .zip(kinds)
+        .map(|(a, &kind)| {
+            let a = a.as_array();
+            Image::new(a.dim(), a.iter().map(|&v| to_core(v, kind)).collect())
+        })
+        .collect()
+}
+
+/// A projection whose coordinates `function(planes, context)` computes,
+/// once per frame, from the built-in projection `base`'s: `planes` a tuple
+/// of 2-D float64 arrays, one per base axis (degrees for an angle), and
+/// `context` an `hklrs.frame_map.FrameContext`. It returns a sequence of
+/// one 2-D float64 array per entry of `axes`, each of the planes' shape;
+/// `axes` lists (name, "angle" | "linear"), an angle in degrees. `sample`,
+/// `normal` and `frame` are `base`'s options, as `FrameMap` takes them. An
+/// exception the function raises comes out of `FrameMap.add` as it was
+/// raised. `context.axes` arrive converted back from radians, so they can
+/// differ from `add`'s inputs in the last digits.
+#[pyclass(name = "Custom", module = "hklrs.frame_map", frozen)]
+struct PyCustom(Custom);
+
+#[pymethods]
+impl PyCustom {
+    #[new]
+    #[pyo3(signature = (function, axes, base="qsample", *, sample=None, normal=None, frame=None))]
+    fn new(
+        function: Bound<'_, PyAny>,
+        axes: Vec<(String, String)>,
+        base: &str,
+        sample: Option<PyRef<'_, PySample>>,
+        normal: Option<[f64; 3]>,
+        frame: Option<[[f64; 3]; 3]>,
+    ) -> PyResult<Self> {
+        if !function.is_callable() {
+            return Err(PyTypeError::new_err("function is not callable"));
+        }
+        let base = projection(base, sample.map(|s| s.0.clone()), normal, frame)?;
+        let coords = axes
+            .into_iter()
+            .map(|(name, kind)| match kind.as_str() {
+                "angle" => Ok(Coord::new(name, CoordKind::Angle)),
+                "linear" => Ok(Coord::new(name, CoordKind::Linear)),
+                _ => Err(PyValueError::new_err(format!(
+                    "axis {name:?}: kind {kind:?} is not \"angle\" or \"linear\""
+                ))),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let kinds: Vec<CoordKind> = coords.iter().map(Coord::kind).collect();
+        let function = function.unbind();
+        let f = move |base: &Projected, frame: &FrameContext<'_>| {
+            Python::attach(|py| call(py, &function, base, frame, &kinds))
+        };
+        Custom::new(base, coords, f).map(Self).map_err(err)
+    }
+}
+
+/// What `FrameMap` takes as its projection: a built-in's name, or a custom
+/// one.
+#[derive(FromPyObject)]
+enum ProjectionArg<'py> {
+    Name(String),
+    Custom(Bound<'py, PyCustom>),
 }
 
 /// Σcounts, Σweight and contributions per bin over axes that grow to hold
@@ -145,14 +285,14 @@ impl PyCube {
 }
 
 /// What every frame of one scan shares: the geometry, the raw detector,
-/// one (step, anchor) binning per dimension of `projection`, and keyword
-/// options:
+/// one (step, anchor) binning per dimension of `projection`, a built-in's
+/// name or a `Custom`, and keyword options:
 ///
 /// - `frame` for the "qsurface" projection, a proper rotation (rows) whose
 ///   columns are the surface axes in the sample frame, as
 ///   `Sample.surface_frame` returns it; `sample` for "hkl"; `normal`
 ///   (sample frame) for "qpar_qper"; the others are "qlab", "qsample" and
-///   "angles";
+///   "angles"; a `Custom` takes its base's options itself;
 /// - `region`: an `hklrs.normalise.Region` on the raw frame, the whole
 ///   frame unbinned when omitted;
 /// - `fields`: `hklrs.normalise.PixelFields` of the raw shape, none when
@@ -163,12 +303,15 @@ struct PyFrameMap(FrameMap);
 #[pymethods]
 impl PyFrameMap {
     #[new]
-    #[pyo3(signature = (geometry, detector, binnings, projection="qsample", **options))]
+    #[pyo3(
+        signature = (geometry, detector, binnings, projection=ProjectionArg::Name("qsample".to_owned()), **options),
+        text_signature = "(geometry, detector, binnings, projection=\"qsample\", **options)"
+    )]
     fn new(
         geometry: &PyGeometry,
         detector: &PyPixelDetector,
         binnings: Vec<(f64, f64)>,
-        projection: &str,
+        projection: ProjectionArg<'_>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let raw_shape = detector.0.shape();
@@ -186,7 +329,15 @@ impl PyFrameMap {
             }
             Ok(true)
         })?;
-        let projection = self::projection(projection, sample, normal, frame)?;
+        let projection = match projection {
+            ProjectionArg::Name(name) => self::projection(&name, sample, normal, frame)?,
+            ProjectionArg::Custom(_) if sample.is_some() || normal.is_some() || frame.is_some() => {
+                return Err(PyValueError::new_err(
+                    "a Custom projection takes its base's sample=, normal= or frame= itself",
+                ));
+            }
+            ProjectionArg::Custom(c) => Projection::Custom(c.get().0.clone()),
+        };
         let coords = projection.coords();
         let binnings = binnings
             .into_iter()
@@ -220,7 +371,8 @@ impl PyFrameMap {
     /// Adds one frame to `cube`: `axes` in the geometry's axis order
     /// (degrees / metres), `wavelength` in Å, `raw` the raw image and
     /// `scalars` the frame's `hklrs.normalise.FrameScalars`, none when
-    /// omitted. On error the cube is unchanged.
+    /// omitted. On error the cube is unchanged; an exception a custom
+    /// function raised is raised again.
     #[pyo3(signature = (cube, axes, wavelength, raw, scalars=None))]
     fn add(
         &self,
@@ -239,11 +391,13 @@ impl PyFrameMap {
             let frame = self.0.map(&axes, wavelength, &raw, &s)?;
             self.0.add(cube, &frame)
         })
-        .map_err(err)
+        .map_err(|e| unwrapped(py, e))
     }
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCube>()?;
+    m.add_class::<PyCustom>()?;
+    m.add_class::<PyFrameContext>()?;
     m.add_class::<PyFrameMap>()
 }
