@@ -21,7 +21,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 fn err(e: hklrs::Error) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(match e {
+        hklrs::Error::GridMismatch { left, right } => frame_map::grid_mismatch(&left, &right),
+        e => e.to_string(),
+    })
 }
 
 /// `a` as an image of its own shape, which the core compares with any

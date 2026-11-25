@@ -165,6 +165,10 @@ impl Cut {
         self.intdir
     }
 
+    pub fn at(&self) -> [f64; 3] {
+        self.at
+    }
+
     pub fn half_width(&self) -> f64 {
         self.half_width
     }

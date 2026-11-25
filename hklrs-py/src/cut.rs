@@ -5,7 +5,7 @@
 //! sums and their ratio per bin.
 
 use hklrs::absorption::{Masked, Weight};
-use hklrs::cut::{Cut, CutKind, CutResult, Footprint, IntDir};
+use hklrs::cut::{Cut, CutError, CutKind, CutResult, Footprint, IntDir};
 use hklrs::grid::{Binning, CoordKind};
 use hklrs::nalgebra::Vector3;
 use hklrs::normalise::Normalised;
@@ -16,8 +16,34 @@ use pyo3::types::PyDict;
 
 use crate::{MASKED, err, masked_code};
 
-fn cut_err(e: hklrs::cut::CutError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+fn cut_err(e: CutError) -> PyErr {
+    match e {
+        CutError::Value(e) => err(e),
+        CutError::Cut { left, right } => PyValueError::new_err(format!(
+            "cut results are of different cuts on one axis: {} vs {}",
+            cut_text(&left),
+            cut_text(&right)
+        )),
+        e => PyValueError::new_err(e.to_string()),
+    }
+}
+
+/// `c` as the `Cut(...)` call that makes it.
+fn cut_text(c: &Cut) -> String {
+    let (kind, b) = (c.kind(), c.binning());
+    let along = angular_along(&kind);
+    let place = match kind {
+        CutKind::Line { point, dir } => format!("line=({point:?}, {dir:?})"),
+        _ => format!("at={:?}", c.at()),
+    };
+    format!(
+        "Cut({:?}, {:?}, {:?}, ({:?}, {:?}), {place})",
+        kind_name(&kind),
+        intdir_name(c.intdir()),
+        from_core(c.half_width(), angular_perp(c.intdir())),
+        from_core(b.step(), along),
+        from_core(b.anchor(), along),
+    )
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -41,6 +67,10 @@ fn reason(code: u8) -> PyResult<Option<Masked>> {
 
 fn angular_along(k: &CutKind) -> bool {
     k.coord().kind() == CoordKind::Angle
+}
+
+fn angular_perp(d: IntDir) -> bool {
+    d != IntDir::Q
 }
 
 /// How a pixel's weight is laid on the cut axis: at its coordinate, or over
@@ -161,7 +191,7 @@ impl PyCut {
         let (step, anchor) = binning;
         let kind = parse_kind(kind, line)?;
         let intdir = parse_intdir(intdir)?;
-        let (aa, ap) = (angular_along(&kind), intdir != IntDir::Q);
+        let (aa, ap) = (angular_along(&kind), angular_perp(intdir));
         let binning = Binning::new(to_core(step, aa), to_core(anchor, aa)).map_err(err)?;
         let cut = Cut::new(kind, intdir, at, to_core(half_width, ap), binning).map_err(cut_err)?;
         Ok(Self {
@@ -338,13 +368,25 @@ impl PyCutResult {
     /// The sum of two results of the same cut and footprint, for frames
     /// accumulated apart.
     fn merge(&self, other: &PyCutResult) -> PyResult<PyCutResult> {
-        Ok(PyCutResult {
-            result: self
-                .result
-                .clone()
-                .merge(other.result.clone())
-                .map_err(cut_err)?,
-        })
+        let along = angular_along(&self.result.cut().kind());
+        let footprint = |f| match f {
+            Footprint::Point => PyFootprint::point(),
+            Footprint::Width(w) => PyFootprint::width(from_core(w, along)),
+        };
+        let result = self
+            .result
+            .clone()
+            .merge(other.result.clone())
+            .map_err(|e| match e {
+                // refused only between results of one cut, so in its units
+                CutError::Footprint { left, right } => PyValueError::new_err(format!(
+                    "cut results have different footprints: {} vs {}",
+                    footprint(left).__repr__(),
+                    footprint(right).__repr__()
+                )),
+                e => cut_err(e),
+            })?;
+        Ok(PyCutResult { result })
     }
 
     fn __len__(&self) -> usize {

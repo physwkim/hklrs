@@ -7,6 +7,8 @@ points from xmin to xmax is the lattice of step (xmax - xmin) / (n - 1)
 anchored half a step below xmin; node j is bin j. Angles are degrees on
 both sides. Run with the py2 interpreter: python -I -m pytest compare
 """
+import re
+
 import numpy as np
 import pytest
 
@@ -15,6 +17,8 @@ from hklrs import cut as hc
 
 xu = pytest.importorskip("xrayutilities")
 lc = pytest.importorskip("xrayutilities.analysis.line_cuts")
+# (name, kind, step, anchor) of each axis in a "grids differ" message
+AXES = r'\("(\w+)", "(\w+)", ([^,]+), ([^)]+)\)'
 
 WL = 1.5406
 NP = 40
@@ -234,6 +238,32 @@ def test_merge_of_two_halves_is_the_whole():
                 a.merge(accumulate(other, q, inten, hc.Footprint.point()))
     with pytest.raises(ValueError, match="footprints"):
         a.merge(accumulate(cut, q, inten, hc.Footprint.width(0.03)))
+
+
+def test_merge_refusals_of_an_omega_cut_are_in_degrees():
+    """An ω cut's binning, 2θ window and footprint went in as degrees and
+    come back so in every merge refusal."""
+    q, inten = CLOUDS["peak"], INTEN["peak"]
+
+    def refused(a, b, fa=hc.Footprint.point(), fb=hc.Footprint.point()):
+        with pytest.raises(ValueError) as e:
+            accumulate(a, q, inten, fa).merge(accumulate(b, q, inten, fb))
+        return str(e.value)
+
+    def omega(half_width, step):
+        return hc.Cut("omega", "2theta", half_width, (step, 0.25), at=[0.02, 2.0, 5.0])
+
+    m = refused(omega(0.4, 0.05), omega(0.4, 0.1))
+    assert m.startswith("grids differ"), m
+    axes = [(n, k, float(s), float(a)) for n, k, s, a in re.findall(AXES, m)]
+    assert axes == [("Omega", "angle", pytest.approx(s), pytest.approx(0.25)) for s in (0.05, 0.1)], m
+    m = refused(omega(0.4, 0.05), omega(0.3, 0.05))
+    assert m.startswith("cut results are of different cuts"), m
+    cuts = re.findall(r'Cut\("omega", "2theta", ([^,]+), \(([^,]+), ([^)]+)\), at=\[0\.02, 2\.0, 5\.0\]\)', m)
+    assert [tuple(map(float, c)) for c in cuts] == [pytest.approx((w, 0.05, 0.25)) for w in (0.4, 0.3)], m
+    m = refused(omega(0.4, 0.05), omega(0.4, 0.05), hc.Footprint.width(0.03))
+    widths = re.fullmatch(r"cut results have different footprints: Footprint\.width\(([^)]+)\) vs Footprint\.point\(\)", m)
+    assert widths and float(widths[1]) == pytest.approx(0.03), m
 
 
 def test_reason_wins_and_a_bad_weight_is_opaque():

@@ -33,6 +33,29 @@ fn from_core(v: f64, kind: CoordKind) -> f64 {
     }
 }
 
+/// The message of `Error::GridMismatch` in Python's units.
+pub(crate) fn grid_mismatch(left: &[(Coord, Binning)], right: &[(Coord, Binning)]) -> String {
+    let axes = |axes: &[(Coord, Binning)]| {
+        let axis = |(c, b): &(Coord, Binning)| {
+            let kind = match c.kind() {
+                CoordKind::Angle => "angle",
+                CoordKind::Linear => "linear",
+            };
+            let (step, anchor) = (
+                from_core(b.step(), c.kind()),
+                from_core(b.anchor(), c.kind()),
+            );
+            format!("({:?}, {kind:?}, {step:?}, {anchor:?})", c.name())
+        };
+        format!("[{}]", axes.iter().map(axis).collect::<Vec<_>>().join(", "))
+    };
+    format!(
+        "grids differ: {} vs {} (name, kind, step, anchor; degrees for an angle)",
+        axes(left),
+        axes(right)
+    )
+}
+
 /// `rows` as a rotation, held to `hklrs::proper_rotation`.
 fn rotation(rows: [[f64; 3]; 3]) -> PyResult<Rotation3<f64>> {
     hklrs::proper_rotation("frame", &Matrix3::from_fn(|i, j| rows[i][j])).map_err(err)

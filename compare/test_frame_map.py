@@ -12,6 +12,8 @@ step below xmin, so global bin k is node k. Binned regions are not compared:
 xu places a Nav pixel on its block's first pixel (test_xu, XU-13).
 Run with the py2 interpreter: python -I -m pytest compare
 """
+import re
+
 import numpy as np
 import pytest
 
@@ -35,6 +37,8 @@ from test_xu import (  # noqa: F401  (fixtures: name, kappa_axis_in_xu_frame)
 xu = pytest.importorskip("xrayutilities")
 
 DX = 2.0**-10  # exact, so xu's (xmax - xmin) / (n - 1) is DX to the bit
+# (name, kind, step, anchor) of each axis in a "grids differ" message
+AXES = r'\("(\w+)", "(\w+)", ([^,]+), ([^)]+)\)'
 FRAMES = 5
 STEP = 0.02  # degrees on the innermost sample axis per frame
 COUNT_TIME = 2.0  # a power of two, so halving xu's mean is exact
@@ -147,6 +151,27 @@ def test_angle_axes_are_degrees():
     assert a + first * s <= tth.min() + 1e-9
     assert tth.max() - 1e-9 < a + (first + size) * s
     assert int(cube.contributions.sum()) == tth.size
+
+
+def test_a_grid_mismatch_gives_angle_axes_in_degrees():
+    """Adding to a cube of other angle binnings is refused with both grids
+    in degrees, as they went in."""
+    geo = hklrs.Geometry.preset("E4CV")
+    det = hklrs_area(params(AREA_BASE, {}))
+    ang = angles("E4CV", 1, "frame_map_angles")[0]
+    raw = np.ones(hklrs.q_map(geo, ang, WL, det)[0].shape)
+    cube = fm.Cube()
+    fm.FrameMap(geo, det, [(0.5, 0.25)] * 3, "angles").add(cube, ang, WL, raw)
+    with pytest.raises(ValueError, match="^grids differ") as e:
+        fm.FrameMap(geo, det, [(0.2, 0.25)] * 3, "angles").add(cube, ang, WL, raw)
+    m = str(e.value)
+    axes = [(n, k, float(s), float(a)) for n, k, s, a in re.findall(AXES, m)]
+    assert axes == [
+        (n, "angle", pytest.approx(s), pytest.approx(0.25))
+        for s in (0.5, 0.2)
+        for n in ("delta_lab", "gamma_lab", "tth")
+    ], m
+    assert int(cube.contributions.sum()) == raw.size
 
 
 def custom_setup():
