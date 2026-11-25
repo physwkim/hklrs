@@ -99,6 +99,11 @@ impl Setup {
     }
 }
 
+/// `p`'s axis names.
+fn names(p: &Projection) -> Vec<&str> {
+    p.coords().iter().map(|c| c.name()).collect()
+}
+
 fn max_diff(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
     a.iter()
         .flatten()
@@ -127,7 +132,7 @@ fn q_sample_and_qpar_qper_match_qcustom() {
             },
         ),
     ] {
-        let d = max_diff(&s.space(key, p.names()), &s.project(&p));
+        let d = max_diff(&s.space(key, &names(&p)), &s.project(&p));
         assert!(d < Q_TOL, "{key}: {d}");
     }
 }
@@ -163,7 +168,7 @@ fn hkl_matches_binoculars_through_hkl_ub_but_not_its_b_hkl12() {
 #[test]
 fn angles_match_binoculars_except_tth_bin13() {
     let s = setup();
-    let bin = s.space("angles", Projection::Angles.names());
+    let bin = s.space("angles", &names(&Projection::Angles));
     let ours = s.project(&Projection::Angles);
     let p = detector_positions(&s.geometry, &s.values, &s.detector).unwrap();
     for (i, (b, r)) in bin.iter().zip(&ours).enumerate() {

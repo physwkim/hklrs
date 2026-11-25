@@ -53,7 +53,7 @@ impl FrameMap {
         fields: PixelFields,
         binnings: Vec<Binning>,
     ) -> Result<Self, Error> {
-        let dimensions = projection.names().len();
+        let dimensions = projection.coords().len();
         if binnings.len() != dimensions {
             return Err(Error::Dimensions {
                 expected: dimensions,

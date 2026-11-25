@@ -11,7 +11,7 @@
 
 use nalgebra::{Rotation3, Unit, Vector3};
 
-use crate::grid::Projected;
+use crate::grid::{Coord, Projected};
 use crate::{
     Error, Geometry, Image, Orientation, PixelDetector, Planes, Sample, Wavelength, angle_between,
     detector_positions, q_map,
@@ -45,16 +45,38 @@ pub enum Projection {
 }
 
 impl Projection {
-    /// Axis names, the same table [`Projection::project`] labels its planes
-    /// with.
-    pub fn names(&self) -> &'static [&'static str] {
+    /// The coordinates, the same table [`Projection::project`] labels its
+    /// planes with.
+    pub fn coords(&self) -> &[Coord] {
+        const QLAB: &[Coord] = &[
+            Coord::linear("qx_lab"),
+            Coord::linear("qy_lab"),
+            Coord::linear("qz_lab"),
+        ];
+        const QSAMPLE: &[Coord] = &[
+            Coord::linear("qx"),
+            Coord::linear("qy"),
+            Coord::linear("qz"),
+        ];
+        const QSURFACE: &[Coord] = &[
+            Coord::linear("qx_surface"),
+            Coord::linear("qy_surface"),
+            Coord::linear("qz_surface"),
+        ];
+        const HKL: &[Coord] = &[Coord::linear("H"), Coord::linear("K"), Coord::linear("L")];
+        const QPAR_QPER: &[Coord] = &[Coord::linear("qpar"), Coord::linear("qper")];
+        const ANGLES: &[Coord] = &[
+            Coord::angle("delta_lab"),
+            Coord::angle("gamma_lab"),
+            Coord::angle("tth"),
+        ];
         match self {
-            Self::QLab => &["qx_lab", "qy_lab", "qz_lab"],
-            Self::QSample => &["qx", "qy", "qz"],
-            Self::QSurface { .. } => &["qx_surface", "qy_surface", "qz_surface"],
-            Self::Hkl(_) => &["H", "K", "L"],
-            Self::QparQper { .. } => &["qpar", "qper"],
-            Self::Angles => &["delta_lab", "gamma_lab", "tth"],
+            Self::QLab => QLAB,
+            Self::QSample => QSAMPLE,
+            Self::QSurface { .. } => QSURFACE,
+            Self::Hkl(_) => HKL,
+            Self::QparQper { .. } => QPAR_QPER,
+            Self::Angles => ANGLES,
         }
     }
 
@@ -115,7 +137,7 @@ impl Projection {
                 })
             }
         };
-        Projected::new(self.names(), planes)
+        Projected::new(self.coords().to_vec(), planes)
     }
 }
 
@@ -136,7 +158,7 @@ mod tests {
 
     use super::*;
     use crate::absorption::{Masked, Weight};
-    use crate::grid::{Binning, Cube};
+    use crate::grid::{Binning, CoordKind, Cube};
     use crate::normalise::Normalised;
     use crate::presets::preset;
     use crate::{Lattice, Rad, forward};
@@ -242,21 +264,25 @@ mod tests {
     #[test]
     fn bin8_names_come_from_the_projection() {
         // BIN-8: binoculars labelled a 2θ axis `q`; here the planes are
-        // labelled by the variant that computed them
+        // labelled by the variant that computed them, name and kind
         let (g, values, wavelength, d) = setup();
         for p in all() {
             let out = p.project(&g, &values, wavelength, &d).unwrap();
-            assert_eq!(out.names(), p.names());
-            assert_eq!(out.planes().len(), p.names().len());
+            assert_eq!(out.coords(), p.coords());
+            assert_eq!(out.planes().len(), p.coords().len());
             let mut cube = Cube::default();
-            let binnings = vec![Binning::new(1e-3, 0.0).unwrap(); p.names().len()];
+            let binnings = vec![Binning::new(1e-3, 0.0).unwrap(); p.coords().len()];
             let one = Normalised::new(1.0, Weight::new(1.0, Masked::Opaque));
             cube.add_growing(&binnings, &out, &Image::from_fn(out.shape(), |_, _| one))
                 .unwrap();
-            let axes: Vec<&str> = cube.axes().iter().map(|a| a.name()).collect();
-            assert_eq!(axes, p.names());
+            let axes: Vec<&Coord> = cube.axes().iter().map(|a| a.coord()).collect();
+            assert_eq!(axes, p.coords().iter().collect::<Vec<_>>());
+            let angle = matches!(p, Projection::Angles);
+            for a in cube.axes() {
+                assert_eq!(a.kind() == CoordKind::Angle, angle, "{}", a.name());
+            }
         }
-        assert_eq!(Projection::Angles.names()[2], "tth");
+        assert_eq!(Projection::Angles.coords()[2], Coord::angle("tth"));
     }
 
     #[test]

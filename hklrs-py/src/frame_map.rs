@@ -1,9 +1,9 @@
 //! `hklrs.frame_map`: detector frames into a cube, the step a live map and
-//! a batch reduction share. The "angles" projection's coordinates, and so
-//! its binnings and cube axes, are degrees here.
+//! a batch reduction share. Angle coordinates, as the "angles"
+//! projection's, and so their binnings and cube axes, are degrees here.
 
 use hklrs::frame_map::FrameMap;
-use hklrs::grid::{Binning, Cube};
+use hklrs::grid::{Binning, Coord, CoordKind, Cube};
 use hklrs::nalgebra::{Matrix3, Rotation3};
 use hklrs::normalise::{FrameScalars, PixelFields, Region};
 use hklrs::projection::Projection;
@@ -16,18 +16,20 @@ use pyo3::types::PyDict;
 use super::normalise::{PyFrameScalars, PyPixelFields, PyRegion};
 use super::{PyGeometry, PyPixelDetector, PySample, err, image, unit, xu_options};
 
-/// Whether a cube axis is one of the angles projection's, radians in the
-/// core.
-fn angular(name: &str) -> bool {
-    Projection::Angles.names().contains(&name)
+/// A value of a coordinate of `kind` from Python's units to the core's:
+/// degrees to radians for an angle.
+fn to_core(v: f64, kind: CoordKind) -> f64 {
+    match kind {
+        CoordKind::Angle => v.to_radians(),
+        CoordKind::Linear => v,
+    }
 }
 
-fn to_core(v: f64, angular: bool) -> f64 {
-    if angular { v.to_radians() } else { v }
-}
-
-fn from_core(v: f64, angular: bool) -> f64 {
-    if angular { v.to_degrees() } else { v }
+fn from_core(v: f64, kind: CoordKind) -> f64 {
+    match kind {
+        CoordKind::Angle => v.to_degrees(),
+        CoordKind::Linear => v,
+    }
 }
 
 /// `rows` as a rotation, held to `hklrs::proper_rotation`.
@@ -98,18 +100,18 @@ impl PyCube {
 
     /// Per axis (name, step, anchor, first, size): bin k of the axis spans
     /// [anchor + k·step, anchor + (k+1)·step) and the cube holds bins
-    /// first..first+size; degrees for the angles projection.
+    /// first..first+size; degrees for an angle axis.
     #[getter]
     fn axes(&self) -> Vec<(String, f64, f64, i64, usize)> {
         self.0
             .axes()
             .iter()
             .map(|a| {
-                let (b, ang) = (a.binning(), angular(a.name()));
+                let (b, kind) = (a.binning(), a.kind());
                 (
                     a.name().to_owned(),
-                    from_core(b.step(), ang),
-                    from_core(b.anchor(), ang),
+                    from_core(b.step(), kind),
+                    from_core(b.anchor(), kind),
                     a.first(),
                     a.size(),
                 )
@@ -185,10 +187,16 @@ impl PyFrameMap {
             Ok(true)
         })?;
         let projection = self::projection(projection, sample, normal, frame)?;
-        let ang = matches!(projection, Projection::Angles);
+        let coords = projection.coords();
         let binnings = binnings
             .into_iter()
-            .map(|(step, anchor)| Binning::new(to_core(step, ang), to_core(anchor, ang)))
+            .enumerate()
+            .map(|(i, (step, anchor))| {
+                // a binning past the projection's dimensions, which
+                // FrameMap::new refuses, has no kind to convert by
+                let kind = coords.get(i).map_or(CoordKind::Linear, Coord::kind);
+                Binning::new(to_core(step, kind), to_core(anchor, kind))
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(err)?;
         FrameMap::new(

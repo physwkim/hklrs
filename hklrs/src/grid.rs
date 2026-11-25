@@ -10,6 +10,8 @@
 //! instead (hkl-binoculars.c:375, :842-844), bins centred on multiples of the
 //! resolution whose edges go to the even neighbour.
 
+use std::borrow::Cow;
+
 use rayon::prelude::*;
 
 use crate::normalise::{Normalised, NormalisedFrame};
@@ -72,10 +74,59 @@ impl Binning {
     }
 }
 
+/// What a projection coordinate measures, which fixes the unit it is
+/// shown in: an angle is radians in hklrs and degrees in Python; a linear
+/// coordinate (Å⁻¹, r.l.u., an index) is shown as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordKind {
+    Angle,
+    Linear,
+}
+
+/// One coordinate of a projection: the name of the cube axis it is binned
+/// on, and its kind. Two coordinates of one name but another kind are
+/// different axes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Coord {
+    name: Cow<'static, str>,
+    kind: CoordKind,
+}
+
+impl Coord {
+    pub fn new(name: impl Into<Cow<'static, str>>, kind: CoordKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+        }
+    }
+
+    pub const fn angle(name: &'static str) -> Self {
+        Self {
+            name: Cow::Borrowed(name),
+            kind: CoordKind::Angle,
+        }
+    }
+
+    pub const fn linear(name: &'static str) -> Self {
+        Self {
+            name: Cow::Borrowed(name),
+            kind: CoordKind::Linear,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> CoordKind {
+        self.kind
+    }
+}
+
 /// One cube axis: `size` consecutive global bins of `binning` from `first`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Axis {
-    name: String,
+    coord: Coord,
     binning: Binning,
     first: i64,
     size: usize,
@@ -83,7 +134,15 @@ pub struct Axis {
 
 impl Axis {
     pub fn name(&self) -> &str {
-        &self.name
+        self.coord.name()
+    }
+
+    pub fn kind(&self) -> CoordKind {
+        self.coord.kind
+    }
+
+    pub fn coord(&self) -> &Coord {
+        &self.coord
     }
 
     pub fn binning(&self) -> Binning {
@@ -117,13 +176,13 @@ impl Axis {
 
     /// The axis over global bins first..=last; its size fits both usize
     /// and i64, so `last()` is exact.
-    fn spanning(name: &str, binning: Binning, (first, last): (i64, i64)) -> Result<Self, Error> {
+    fn spanning(coord: &Coord, binning: Binning, (first, last): (i64, i64)) -> Result<Self, Error> {
         let size = i64::try_from(i128::from(last) - i128::from(first) + 1)
             .ok()
             .and_then(|n| usize::try_from(n).ok())
             .ok_or(Error::CubeSize)?;
         Ok(Self {
-            name: name.to_owned(),
+            coord: coord.clone(),
             binning,
             first,
             size,
@@ -131,24 +190,24 @@ impl Axis {
     }
 
     fn describe(&self) -> (String, f64, f64) {
-        (self.name.clone(), self.binning.step, self.binning.anchor)
+        describe(&self.coord, self.binning)
     }
 }
 
-/// One frame in projection coordinates: per dimension its name, which the
-/// projection gives, and its values over the shape of the pixels it was
-/// projected from.
+/// One frame in projection coordinates: per dimension its coordinate,
+/// which the projection gives, and its values over the shape of the pixels
+/// it was projected from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Projected {
-    names: &'static [&'static str],
+    coords: Vec<Coord>,
     planes: Vec<Image<f64>>,
 }
 
 impl Projected {
-    pub fn new(names: &'static [&'static str], planes: Vec<Image<f64>>) -> Result<Self, Error> {
-        if names.is_empty() || planes.len() != names.len() {
+    pub fn new(coords: Vec<Coord>, planes: Vec<Image<f64>>) -> Result<Self, Error> {
+        if coords.is_empty() || planes.len() != coords.len() {
             return Err(Error::Dimensions {
-                expected: names.len(),
+                expected: coords.len(),
                 got: planes.len(),
             });
         }
@@ -156,11 +215,11 @@ impl Projected {
         for p in &planes {
             p.check("projection plane", shape)?;
         }
-        Ok(Self { names, planes })
+        Ok(Self { coords, planes })
     }
 
-    pub fn names(&self) -> &'static [&'static str] {
-        self.names
+    pub fn coords(&self) -> &[Coord] {
+        &self.coords
     }
 
     pub fn planes(&self) -> &[Image<f64>] {
@@ -185,11 +244,11 @@ impl Projected {
     }
 
     fn check_binnings(&self, binnings: &[Binning]) -> Result<(), Error> {
-        if binnings.len() == self.names.len() {
+        if binnings.len() == self.coords.len() {
             Ok(())
         } else {
             Err(Error::Dimensions {
-                expected: self.names.len(),
+                expected: self.coords.len(),
                 got: binnings.len(),
             })
         }
@@ -255,7 +314,7 @@ pub struct Bounds {
 
 #[derive(Clone, Debug, PartialEq)]
 struct Seen {
-    names: &'static [&'static str],
+    coords: Vec<Coord>,
     span: Vec<(i64, i64)>,
 }
 
@@ -269,11 +328,11 @@ impl Bounds {
 
     pub fn include(&mut self, points: &Projected, pixels: &NormalisedFrame) -> Result<(), Error> {
         if let Some(seen) = &self.seen
-            && seen.names != points.names
+            && seen.coords != points.coords
         {
             return Err(Error::GridMismatch {
-                left: describe_names(seen.names, &self.binnings),
-                right: describe_names(points.names, &self.binnings),
+                left: describe_coords(&seen.coords, &self.binnings),
+                right: describe_coords(&points.coords, &self.binnings),
             });
         }
         let (_, bins) = binned(&self.binnings, points, pixels)?;
@@ -283,7 +342,7 @@ impl Bounds {
         match &mut self.seen {
             None => {
                 self.seen = Some(Seen {
-                    names: points.names,
+                    coords: points.coords.clone(),
                     span: frame,
                 })
             }
@@ -302,29 +361,33 @@ impl Bounds {
     pub fn cube(self) -> Result<Cube, Error> {
         match self.seen {
             None => Ok(Cube::default()),
-            Some(seen) => Cube::zeros(axes_over(seen.names, &self.binnings, &seen.span)?),
+            Some(seen) => Cube::zeros(axes_over(&seen.coords, &self.binnings, &seen.span)?),
         }
     }
 }
 
-fn describe_names(names: &[&str], binnings: &[Binning]) -> Vec<(String, f64, f64)> {
-    names
+fn describe(coord: &Coord, binning: Binning) -> (String, f64, f64) {
+    (coord.name().to_owned(), binning.step, binning.anchor)
+}
+
+fn describe_coords(coords: &[Coord], binnings: &[Binning]) -> Vec<(String, f64, f64)> {
+    coords
         .iter()
         .zip(binnings)
-        .map(|(n, b)| ((*n).to_owned(), b.step, b.anchor))
+        .map(|(c, b)| describe(c, *b))
         .collect()
 }
 
 fn axes_over(
-    names: &[&str],
+    coords: &[Coord],
     binnings: &[Binning],
     span: &[(i64, i64)],
 ) -> Result<Vec<Axis>, Error> {
-    names
+    coords
         .iter()
         .zip(binnings)
         .zip(span)
-        .map(|((n, b), &s)| Axis::spanning(n, *b, s))
+        .map(|((c, b), &s)| Axis::spanning(c, *b, s))
         .collect()
 }
 
@@ -416,19 +479,19 @@ impl Cube {
         }
     }
 
-    fn check_grid(&self, names: &[&str], binnings: &[Binning]) -> Result<(), Error> {
-        let same = self.axes.len() == names.len()
+    fn check_grid(&self, coords: &[Coord], binnings: &[Binning]) -> Result<(), Error> {
+        let same = self.axes.len() == coords.len()
             && self
                 .axes
                 .iter()
-                .zip(names.iter().zip(binnings))
-                .all(|(a, (n, b))| a.name == *n && a.binning == *b);
+                .zip(coords.iter().zip(binnings))
+                .all(|(a, (c, b))| a.coord == *c && a.binning == *b);
         if same {
             Ok(())
         } else {
             Err(Error::GridMismatch {
                 left: self.axes.iter().map(Axis::describe).collect(),
-                right: describe_names(names, binnings),
+                right: describe_coords(coords, binnings),
             })
         }
     }
@@ -511,14 +574,14 @@ impl Cube {
             return Ok((Vec::new(), unmasked(points, pixels)?.len()));
         }
         let binnings: Vec<Binning> = self.axes.iter().map(|a| a.binning).collect();
-        self.check_grid(points.names, &binnings)?;
+        self.check_grid(&points.coords, &binnings)?;
         let (values, bins) = binned(&binnings, points, pixels)?;
         Ok(self.rows(&bins, &values))
     }
 
     /// One-pass filling: widens the axes to take every unmasked pixel of
     /// this frame, then adds them. An empty cube takes its axes from
-    /// `binnings` and the projection's names. On error the cube is
+    /// `binnings` and the projection's coordinates. On error the cube is
     /// unchanged.
     pub fn add_growing(
         &mut self,
@@ -527,13 +590,13 @@ impl Cube {
         pixels: &NormalisedFrame,
     ) -> Result<(), Error> {
         if !self.is_empty() {
-            self.check_grid(points.names, binnings)?;
+            self.check_grid(&points.coords, binnings)?;
         }
         let (values, bins) = binned(binnings, points, pixels)?;
         let Some(span) = span(binnings.len(), &bins) else {
             return Ok(());
         };
-        let axes = union(&self.axes, &axes_over(points.names, binnings, &span)?)?;
+        let axes = union(&self.axes, &axes_over(&points.coords, binnings, &span)?)?;
         if axes != self.axes {
             *self = Self::zeros(axes)?.with(self);
         }
@@ -571,8 +634,8 @@ impl Cube {
 
     /// Sum of two cubes over the union of their axes, bin by bin: Σcounts,
     /// Σweight and contributions. The empty cube is the
-    /// identity; otherwise both need the same names and binnings in the
-    /// same order.
+    /// identity; otherwise both need the same coordinates (name and kind)
+    /// and binnings in the same order.
     pub fn merge(self, other: Self) -> Result<Self, Error> {
         if other.is_empty() {
             return Ok(self);
@@ -638,7 +701,7 @@ fn union(a: &[Axis], b: &[Axis]) -> Result<Vec<Axis>, Error> {
     let same = a.len() == b.len()
         && a.iter()
             .zip(b)
-            .all(|(x, y)| x.name == y.name && x.binning == y.binning);
+            .all(|(x, y)| x.coord == y.coord && x.binning == y.binning);
     if !same {
         return Err(Error::GridMismatch {
             left: a.iter().map(Axis::describe).collect(),
@@ -649,7 +712,7 @@ fn union(a: &[Axis], b: &[Axis]) -> Result<Vec<Axis>, Error> {
         .zip(b)
         .map(|(x, y)| {
             Axis::spanning(
-                &x.name,
+                &x.coord,
                 x.binning,
                 (x.first.min(y.first), x.last().max(y.last())),
             )
@@ -669,12 +732,21 @@ mod tests {
         Binning::new(1.0, 0.0).unwrap()
     }
 
-    /// Points as one row of pixels, shape (1, n).
-    fn points(names: &'static [&'static str], coords: &[&[f64]]) -> Projected {
-        let planes = (0..names.len())
+    fn linear(names: &[&'static str]) -> Vec<Coord> {
+        names.iter().map(|&n| Coord::linear(n)).collect()
+    }
+
+    /// Points of `kinds` as one row of pixels, shape (1, n).
+    fn points_of(kinds: Vec<Coord>, coords: &[&[f64]]) -> Projected {
+        let planes = (0..kinds.len())
             .map(|d| Image::from_fn((1, coords.len()), |_, i| coords[i][d]))
             .collect();
-        Projected::new(names, planes).unwrap()
+        Projected::new(kinds, planes).unwrap()
+    }
+
+    /// Linear points as one row of pixels, shape (1, n).
+    fn points(names: &[&'static str], coords: &[&[f64]]) -> Projected {
+        points_of(linear(names), coords)
     }
 
     /// `pixels` as one row, the shape [`points`] gives.
@@ -883,6 +955,43 @@ mod tests {
         }
     }
 
+    /// An angle and a linear coordinate of one name and binning are two
+    /// axes: every way of meeting both refuses and changes nothing.
+    #[test]
+    fn a_coordinate_kind_is_part_of_the_grid() {
+        let angle = points_of(vec![Coord::angle("x")], &[&[0.5]]);
+        let line = points(ONE, &[&[0.5]]);
+        let one = unweighted(&[1.0]);
+        let a = cube(ONE, &[&[0.5]], &[1.0]);
+        assert_eq!(a.axes()[0].kind(), CoordKind::Linear);
+        let mut b = Cube::default();
+        b.add_growing(&[unit()], &angle, &one).unwrap();
+        assert_eq!(b.axes()[0].coord(), &Coord::angle("x"));
+        assert!(matches!(
+            a.clone().merge(b.clone()),
+            Err(Error::GridMismatch { .. })
+        ));
+        for mut c in [a.clone(), b.clone()] {
+            let before = c.clone();
+            let other = if c == a { &angle } else { &line };
+            assert!(matches!(
+                c.add(other, &one),
+                Err(Error::GridMismatch { .. })
+            ));
+            assert!(matches!(
+                c.add_growing(&[unit()], other, &one),
+                Err(Error::GridMismatch { .. })
+            ));
+            assert_eq!(c, before);
+        }
+        let mut bounds = Bounds::new(vec![unit()]);
+        bounds.include(&line, &one).unwrap();
+        assert!(matches!(
+            bounds.include(&angle, &one),
+            Err(Error::GridMismatch { .. })
+        ));
+    }
+
     #[test]
     fn two_pass_equals_one_pass() {
         let frames = [
@@ -1040,7 +1149,7 @@ mod tests {
         let column = |v: Vec<f64>| Image::new((v.len(), 1), v).unwrap();
         assert_eq!(
             Projected::new(
-                TWO,
+                linear(TWO),
                 vec![
                     column(vec![0.0, 1.0]),
                     points(ONE, &[&[0.0], &[1.0]]).planes()[0].clone()
@@ -1070,8 +1179,11 @@ mod tests {
     /// same count; every way in refuses the pair and changes nothing.
     #[test]
     fn a_transposed_frame_is_refused() {
-        let column =
-            Projected::new(ONE, vec![Image::new((2, 1), vec![0.0, 1.0]).unwrap()]).unwrap();
+        let column = Projected::new(
+            linear(ONE),
+            vec![Image::new((2, 1), vec![0.0, 1.0]).unwrap()],
+        )
+        .unwrap();
         let row = unweighted(&[1.0, 1.0]);
         let refused = Err(Error::ShapeMismatch {
             what: "normalised frame",
