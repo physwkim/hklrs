@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::projection::ProjectionError;
+
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum Error {
     #[error("{what} must be finite and positive, got {value}")]
@@ -105,6 +107,12 @@ pub enum Error {
         shape: (usize, usize),
         expected: (usize, usize),
     },
+    #[error("a custom projection needs at least one coordinate")]
+    NoCoords,
+    #[error("coordinate {name:?} appears twice in the custom projection")]
+    CoordRepeated { name: String },
+    #[error("custom projection: {0}")]
+    Projection(ProjectionError),
     #[error("cube grids differ: {left:?} vs {right:?} (name, step, anchor)")]
     GridMismatch {
         left: Vec<(String, f64, f64)>,
