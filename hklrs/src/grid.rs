@@ -18,6 +18,7 @@ use crate::normalise::{Normalised, NormalisedFrame};
 use crate::{Error, Image};
 
 pub mod fuzzy;
+use fuzzy::{Footprint, Pieces};
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
 
@@ -196,12 +197,14 @@ impl Axis {
 }
 
 /// One frame in projection coordinates: per dimension its coordinate,
-/// which the projection gives, and its values over the shape of the pixels
-/// it was projected from.
+/// which the projection gives, its values over the shape of the pixels it
+/// was projected from, and the footprint that lays a pixel on its bins (a
+/// point unless [`with_footprint`](Self::with_footprint) says otherwise).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Projected {
     coords: Vec<Coord>,
     planes: Vec<Image<f64>>,
+    footprints: Vec<Footprint>,
 }
 
 impl Projected {
@@ -216,7 +219,12 @@ impl Projected {
         for p in &planes {
             p.check("projection plane", shape)?;
         }
-        Ok(Self { coords, planes })
+        let footprints = vec![Footprint::Point; coords.len()];
+        Ok(Self {
+            coords,
+            planes,
+            footprints,
+        })
     }
 
     pub fn coords(&self) -> &[Coord] {
@@ -234,14 +242,6 @@ impl Projected {
 
     pub fn pixels(&self) -> usize {
         self.planes[0].data().len()
-    }
-
-    /// Global bins of pixel `i` into `out`.
-    fn bins(&self, binnings: &[Binning], i: usize, out: &mut [i64]) -> Result<(), Error> {
-        for ((k, b), plane) in out.iter_mut().zip(binnings).zip(&self.planes) {
-            *k = b.bin(plane.data()[i])?;
-        }
-        Ok(())
     }
 
     fn check_binnings(&self, binnings: &[Binning]) -> Result<(), Error> {
@@ -271,24 +271,21 @@ fn unmasked(
         .collect())
 }
 
-/// The unmasked pixels of one frame and their global bins, flattened
-/// pixel-major. Every pixel is checked here, before any state changes.
+/// The unmasked pixels of one frame laid by their footprints on
+/// `binnings`. Every pixel is checked here, before any state changes.
 fn binned(
     binnings: &[Binning],
     points: &Projected,
     pixels: &NormalisedFrame,
-) -> Result<(Vec<Normalised>, Vec<i64>), Error> {
+) -> Result<Pieces, Error> {
     points.check_binnings(binnings)?;
     let taken = unmasked(points, pixels)?;
-    let mut values = Vec::with_capacity(taken.len());
-    let mut bins = Vec::with_capacity(taken.len() * binnings.len());
-    let mut k = vec![0; binnings.len()];
+    let mut pieces = Pieces::with_capacity(binnings.len(), taken.len());
     for (i, n) in taken {
-        points.bins(binnings, i, &mut k)?;
-        values.push(n);
-        bins.extend_from_slice(&k);
+        let coords = points.planes.iter().map(|p| p.data()[i]);
+        pieces.push(n, &points.footprints, binnings, coords)?;
     }
-    Ok((values, bins))
+    Ok(pieces)
 }
 
 /// (first, last) per dimension of flattened `bins`, `None` when empty.
@@ -336,8 +333,8 @@ impl Bounds {
                 right: describe_coords(&points.coords, &self.binnings),
             });
         }
-        let (_, bins) = binned(&self.binnings, points, pixels)?;
-        let Some(frame) = span(self.binnings.len(), &bins) else {
+        let pieces = binned(&self.binnings, points, pixels)?;
+        let Some(frame) = span(self.binnings.len(), pieces.bins()) else {
             return Ok(());
         };
         match &mut self.seen {
@@ -498,9 +495,10 @@ impl Cube {
     }
 
     /// Adds every unmasked pixel of `pixels`, the normalised frame of
-    /// `points`, to the bin it falls in. The axes stay as they are; returns
-    /// how many unmasked pixels fell outside them and were not added. On
-    /// error the cube is unchanged.
+    /// `points`, to the bins its footprint reaches. The axes stay as they
+    /// are: the part of a footprint outside them is not added. Returns how
+    /// many unmasked pixels were not wholly inside. On error the cube is
+    /// unchanged.
     pub fn add(&mut self, points: &Projected, pixels: &NormalisedFrame) -> Result<usize, Error> {
         let (rows, outside) = self.placed(points, pixels)?;
         self.sums().deposit(&rows);
@@ -564,20 +562,19 @@ impl Cube {
         }
     }
 
-    /// The unmasked pixels of one frame inside the axes, (offset, value) in
-    /// pixel order, and how many fell outside.
+    /// The pieces of one frame's unmasked pixels inside the axes in pixel
+    /// order, and how many pixels were not wholly inside.
     fn placed(
         &self,
         points: &Projected,
         pixels: &NormalisedFrame,
-    ) -> Result<(Vec<(usize, Normalised)>, usize), Error> {
+    ) -> Result<(Vec<Row>, usize), Error> {
         if self.is_empty() {
             return Ok((Vec::new(), unmasked(points, pixels)?.len()));
         }
         let binnings: Vec<Binning> = self.axes.iter().map(|a| a.binning).collect();
         self.check_grid(&points.coords, &binnings)?;
-        let (values, bins) = binned(&binnings, points, pixels)?;
-        Ok(self.rows(&bins, &values))
+        Ok(self.rows(&binned(&binnings, points, pixels)?))
     }
 
     /// One-pass filling: widens the axes to take every unmasked pixel of
@@ -593,29 +590,35 @@ impl Cube {
         if !self.is_empty() {
             self.check_grid(&points.coords, binnings)?;
         }
-        let (values, bins) = binned(binnings, points, pixels)?;
-        let Some(span) = span(binnings.len(), &bins) else {
+        let pieces = binned(binnings, points, pixels)?;
+        let Some(span) = span(binnings.len(), pieces.bins()) else {
             return Ok(());
         };
         let axes = union(&self.axes, &axes_over(&points.coords, binnings, &span)?)?;
         if axes != self.axes {
             *self = Self::zeros(axes)?.with(self);
         }
-        let (rows, outside) = self.rows(&bins, &values);
+        let (rows, outside) = self.rows(&pieces);
         debug_assert_eq!(outside, 0, "the axes span every unmasked pixel");
         self.sums().deposit(&rows);
         Ok(())
     }
 
-    /// (offset, value) of each of `values` whose row of flattened `bins`
-    /// lies inside the axes, in row order, and how many rows did not.
-    fn rows(&self, bins: &[i64], values: &[Normalised]) -> (Vec<(usize, Normalised)>, usize) {
-        let rows: Vec<_> = bins
-            .chunks_exact(self.axes.len())
-            .zip(values)
-            .filter_map(|(k, &n)| Some((self.offset(k)?, n)))
-            .collect();
-        let outside = values.len() - rows.len();
+    /// The pieces inside the axes as rows, in piece order, and how many
+    /// pixels had a piece outside.
+    fn rows(&self, pieces: &Pieces) -> (Vec<Row>, usize) {
+        let mut rows = Vec::with_capacity(pieces.len());
+        let mut outside = 0;
+        for (n, ps) in pieces.pixels() {
+            let mut inside = true;
+            for (k, share) in ps {
+                match self.offset(k) {
+                    Some(off) => rows.push((off, share, n)),
+                    None => inside = false,
+                }
+            }
+            outside += usize::from(!inside);
+        }
         (rows, outside)
     }
 
@@ -654,6 +657,9 @@ impl Cube {
     }
 }
 
+/// One piece of a pixel: (offset, share, value).
+type Row = (usize, f64, Normalised);
+
 /// The sums of a cube's bins from offset `lo` on, as many as the slices
 /// hold.
 struct Sums<'a> {
@@ -682,13 +688,14 @@ impl<'a> Sums<'a> {
         }
     }
 
-    /// Adds each value to the bin at its offset: its counts, its weight and
-    /// one contribution, as a bin of a cut takes a pixel.
-    fn deposit(&mut self, rows: &[(usize, Normalised)]) {
-        for &(off, n) in rows {
+    /// Adds each piece to the bin at its offset: its share of the counts
+    /// and of the weight, and one contribution, as a bin of a cut takes a
+    /// pixel.
+    fn deposit(&mut self, rows: &[Row]) {
+        for &(off, share, n) in rows {
             let i = off - self.lo;
-            self.photons[i] += n.counts();
-            self.weight[i] += n.weight().get();
+            self.photons[i] += share * n.counts();
+            self.weight[i] += share * n.weight().get();
             self.contributions[i] += 1;
         }
     }
