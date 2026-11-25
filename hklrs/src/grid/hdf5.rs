@@ -17,19 +17,25 @@
 //! reads with Σweight = contributions, binoculars' meaning of
 //! photons/contributions. New data goes in attributes or in datasets of
 //! `/binoculars` beside these, which binoculars ignores, never in `axes`,
-//! whose every link binoculars reads as an axis.
+//! whose every link binoculars reads as an axis. An angle axis carries the
+//! string attribute `kind = "angle"`; an axis without it, as every axis of
+//! a binoculars file, reads as linear.
 
 use std::path::Path;
 
+use rust_hdf5::types::VarLenUnicode;
 use rust_hdf5::{DatatypeMessage, H5Dataset, H5File, Hdf5Error};
 
-use super::{Axis, Binning, Cube};
+use super::{Axis, Binning, Coord, CoordKind, Cube};
 use crate::Error;
 
 const ROOT: &str = "binoculars";
 const AXES: &str = "binoculars/axes";
 /// Σweight, which binoculars' files lack.
 const WEIGHT: &str = "weight";
+/// The attribute of an angle axis, and its value.
+const KIND: &str = "kind";
+const ANGLE: &str = "angle";
 
 fn h5(e: Hdf5Error) -> Error {
     Error::Hdf5 {
@@ -70,13 +76,14 @@ pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Er
         return Err(layout("the empty cube has no axes".to_owned()));
     }
     for a in &cube.axes {
-        if a.name.is_empty() || a.name == "." || a.name.contains('/') {
-            return Err(layout(format!("axis name {:?} is not a link name", a.name)));
+        let name = a.name();
+        if name.is_empty() || name == "." || name.contains('/') {
+            return Err(layout(format!("axis name {name:?} is not a link name")));
         }
         let (step, anchor) = (a.binning.step, a.binning.anchor);
         if a.binning != binoculars(step)? {
             return Err(Error::CubeFileAnchor {
-                axis: a.name.clone(),
+                axis: name.to_owned(),
                 step,
                 anchor,
             });
@@ -101,14 +108,21 @@ pub fn write(path: impl AsRef<Path>, cube: &Cube, config: &str) -> Result<(), Er
     let axes = root.create_group("axes").map_err(h5)?;
     for (i, a) in cube.axes.iter().enumerate() {
         let step = a.binning.step;
-        let (first, last) = (exact(a.first, &a.name)?, exact(a.last(), &a.name)?);
+        let (first, last) = (exact(a.first, a.name())?, exact(a.last(), a.name())?);
         let ds = axes
             .new_dataset::<f64>()
             .shape([6])
-            .create(&a.name)
+            .create(a.name())
             .map_err(h5)?;
         ds.write_raw(&[i as f64, first * step, last * step, step, first, last])
             .map_err(h5)?;
+        if a.kind() == CoordKind::Angle {
+            ds.new_attr::<VarLenUnicode>()
+                .shape(())
+                .create(KIND)
+                .and_then(|k| k.write_string(ANGLE))
+                .map_err(h5)?;
+        }
     }
 
     let shape: Vec<usize> = cube.axes.iter().map(|a| a.size).collect();
@@ -225,8 +239,26 @@ fn axis(ds: &H5Dataset, name: &str) -> Result<(usize, Axis), Error> {
     }
     Ok((
         index,
-        Axis::spanning(name, binoculars(step)?, (first, last))?,
+        Axis::spanning(
+            &Coord::new(name.to_owned(), kind(ds, name)?),
+            binoculars(step)?,
+            (first, last),
+        )?,
     ))
+}
+
+/// The kind of the axis `ds`: angle where its `kind` attribute says so,
+/// linear without one.
+fn kind(ds: &H5Dataset, name: &str) -> Result<CoordKind, Error> {
+    if !ds.attr_names().map_err(h5)?.iter().any(|n| n == KIND) {
+        return Ok(CoordKind::Linear);
+    }
+    match ds.attr(KIND).and_then(|a| a.read_string()).map_err(h5)? {
+        k if k == ANGLE => Ok(CoordKind::Angle),
+        k => Err(layout(format!(
+            "axis {name:?}: kind {k:?} is not {ANGLE:?}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +284,8 @@ mod tests {
     }
 
     fn spanning(name: &str, step: f64, anchor: f64, bins: (i64, i64)) -> Axis {
-        Axis::spanning(name, Binning::new(step, anchor).unwrap(), bins).unwrap()
+        let coord = Coord::new(name.to_owned(), CoordKind::Linear);
+        Axis::spanning(&coord, Binning::new(step, anchor).unwrap(), bins).unwrap()
     }
 
     /// binoculars drops one-bin axes (BIN-14) and cannot save an empty
@@ -268,6 +301,42 @@ mod tests {
             let p = path("round_trip");
             write(&p, &c, config).unwrap();
             assert_eq!(read(&p).unwrap(), (c.clone(), config.to_owned()));
+        }
+    }
+
+    /// An angle axis reads back an angle and a linear one linear; the
+    /// linear axis carries no attribute, as binoculars' axes.
+    #[test]
+    fn round_trip_keeps_the_axis_kind() {
+        let tth = Coord::angle("tth");
+        let c = cube(vec![
+            spanning("q", 0.5, -0.25, (0, 2)),
+            Axis::spanning(&tth, super::binoculars(0.25).unwrap(), (3, 5)).unwrap(),
+        ]);
+        let p = path("kinds");
+        write(&p, &c, "").unwrap();
+        let (back, _) = read(&p).unwrap();
+        assert_eq!(back, c);
+        assert_eq!(back.axes()[1].coord(), &tth);
+        let f = H5File::open(&p).unwrap();
+        let attrs = |a: &str| f.dataset(&format!("{AXES}/{a}")).unwrap().attr_names();
+        assert_eq!(attrs("q").unwrap(), Vec::<String>::new());
+        assert_eq!(attrs("tth").unwrap(), [KIND]);
+    }
+
+    #[test]
+    fn a_kind_other_than_angle_is_refused() {
+        let row: &[f64] = &[0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        let p = file_of(
+            "degrees",
+            &[("tth", row)],
+            &[2],
+            None,
+            &[("tth", "degrees")],
+        );
+        match read(&p) {
+            Err(Error::CubeFile { reason }) => assert!(reason.contains("\"degrees\""), "{reason}"),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -320,6 +389,17 @@ mod tests {
         shape: &[usize],
         weight: Option<&[usize]>,
     ) -> PathBuf {
+        file_of(name, rows, shape, weight, &[])
+    }
+
+    /// [`file`], with the `kind` attribute of each (axis, kind) of `kinds`.
+    fn file_of(
+        name: &str,
+        rows: &[(&str, &[f64])],
+        shape: &[usize],
+        weight: Option<&[usize]>,
+        kinds: &[(&str, &str)],
+    ) -> PathBuf {
         let p = path(name);
         let f = H5File::create(&p).unwrap();
         let root = f.create_group(ROOT).unwrap();
@@ -332,12 +412,16 @@ mod tests {
             .unwrap();
         let axes = root.create_group("axes").unwrap();
         for (axis, row) in rows {
-            axes.new_dataset::<f64>()
+            let ds = axes
+                .new_dataset::<f64>()
                 .shape([row.len()])
                 .create(axis)
-                .unwrap()
-                .write_raw(row)
                 .unwrap();
+            ds.write_raw(row).unwrap();
+            for (_, kind) in kinds.iter().filter(|(a, _)| a == axis) {
+                let attr = ds.new_attr::<VarLenUnicode>().shape(()).create(KIND);
+                attr.unwrap().write_string(kind).unwrap();
+            }
         }
         let n = shape.iter().product();
         root.new_dataset::<f32>()

@@ -125,3 +125,25 @@ def test_bad_frame_names_frame():
     improper = [[1, 0, 0], [0, 1, 0], [0, 0, -1]]
     with pytest.raises(ValueError, match=r"^frame is not a proper rotation"):
         fm.FrameMap(geo, det, [(DX, 0.0)] * 3, "qsurface", frame=improper)
+
+
+def test_angle_axes_are_degrees():
+    """An "angles" cube reads its axes' kind: binnings go in and axes come
+    out in degrees, and its tth axis spans the pixels' 2θ from |Q|."""
+    geo = hklrs.Geometry.preset("E4CV")
+    det = hklrs_area(params(AREA_BASE, {}))
+    ang = angles("E4CV", 1, "frame_map_angles")[0]
+    q = np.linalg.norm(np.stack(hklrs.q_map(geo, ang, WL, det), axis=-1), axis=-1)
+    tth = np.degrees(2 * np.arcsin(q * WL / (4 * np.pi)))
+    step, anchor = 0.5, 0.25
+    m = fm.FrameMap(geo, det, [(step, anchor)] * 3, "angles")
+    cube = fm.Cube()
+    m.add(cube, ang, WL, np.ones(tth.shape))
+    axes = cube.axes
+    assert [a[0] for a in axes] == ["delta_lab", "gamma_lab", "tth"]
+    for _, s, a, _, _ in axes:
+        assert (s, a) == (pytest.approx(step, rel=1e-15), pytest.approx(anchor, rel=1e-15))
+    _, s, a, first, size = axes[2]
+    assert a + first * s <= tth.min() + 1e-9
+    assert tth.max() - 1e-9 < a + (first + size) * s
+    assert int(cube.contributions.sum()) == tth.size

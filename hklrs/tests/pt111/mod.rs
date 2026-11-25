@@ -177,7 +177,7 @@ fn extremes(m: &MappedFrame) -> (Projected, NormalisedFrame) {
     let pick = |p: &Image<f64>| Image::new(shape, picked.iter().map(|&i| p.data()[i]).collect());
     let points = planes.iter().map(pick).collect::<Result<_, _>>().unwrap();
     (
-        Projected::new(m.points().names(), points).unwrap(),
+        Projected::new(m.points().coords().to_vec(), points).unwrap(),
         Image::new(shape, picked.iter().map(|&i| pixels[i]).collect()).unwrap(),
     )
 }
