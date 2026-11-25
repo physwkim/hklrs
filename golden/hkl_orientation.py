@@ -2,7 +2,8 @@
 Run: python -I hkl_orientation.py
 
 Per case: set a seeded random U in hkl, solve two reachable non-parallel
-reflections with hkl's own "hkl" engine (default mode), then rebuild a fresh
+reflections with hkl's own "hkl" engine (default mode, from the zero geometry
+but for the HELD axes), then rebuild a fresh
 sample with the same lattice, add both reflections at those angles and call
 compute_UB_busing_levy. UB_reference is an independent numpy Busing-Levy with
 the correct B; UB_hkl12_model is the same with libhkl's B[1][2] of HKL-12.
@@ -35,6 +36,10 @@ TOL_EXPLAIN = 1e-6  # UB entries are O(1) Å^-1
 UNIT = {"Degree": ("rot", 1.0), "Milli Radian": ("rot", math.pi / 180.0 * 1000.0),
         "Milli Meter": ("trans", 1.0), "Meter": ("trans", 1e-3)}
 X = np.array([1.0, 0.0, 0.0])
+# Held axes where the all-zero start degenerates the default mode: BM28's
+# constant_nu_coplanar writes eta, phi, delta, which at chi = 0 all turn about -y
+# and reach only U B h with no y component; at chi = 90 phi turns about -z.
+HELD = {"ESRF BM28 PSIC": {"chi": 90.0}}
 
 
 def mat(m):
@@ -118,6 +123,8 @@ def one_case(fac, gname, sname, s, wl, rng, units, names):
     try:
         geo = fac.create_new_geometry()
         geo.wavelength_set(wl, USER)
+        held = HELD.get(gname, {})
+        geo.axis_values_set([held.get(n, v) for n, v in zip(names, geo.axis_values_get(USER))], USER)
         det = Hkl.Detector.factory_new(Hkl.DetectorType(0))
         sample = Hkl.Sample.new("true")
         sample.lattice_set(lattice(s))

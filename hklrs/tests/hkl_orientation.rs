@@ -47,11 +47,8 @@ fn busing_levy_matches_hkl() {
         let name = case["geometry"].as_str().unwrap();
         let ctx = format!("{name} {} λ={}", case["sample"], case["wavelength"]);
         if let Some(e) = case.get("error") {
-            // TwoC has no hkl engine; BM28 PSIC's default mode reached no pair
-            assert!(
-                matches!(name, "TwoC" | "ESRF BM28 PSIC"),
-                "{ctx}: unexpected error {e}"
-            );
+            // TwoC has no hkl engine
+            assert_eq!(name, "TwoC", "{ctx}: unexpected error {e}");
             continue;
         }
         let geo = presets::preset(name).unwrap();
@@ -86,7 +83,7 @@ fn busing_levy_matches_hkl() {
         }
         ok += 1;
     }
-    assert_eq!((ok, hkl12), (160, 40));
+    assert_eq!((ok, hkl12), (168, 42));
 }
 
 #[test]

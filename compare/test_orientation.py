@@ -26,6 +26,10 @@ WAVELENGTHS = (1.54, 0.71)
 SEEDS = (0, 1)
 MAX_TRIES = 200
 X = _ref.X
+# Held axes where the all-zero start degenerates the default mode: BM28's
+# constant_nu_coplanar writes eta, phi, delta, which at chi = 0 all turn about -y
+# and reach only U B h with no y component; at chi = 90 phi turns about -z.
+HELD = {"ESRF BM28 PSIC": {"chi": 90.0}}
 
 
 def hkl12_holds(lat):
@@ -87,6 +91,8 @@ def two_reflections(preset, cell, wl, seed):
     geo.wavelength_set(wl, USER)
     names = list(geo.axis_names_get())
     units = [geo.axis_get(n).user_unit_get() for n in names]
+    held = HELD.get(preset, {})
+    geo.axis_values_set([held.get(n, v) for n, v in zip(names, geo.axis_values_get(USER))], USER)
     det = Hkl.Detector.factory_new(Hkl.DetectorType(0))
     true = Hkl.Sample.new("true")
     true.lattice_set(lattice_hkl(lat))
