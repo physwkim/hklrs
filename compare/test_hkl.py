@@ -143,8 +143,6 @@ def test_hkl_against_correct_B(preset):
 
 def test_preset_kinematics_first_principles(preset):
     """hklrs against the hand-written stacks, no libhkl involved."""
-    if preset not in _ref.PRESET_STACKS:
-        pytest.skip(f"no hand-written stack for {preset}")
     rng = random.Random(f"fp-{preset}")
     geo = hklrs.Geometry.preset(preset)
     lat = SAMPLES["triclinic"]
@@ -152,12 +150,13 @@ def test_preset_kinematics_first_principles(preset):
     sample = hklrs.Sample("fp", hklrs.Lattice(*lat), u.tolist())
     for _ in range(20):
         ang = [rng.uniform(-180, 180) for _ in geo.axis_names]
-        s, d = _ref.stacks_from_angles(preset, ang)
-        rs, rd, q_lab, q_sample, kf = _ref.forward(s, d, 1.2)
-        r = hklrs.forward(geo, sample, ang, 1.2)
-        np.testing.assert_allclose(r["q_lab"], q_lab, atol=1e-12)
-        np.testing.assert_allclose(r["q_sample"], q_sample, atol=1e-12)
-        np.testing.assert_allclose(r["hkl"], np.linalg.solve(u @ _ref.b_matrix(*lat), q_sample), atol=1e-9)
+        # off +x too: an innermost detector axis along x (SIXS eta_a) cannot turn +x
+        for point in (None, (0.9, -0.2, 0.3)):
+            rs, rd, q_lab, q_sample, kf = _ref.preset_forward(preset, ang, 1.2, point)
+            r = hklrs.forward(geo, sample, ang, 1.2, point=point)
+            np.testing.assert_allclose(r["q_lab"], q_lab, atol=1e-12)
+            np.testing.assert_allclose(r["q_sample"], q_sample, atol=1e-12)
+            np.testing.assert_allclose(r["hkl"], np.linalg.solve(u @ _ref.b_matrix(*lat), q_sample), atol=1e-9)
 
 
 @pytest.mark.parametrize("lat", list(SAMPLES.values()) + [(5, 5, 5, 70, 70, 70), (3, 4, 5, 90, 100, 90)])
