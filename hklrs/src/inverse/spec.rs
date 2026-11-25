@@ -37,10 +37,13 @@ struct Entry {
 }
 
 /// The "hkl" engine modes of a preset in hkl's order, its default first,
-/// and its psi engine.
+/// its engine list's parameters and its psi engine.
 pub struct ModeTable {
     preset: &'static str,
     modes: &'static [Entry],
+    /// hkl's engine-list parameters at their values on a new engine list
+    /// (angles in rad); every mode takes them, last.
+    engine_list: &'static [(ModeParameter, f64)],
     psi: Option<PsiEngine>,
 }
 
@@ -70,6 +73,17 @@ const INCIDENCE: &[ModeParameter] = &[
 ];
 /// `emergence_fixed`'s, hkl-engine-soleil-sixs-med.c.
 const EMERGENCE: &[ModeParameter] = &[plain("x"), plain("y"), plain("z"), angle("emergence")];
+/// hkl's one engine-list parameter, hkl-engine-soleil-sixs-med.c:686:
+/// MED2+3 v2 fits the slits as MED2+3 does where it is 1.
+pub const ETA_A_ROTATION: ModeParameter = plain("eta_a_rotation");
+const ROTATION: &[ModeParameter] = &[ETA_A_ROTATION];
+const EMERGENCE_ROTATION: &[ModeParameter] = &[
+    plain("x"),
+    plain("y"),
+    plain("z"),
+    angle("emergence"),
+    ETA_A_ROTATION,
+];
 
 /// The vector of the first three values: hkl2, a reference or a surface.
 fn v(p: &[f64]) -> Vector3<f64> {
@@ -152,47 +166,74 @@ const PSIC: &[Entry] = modes! {
     "constant_eta_noncoplanar": NONE, |g, _| psic::constant_eta_noncoplanar(g);
 };
 
-/// hkl-engine-soleil-sixs-med.c, MED2+3 v2 and, with its slit fit, MED2+3.
-macro_rules! med23_modes {
-    ($($slits:path)?) => {
-        modes! {
-            "mu_fixed": NONE, |g, _| med::mu_fixed(g)$(.and_then($slits))?;
-            "gamma_fixed": NONE, |g, _| med::gamma_fixed(g)$(.and_then($slits))?;
-            "emergence_fixed": EMERGENCE,
-                |g, p| med::emergence_fixed(g, v(p), p[3])$(.and_then($slits))?;
-        }
-    };
+/// `mode` with MED2+3's slit fit where [`ETA_A_ROTATION`] is 1. hkl reads
+/// the value through `(int)`, so 0.5 would silently mean 0: here only 0 and
+/// 1 are values.
+fn eta_a_rotation(mode: Mode<'_>, value: f64) -> Result<Mode<'_>, InverseError> {
+    if value == 1.0 {
+        med::slits(mode)
+    } else if value == 0.0 {
+        Ok(mode)
+    } else {
+        Err(InverseError::NotSwitch {
+            mode: mode.name().into(),
+            parameter: ETA_A_ROTATION.name,
+            value,
+        })
+    }
 }
+
+/// hkl-engine-soleil-sixs-med.c: MED2+3, its modes with the slit fit.
+const MED23: &[Entry] = modes! {
+    "mu_fixed": NONE, |g, _| med::mu_fixed(g).and_then(med::slits);
+    "gamma_fixed": NONE, |g, _| med::gamma_fixed(g).and_then(med::slits);
+    "emergence_fixed": EMERGENCE,
+        |g, p| med::emergence_fixed(g, v(p), p[3]).and_then(med::slits);
+};
+
+/// MED2+3 v2: MED2+3's modes, the slit fit by [`ETA_A_ROTATION`].
+const MED23_V2: &[Entry] = modes! {
+    "mu_fixed": ROTATION, |g, p| eta_a_rotation(med::mu_fixed(g)?, p[0]);
+    "gamma_fixed": ROTATION, |g, p| eta_a_rotation(med::gamma_fixed(g)?, p[0]);
+    "emergence_fixed": EMERGENCE_ROTATION,
+        |g, p| eta_a_rotation(med::emergence_fixed(g, v(p), p[3])?, p[4]);
+};
 
 static TABLES: [ModeTable; 24] = [
     ModeTable {
         preset: "TwoC",
         modes: &[],
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "E4CV",
         modes: E4C,
+        engine_list: &[],
         psi: Some(e4c::psi),
     },
     ModeTable {
         preset: "E4CH",
         modes: E4C,
+        engine_list: &[],
         psi: Some(e4c::psi),
     },
     ModeTable {
         preset: "E6C",
         modes: E6C,
+        engine_list: &[],
         psi: Some(e6c::psi_vertical),
     },
     ModeTable {
         preset: "K4CV",
         modes: K4C,
+        engine_list: &[],
         psi: Some(k4c::psi),
     },
     ModeTable {
         preset: "K6C",
         modes: k6c_modes!(k6c::K6C),
+        engine_list: &[],
         psi: Some(k6c::psi_vertical),
     },
     ModeTable {
@@ -201,11 +242,13 @@ static TABLES: [ModeTable; 24] = [
             "zaxis": NONE, |g, _| zaxis::zaxis(g);
             "reflectivity": NONE, |g, _| zaxis::reflectivity(g);
         },
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "SOLEIL MARS",
         modes: E4C,
+        engine_list: &[],
         psi: Some(e4c::psi),
     },
     ModeTable {
@@ -214,6 +257,7 @@ static TABLES: [ModeTable; 24] = [
             "pitch_fixed": NONE, |g, _| med::pitch_fixed(g);
             "delta_fixed": NONE, |g, _| med::delta_fixed(g);
         },
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
@@ -223,21 +267,25 @@ static TABLES: [ModeTable; 24] = [
             "reflectivity": NONE, |g, _| med::reflectivity(g);
             "emergence_fixed": EMERGENCE, |g, p| med::emergence_fixed(g, v(p), p[3]);
         },
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "SOLEIL SIXS MED2+3",
-        modes: med23_modes!(med::slits),
+        modes: MED23,
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "SOLEIL SIXS MED2+3 v2",
-        modes: med23_modes!(),
+        modes: MED23_V2,
+        engine_list: &[(ETA_A_ROTATION, 0.0)],
         psi: None,
     },
     ModeTable {
         preset: "SOLEIL SIRIUS KAPPA",
         modes: k6c_modes!(k6c::SOLEIL_SIRIUS_KAPPA),
+        engine_list: &[],
         psi: Some(k6c::psi_vertical_soleil_sirius_kappa),
     },
     ModeTable {
@@ -245,11 +293,13 @@ static TABLES: [ModeTable; 24] = [
         modes: modes! {
             "lifting_detector_thetah": NONE, |g, _| turret::lifting_detector_thetah(g);
         },
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "SOLEIL CRISTAL K4C",
         modes: K4C,
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
@@ -259,16 +309,19 @@ static TABLES: [ModeTable; 24] = [
             "lifting detector rs": NONE, |g, _| robot::lifting_detector_rs(g);
             "lifting detector rx": NONE, |g, _| robot::lifting_detector_rx(g);
         },
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "ESRF ID01 PSIC",
         modes: PSIC,
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "ESRF BM28 PSIC",
         modes: PSIC,
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
@@ -289,6 +342,7 @@ static TABLES: [ModeTable; 24] = [
                 |g, p| polar::psi_constant_horizontal(g, v(p), p[3]);
             "psi constant vertical": PSI, |g, p| polar::psi_constant_vertical(g, v(p), p[3]);
         },
+        engine_list: &[],
         psi: Some(polar::psi_vertical),
     },
     ModeTable {
@@ -306,6 +360,7 @@ static TABLES: [ModeTable; 24] = [
             "lifting detector chi": NONE, |g, _| p09::lifting_detector_chi(g);
             "lifting detector phi": NONE, |g, _| p09::lifting_detector_phi(g);
         },
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
@@ -317,11 +372,13 @@ static TABLES: [ModeTable; 24] = [
             "bissector_horizontal": NONE, |g, _| p23::bissector_horizontal(g);
             "psi_constant": PSI, |g, p| p23::psi_constant(g, v(p), p[3]);
         },
+        engine_list: &[],
         psi: None,
     },
     ModeTable {
         preset: "PETRA3 P23 6C",
         modes: E6C,
+        engine_list: &[],
         psi: Some(e6c::psi_vertical),
     },
     ModeTable {
@@ -329,12 +386,14 @@ static TABLES: [ModeTable; 24] = [
         modes: modes! {
             "pyfai_default": NONE, |g, _| pyfai::pyfai_default(g);
         },
+        engine_list: &[],
         psi: None,
     },
     // hkl-engine-petra3-p08-lisa.c: no builder here for its modes.
     ModeTable {
         preset: "PETRA3 P08 LISA",
         modes: &[],
+        engine_list: &[],
         psi: None,
     },
 ];
@@ -360,9 +419,18 @@ impl ModeTable {
         self.modes.iter().map(|e| e.name)
     }
 
-    /// hkl's default mode; None on a preset without modes.
-    pub fn default_mode(&self) -> Option<&'static str> {
-        self.modes.first().map(|e| e.name)
+    /// hkl's default mode as a new engine list has it: the engine-list
+    /// parameters at their values there; None on a preset without modes.
+    pub fn default_mode(&self) -> Option<ModeSpec> {
+        let name = self.modes.first()?.name;
+        let values = self.engine_list.iter();
+        Some(values.fold(ModeSpec::new(name), |s, (p, v)| s.with(p.name, *v)))
+    }
+
+    /// hkl's engine-list parameters at their values on a new engine list,
+    /// angles in rad.
+    pub fn engine_list(&self) -> &'static [(ModeParameter, f64)] {
+        self.engine_list
     }
 
     /// The parameters of mode `name`, in hkl's order.
@@ -502,8 +570,11 @@ impl ModeSpec {
 
 #[cfg(test)]
 mod tests {
+    use nalgebra::Matrix3;
+
     use super::*;
     use crate::presets::{PRESETS, preset};
+    use crate::{InverseRequest, Target, Wavelength};
 
     #[test]
     fn every_preset_has_one_table() {
@@ -512,15 +583,25 @@ mod tests {
     }
 
     /// golden/hkl_modes.py: per gi factory, hkl's mode names in order, its
-    /// default, each mode's parameters with their angle flag, and the psi
-    /// engine's mode. PYFAI and PETRA3 P08 LISA have no factory there: PYFAI
-    /// is `hkl-engine-pyfai.c`'s one parameterless mode, LISA has none here.
+    /// default, each mode's parameters with their angle flag, the psi
+    /// engine's mode and the engine list's parameters at their values on a
+    /// new list. PYFAI and PETRA3 P08 LISA have no factory there: PYFAI is
+    /// `hkl-engine-pyfai.c`'s one parameterless mode, LISA has none here.
+    /// The one deliberate difference: every MED2+3 v2 mode takes its engine
+    /// list's eta_a_rotation, last, where hkl keeps it outside the modes.
     #[test]
     fn tables_are_hkls() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../golden/hkl_modes.json");
         let golden: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).expect(path)).unwrap();
         let golden = golden["presets"].as_object().unwrap();
+        let listed: Vec<_> = TABLES
+            .iter()
+            .filter(|t| !t.engine_list.is_empty())
+            .map(|t| (t.preset, t.engine_list))
+            .collect();
+        let v2: &[_] = &[(ETA_A_ROTATION, 0.0)];
+        assert_eq!(listed, [("SOLEIL SIXS MED2+3 v2", v2)]);
         for t in &TABLES {
             let g = preset(t.preset).unwrap();
             let Some(hkl) = golden.get(t.preset) else {
@@ -528,10 +609,25 @@ mod tests {
                 let expected: &[&str] = if t.preset == "PYFAI" { &pyfai } else { &[] };
                 assert_eq!(t.names().collect::<Vec<_>>(), expected, "{}", t.preset);
                 assert!(t.modes.iter().all(|e| e.parameters.is_empty()));
-                assert!(t.psi.is_none());
+                assert!(t.engine_list.is_empty() && t.psi.is_none());
                 continue;
             };
-            assert_eq!(t.default_mode(), hkl["default"].as_str(), "{}", t.preset);
+            let default = t.default_mode().map(|m| m.name);
+            assert_eq!(default.as_deref(), hkl["default"].as_str(), "{}", t.preset);
+            let list: Vec<_> = hkl["engine_list"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    let angle = p["angle"].as_bool().unwrap();
+                    let value = p["value"].as_f64().unwrap();
+                    let value = if angle { value.to_radians() } else { value };
+                    (p["name"].as_str().unwrap(), angle, value)
+                })
+                .collect();
+            let ours = t.engine_list.iter().map(|(p, v)| (p.name, p.angle, *v));
+            assert_eq!(ours.collect::<Vec<_>>(), list, "{}", t.preset);
+            let list: Vec<_> = t.engine_list.iter().map(|(p, _)| *p).collect();
             let modes: Vec<_> = hkl["modes"]
                 .as_array()
                 .unwrap()
@@ -550,7 +646,9 @@ mod tests {
                 .modes
                 .iter()
                 .map(|e| {
-                    let parameters = e.parameters.iter().map(|p| (p.name, p.angle)).collect();
+                    let (own, tail) = e.parameters.split_at(e.parameters.len() - list.len());
+                    assert_eq!(tail, list, "{} {}", t.preset, e.name);
+                    let parameters = own.iter().map(|p| (p.name, p.angle)).collect();
                     (e.name, parameters)
                 })
                 .collect::<Vec<(_, Vec<_>)>>();
@@ -574,14 +672,17 @@ mod tests {
         }
     }
 
-    /// Every value of each mode's parameters, angles in rad.
+    /// Every value of each mode's parameters, angles in rad; eta_a_rotation
+    /// at 1, the slit fit.
     fn values(table: &ModeTable, name: &str) -> ModeSpec {
         let values = [0.2, 0.3, 1.0, 0.4, -0.7];
         let parameters = table.parameters(name).unwrap();
         parameters
             .iter()
             .zip(values)
-            .fold(ModeSpec::new(name), |s, (p, v)| s.with(p.name, v))
+            .fold(ModeSpec::new(name), |s, (p, v)| {
+                s.with(p.name, if *p == ETA_A_ROTATION { 1.0 } else { v })
+            })
     }
 
     #[test]
@@ -591,6 +692,9 @@ mod tests {
             for name in t.names() {
                 let mode = values(t, name).build(&g).unwrap();
                 assert_eq!(mode.name(), name, "{}", t.preset);
+            }
+            if let Some(default) = t.default_mode() {
+                default.build(&g).unwrap();
             }
             if let Some(psi) = t.psi {
                 psi(&g, Vector3::new(0.0, 0.0, 1.0), 0.3).unwrap();
@@ -626,6 +730,61 @@ mod tests {
             ModeSpec::new("constant_omega").build(&e4cv),
             e4c::constant_omega(&e4cv)
         );
+    }
+
+    /// MED2+3 v2's eta_a_rotation: at 1 v2 solves as MED2+3 at beta = 0,
+    /// eta_a fitted to the slits; at 0 eta_a holds at `current`. Another
+    /// value fails, as does none; a new engine list has it at 0.
+    #[test]
+    fn hkl_42_eta_a_rotation_is_a_switch() {
+        let v2 = preset("SOLEIL SIXS MED2+3 v2").unwrap();
+        let med23 = preset("SOLEIL SIXS MED2+3").unwrap();
+        let spec = |value| ModeSpec::new("mu_fixed").with("eta_a_rotation", value);
+        let current = v2
+            .values_from_degrees(&[10.0, 20.0, 30.0, 15.0, 40.0])
+            .unwrap();
+        let solve = |mode: &Mode, current: &[f64]| {
+            InverseRequest {
+                mode,
+                ub: Matrix3::identity() * 1.5,
+                wavelength: Wavelength::new(1.54).unwrap(),
+                target: Target::Hkl(Vector3::new(0.3, -0.4, 1.1)),
+                current,
+            }
+            .solve()
+            .unwrap()
+        };
+        let fitted = solve(&spec(1.0).build(&v2).unwrap(), &current);
+        let beta = [&[0.0][..], &current].concat();
+        let med = solve(&ModeSpec::new("mu_fixed").build(&med23).unwrap(), &beta);
+        assert!(!fitted.is_empty());
+        assert_eq!(fitted.len(), med.len());
+        for (s, m) in fitted.iter().zip(&med) {
+            assert_eq!(m[0], 0.0);
+            let close = s.iter().zip(&m[1..]).all(|(a, b)| (a - b).abs() < 1e-9);
+            assert!(close, "{s:?} {m:?}");
+        }
+        let eta_a = v2.axis_index("eta_a").unwrap();
+        let held = solve(&spec(0.0).build(&v2).unwrap(), &current);
+        assert!(!held.is_empty());
+        assert!(held.iter().all(|s| s[eta_a] == current[eta_a]));
+        assert_eq!(
+            spec(0.5).build(&v2),
+            Err(InverseError::NotSwitch {
+                mode: "mu_fixed".into(),
+                parameter: "eta_a_rotation",
+                value: 0.5,
+            })
+        );
+        assert_eq!(
+            ModeSpec::new("mu_fixed").build(&v2),
+            Err(InverseError::MissingParameter {
+                mode: "mu_fixed".into(),
+                parameter: "eta_a_rotation",
+            })
+        );
+        let table = ModeTable::of(v2.name()).unwrap();
+        assert_eq!(table.default_mode(), Some(spec(0.0)));
     }
 
     #[test]

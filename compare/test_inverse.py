@@ -228,6 +228,11 @@ def test_mode_raises_unknown_names_and_missing_parameters_by_type():
     k4cv = hklrs.Geometry.preset("K4CV")
     assert hklrs.Mode.parameters(k4cv, "constant_omega") == [("omega", True)]
     assert hklrs.Mode(k4cv, "constant_omega", omega=10.0).name == "constant_omega"
+    v2 = hklrs.Geometry.preset("SOLEIL SIXS MED2+3 v2")
+    assert hklrs.Mode.parameters(v2, "mu_fixed") == [("eta_a_rotation", False)]
+    with pytest.raises(hklrs.NotSwitch) as e:
+        hklrs.Mode(v2, "mu_fixed", eta_a_rotation=0.5)
+    assert (e.value.mode, e.value.parameter, e.value.value) == ("mu_fixed", "eta_a_rotation", 0.5)
 
 
 def libhkl_psi(rig, axes, ref):

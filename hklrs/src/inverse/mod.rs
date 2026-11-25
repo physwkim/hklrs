@@ -144,6 +144,12 @@ pub enum InverseError {
     },
     #[error("mode {mode:?} takes no parameter {parameter:?}")]
     UnknownParameter { mode: String, parameter: String },
+    #[error("mode {mode:?} takes parameter {parameter:?} as 0 or 1, not {value}")]
+    NotSwitch {
+        mode: String,
+        parameter: &'static str,
+        value: f64,
+    },
     #[error(transparent)]
     Geometry(#[from] Error),
     #[error(

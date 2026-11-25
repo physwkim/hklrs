@@ -485,6 +485,7 @@ mod tests {
             ("incidence", 0.2),
             ("azimuth", 0.7),
             ("emergence", -0.3),
+            ("eta_a_rotation", 0.0),
         ];
         let modes = table.names().map(|mode| {
             let parameters = table.parameters(mode).unwrap();

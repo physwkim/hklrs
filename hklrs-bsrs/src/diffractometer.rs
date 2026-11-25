@@ -278,11 +278,10 @@ pub(crate) fn build_mode<'g>(
     })
 }
 
-/// hkl's default mode of the preset `geometry` is named after, where it
-/// builds on `geometry`; it takes no parameter.
+/// hkl's default mode of the preset `geometry` is named after, as a new
+/// engine list has it, where it builds on `geometry`.
 pub(crate) fn default_mode(geometry: &Geometry) -> Option<ModeSpec> {
-    let table = ModeTable::of(geometry.name()).ok()?;
-    let mode = ModeSpec::new(table.default_mode()?);
+    let mode = ModeTable::of(geometry.name()).ok()?.default_mode()?;
     mode.build(geometry).is_ok().then_some(mode)
 }
 

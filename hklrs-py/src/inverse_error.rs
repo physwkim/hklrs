@@ -143,6 +143,12 @@ create_exception!(
 );
 create_exception!(
     hklrs,
+    NotSwitch,
+    InverseError,
+    "The mode takes this parameter as 0 or 1 alone; carries mode, parameter and value."
+);
+create_exception!(
+    hklrs,
     EmergenceRange,
     InverseError,
     "Emergence outside [-90, 90]; carries emergence (degrees)."
@@ -211,6 +217,11 @@ pub(crate) fn to_py(py: Python<'_>, geometry: &hklrs::Geometry, e: E) -> PyErr {
         E::UnknownParameter { mode, parameter } => {
             raise!(UnknownParameter, "mode" => mode, "parameter" => parameter)
         }
+        E::NotSwitch {
+            mode,
+            parameter,
+            value,
+        } => raise!(NotSwitch, "mode" => mode, "parameter" => parameter, "value" => value),
     }
 }
 
@@ -239,5 +250,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NotPreset", py.get_type::<NotPreset>())?;
     m.add("UnknownMode", py.get_type::<UnknownMode>())?;
     m.add("MissingParameter", py.get_type::<MissingParameter>())?;
-    m.add("UnknownParameter", py.get_type::<UnknownParameter>())
+    m.add("UnknownParameter", py.get_type::<UnknownParameter>())?;
+    m.add("NotSwitch", py.get_type::<NotSwitch>())
 }

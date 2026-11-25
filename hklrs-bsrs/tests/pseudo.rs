@@ -189,15 +189,22 @@ async fn a_pseudo_set_during_mv_hkl_leaves_the_setpoint_where_the_reals_went() {
     assert_close(&hkl(&dx).await, &[0.5, 0.0, 1.0], 1e-9);
 }
 
-/// A device on a preset starts in hkl's default mode for that preset and
-/// moves to an hkl in it.
+/// A device on a preset starts in hkl's default mode for that preset, as a
+/// new engine list has it (MED2+3 v2 at eta_a_rotation 0), and moves to an
+/// hkl in it.
 #[tokio::test]
 async fn a_preset_device_moves_in_hkls_default_mode() {
+    let v2 = ModeSpec::new("mu_fixed").with("eta_a_rotation", 0.0);
     for (name, default, target) in [
-        ("K4CV", "bissector", [0.0, 0.0, 1.0]),
-        ("K6C", "bissector_vertical", [0.0, 0.0, 1.0]),
-        ("ZAXIS", "zaxis", [1.0, 0.0, 0.5]),
-        ("SOLEIL SIXS MED2+3", "mu_fixed", [1.0, 0.0, 0.5]),
+        ("K4CV", ModeSpec::new("bissector"), [0.0, 0.0, 1.0]),
+        ("K6C", ModeSpec::new("bissector_vertical"), [0.0, 0.0, 1.0]),
+        ("ZAXIS", ModeSpec::new("zaxis"), [1.0, 0.0, 0.5]),
+        (
+            "SOLEIL SIXS MED2+3",
+            ModeSpec::new("mu_fixed"),
+            [1.0, 0.0, 0.5],
+        ),
+        ("SOLEIL SIXS MED2+3 v2", v2, [1.0, 0.0, 0.5]),
     ] {
         let geometry = preset(name).unwrap();
         let reals = geometry.axes().iter().map(|a| {
@@ -214,7 +221,7 @@ async fn a_preset_device_moves_in_hkls_default_mode() {
         let source = WavelengthSource::Fixed(Wavelength::new(LAMBDA).unwrap());
         let dx = Diffractometer::new("dx", geometry.clone(), reals.collect(), source, sample);
         let dx = Arc::new(dx.unwrap());
-        assert_eq!(dx.mode(), Some(ModeSpec::new(default)), "{name}");
+        assert_eq!(dx.mode(), Some(default), "{name}");
         let re = RunEngine::new(vec![]);
         re.run_async(mv_hkl(dx.clone(), target)).await.unwrap();
         assert_close(&hkl(&dx).await, &target, 1e-9);
