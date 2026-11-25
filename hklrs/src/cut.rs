@@ -414,11 +414,9 @@ impl CutResult {
             let axis = |c: &Cut| (c.kind.coord(), c.binning);
             let (left, right) = (axis(&self.cut), axis(&other.cut));
             if left != right {
-                let describe =
-                    |(c, b): (Coord, Binning)| vec![(c.name().to_owned(), b.step(), b.anchor())];
                 return Err(Error::GridMismatch {
-                    left: describe(left),
-                    right: describe(right),
+                    left: vec![left],
+                    right: vec![right],
                 }
                 .into());
             }
@@ -738,8 +736,8 @@ mod tests {
             assert_eq!(
                 a.clone().merge(sums(&other)),
                 Err(Error::GridMismatch {
-                    left: vec![("Qz".to_owned(), 0.5, 0.0)],
-                    right: vec![(kind.coord().name().to_owned(), 0.5, 0.0)],
+                    left: vec![(Coord::linear("Qz"), binning())],
+                    right: vec![(kind.coord(), binning())],
                 }
                 .into())
             );

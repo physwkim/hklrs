@@ -191,8 +191,8 @@ impl Axis {
         })
     }
 
-    fn describe(&self) -> (String, f64, f64) {
-        describe(&self.coord, self.binning)
+    fn describe(&self) -> (Coord, Binning) {
+        (self.coord.clone(), self.binning)
     }
 }
 
@@ -364,15 +364,11 @@ impl Bounds {
     }
 }
 
-fn describe(coord: &Coord, binning: Binning) -> (String, f64, f64) {
-    (coord.name().to_owned(), binning.step, binning.anchor)
-}
-
-fn describe_coords(coords: &[Coord], binnings: &[Binning]) -> Vec<(String, f64, f64)> {
+fn describe_coords(coords: &[Coord], binnings: &[Binning]) -> Vec<(Coord, Binning)> {
     coords
         .iter()
-        .zip(binnings)
-        .map(|(c, b)| describe(c, *b))
+        .cloned()
+        .zip(binnings.iter().copied())
         .collect()
 }
 
@@ -961,6 +957,33 @@ mod tests {
                 Err(Error::GridMismatch { .. })
             ));
         }
+    }
+
+    /// Grids that differ only in a coordinate's kind name it in the error,
+    /// at every site that refuses them.
+    #[test]
+    fn a_grid_mismatch_names_the_coordinate_kind() {
+        let angle = points_of(vec![Coord::angle("x")], &[&[0.5]]);
+        let line = points(ONE, &[&[0.5]]);
+        let one = unweighted(&[1.0]);
+        let mismatch = Error::GridMismatch {
+            left: vec![(Coord::linear("x"), unit())],
+            right: vec![(Coord::angle("x"), unit())],
+        };
+        let a = cube(ONE, &[&[0.5]], &[1.0]);
+        let mut b = Cube::default();
+        b.add_growing(&[unit()], &angle, &one).unwrap();
+        assert_eq!(a.clone().merge(b), Err(mismatch.clone()));
+        assert_eq!(a.clone().add(&angle, &one), Err(mismatch.clone()));
+        assert_eq!(
+            a.clone().add_growing(&[unit()], &angle, &one),
+            Err(mismatch.clone())
+        );
+        let mut bounds = Bounds::new(vec![unit()]);
+        bounds.include(&line, &one).unwrap();
+        assert_eq!(bounds.include(&angle, &one), Err(mismatch.clone()));
+        let text = mismatch.to_string();
+        assert!(text.contains("Linear") && text.contains("Angle"), "{text}");
     }
 
     /// An angle and a linear coordinate of one name and binning are two

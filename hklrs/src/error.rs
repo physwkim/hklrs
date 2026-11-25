@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::grid::{Binning, Coord};
 use crate::projection::ProjectionError;
 
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -113,10 +114,11 @@ pub enum Error {
     CoordRepeated { name: String },
     #[error("custom projection: {0}")]
     Projection(ProjectionError),
-    #[error("cube grids differ: {left:?} vs {right:?} (name, step, anchor)")]
+    /// Per axis, the coordinate (name and kind) and binning compared.
+    #[error("grids differ: {left:?} vs {right:?}")]
     GridMismatch {
-        left: Vec<(String, f64, f64)>,
-        right: Vec<(String, f64, f64)>,
+        left: Vec<(Coord, Binning)>,
+        right: Vec<(Coord, Binning)>,
     },
     #[error("a dark field is a rate per second: the frame needs a count time")]
     DarkNeedsTime,
