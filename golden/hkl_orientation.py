@@ -7,7 +7,10 @@ but for the HELD axes), then rebuild a fresh
 sample with the same lattice, add both reflections at those angles and call
 compute_UB_busing_levy. UB_reference is an independent numpy Busing-Levy with
 the correct B; UB_hkl12_model is the same with libhkl's B[1][2] of HKL-12.
+The C solver restarts with libc rand(); srand() is seeded per case through
+ctypes, so a case does not depend on the cases run before it.
 """
+import ctypes
 import json
 import math
 import os
@@ -22,6 +25,7 @@ from gi.repository import Hkl  # noqa: E402
 SEED = 20260201
 USER = Hkl.UnitEnum.USER
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hkl_orientation.json")
+LIBC = ctypes.CDLL(None)
 SAMPLES = {
     "cubic": dict(a=5.431020511, b=5.431020511, c=5.431020511, alpha=90.0, beta=90.0, gamma=90.0),
     "hexagonal": dict(a=3.0, b=3.0, c=5.0, alpha=90.0, beta=90.0, gamma=120.0),
@@ -120,6 +124,8 @@ def one_case(fac, gname, sname, s, wl, rng, units, names):
     case = {"geometry": gname, "sample": sname, "lattice": dict(s), "wavelength": wl}
     ux, uy, uz = rng.uniform(-180, 180), rng.uniform(-90, 90), rng.uniform(-180, 180)
     case["U_euler_deg"] = [ux, uy, uz]
+    c_seed = rng.randint(1, 2**30)
+    case["c_srand"] = c_seed
     try:
         geo = fac.create_new_geometry()
         geo.wavelength_set(wl, USER)
@@ -138,6 +144,7 @@ def one_case(fac, gname, sname, s, wl, rng, units, names):
         case["mode"] = eng.current_mode_get()
         b = b_matrix(s)
         kmax = 2 * 2 * math.pi / wl  # |Q| <= 2k
+        LIBC.srand(c_seed)
         picked = []
         for _ in range(MAX_TRIES):
             h = [rng.randint(-4, 4) for _ in range(3)]
