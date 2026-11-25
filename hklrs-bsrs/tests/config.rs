@@ -160,27 +160,51 @@ fn hklpy2_psi_constant_takes_its_extras() {
 
 /// hklpy2_e4cv.yml on K4CV in constant_omega, its sample without
 /// reflections alone, with `extras` as axes.extra_axes.
-fn k4cv_constant_omega(extras: Value) -> Result<Config, DiffError> {
+/// hklpy2_e4cv.yml moved to preset `geometry` with real `axes`, in `mode`
+/// with `extras`.
+fn hklpy2_on(
+    geometry: &str,
+    axes: &[&str],
+    mode: &str,
+    extras: Value,
+) -> Result<Config, DiffError> {
     let mut doc: Value = serde_saphyr::from_str(&read("hklpy2_e4cv.yml")).unwrap();
-    let axes = ["komega", "kappa", "kphi", "tth"];
     doc["samples"].as_object_mut().unwrap().remove("hexagonal");
     doc["sample_name"] = "sample".into();
     doc["axes"]["real_axes"] = json!(axes);
     doc["axes"]["extra_axes"] = extras;
     let xref = doc["axes"]["axes_xref"].as_object_mut().unwrap();
     xref.retain(|k, _| ["h", "k", "l"].contains(&k.as_str()));
-    xref.extend(axes.map(|a| (a.into(), a.into())));
+    xref.extend(axes.iter().map(|&a| (a.into(), a.into())));
     let limits = doc["constraints"]["omega"].clone();
     let constraint = |a: &str| {
         let mut c = limits.clone();
         c["label"] = a.into();
         (a.to_owned(), c)
     };
-    doc["constraints"] = Value::Object(axes.map(constraint).into_iter().collect());
-    doc["solver"]["geometry"] = "K4CV".into();
+    doc["constraints"] = Value::Object(axes.iter().map(|&a| constraint(a)).collect());
+    doc["solver"]["geometry"] = geometry.into();
     doc["solver"]["real_axes"] = json!(axes);
-    doc["solver"]["mode"] = "constant_omega".into();
+    doc["solver"]["mode"] = mode.into();
     Config::from_hklpy2(&serde_saphyr::to_string(&doc).unwrap())
+}
+
+fn k4cv_constant_omega(extras: Value) -> Result<Config, DiffError> {
+    let axes = ["komega", "kappa", "kphi", "tth"];
+    hklpy2_on("K4CV", &axes, "constant_omega", extras)
+}
+
+#[test]
+fn hklpy2_med_2_3_v2_stands_at_eta_a_rotation_0() {
+    // hklpy2 never sets hkl's engine-list eta_a_rotation, not from extras
+    let axes = ["mu", "omega", "gamma", "delta", "eta_a"];
+    for extras in [json!({}), json!({"eta_a_rotation": 1})] {
+        let config = hklpy2_on("SOLEIL SIXS MED2+3 v2", &axes, "gamma_fixed", extras).unwrap();
+        let mode = config.mode.unwrap();
+        assert_eq!(mode.name, "gamma_fixed");
+        let rotation = BTreeMap::from([("eta_a_rotation".into(), 0.0)]);
+        assert_eq!(mode.parameters, rotation);
+    }
 }
 
 #[test]

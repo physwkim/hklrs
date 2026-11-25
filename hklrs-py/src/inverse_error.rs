@@ -15,6 +15,13 @@ create_exception!(
 );
 create_exception!(
     hklrs,
+    OffEwaldSphere,
+    InverseError,
+    "No written axis turns the sample or the beam and the target is off the Ewald sphere; \
+     carries q (sample frame) and miss, |k_i + Q| - k (Å⁻¹)."
+);
+create_exception!(
+    hklrs,
     NoSolution,
     InverseError,
     "No axis values satisfy the mode."
@@ -143,6 +150,12 @@ create_exception!(
 );
 create_exception!(
     hklrs,
+    NotSwitch,
+    InverseError,
+    "The mode takes this parameter as 0 or 1 alone; carries mode, parameter and value."
+);
+create_exception!(
+    hklrs,
     EmergenceRange,
     InverseError,
     "Emergence outside [-90, 90]; carries emergence (degrees)."
@@ -162,6 +175,7 @@ pub(crate) fn to_py(py: Python<'_>, geometry: &hklrs::Geometry, e: E) -> PyErr {
     }
     match e {
         E::Unreachable { q, q_max } => raise!(Unreachable, "q" => q, "q_max" => q_max),
+        E::OffEwaldSphere { q, miss } => raise!(OffEwaldSphere, "q" => q, "miss" => miss),
         E::NoSolution => raise!(NoSolution),
         E::NoSolutionInLimits(outside) => match outside
             .iter()
@@ -211,6 +225,11 @@ pub(crate) fn to_py(py: Python<'_>, geometry: &hklrs::Geometry, e: E) -> PyErr {
         E::UnknownParameter { mode, parameter } => {
             raise!(UnknownParameter, "mode" => mode, "parameter" => parameter)
         }
+        E::NotSwitch {
+            mode,
+            parameter,
+            value,
+        } => raise!(NotSwitch, "mode" => mode, "parameter" => parameter, "value" => value),
     }
 }
 
@@ -218,6 +237,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("InverseError", py.get_type::<InverseError>())?;
     m.add("Unreachable", py.get_type::<Unreachable>())?;
+    m.add("OffEwaldSphere", py.get_type::<OffEwaldSphere>())?;
     m.add("NoSolution", py.get_type::<NoSolution>())?;
     m.add("NoSolutionInLimits", py.get_type::<NoSolutionInLimits>())?;
     m.add("GeometryError", py.get_type::<GeometryError>())?;
@@ -239,5 +259,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NotPreset", py.get_type::<NotPreset>())?;
     m.add("UnknownMode", py.get_type::<UnknownMode>())?;
     m.add("MissingParameter", py.get_type::<MissingParameter>())?;
-    m.add("UnknownParameter", py.get_type::<UnknownParameter>())
+    m.add("UnknownParameter", py.get_type::<UnknownParameter>())?;
+    m.add("NotSwitch", py.get_type::<NotSwitch>())
 }

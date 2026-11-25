@@ -109,7 +109,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "E4CH": {
    "default": "bissector",
@@ -187,7 +188,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "E4CV": {
    "default": "bissector",
@@ -265,7 +267,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "E6C": {
    "default": "bissector_vertical",
@@ -401,7 +404,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "ESRF BM28 PSIC": {
    "default": "constant_nu_coplanar",
@@ -419,7 +423,8 @@
      "parameters": []
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "ESRF ID01 PSIC": {
    "default": "constant_nu_coplanar",
@@ -437,7 +442,8 @@
      "parameters": []
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "K4CV": {
    "default": "bissector",
@@ -530,7 +536,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "K6C": {
    "default": "bissector_vertical",
@@ -694,7 +701,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "PETRA3 P09 EH2": {
    "default": "zaxis + alpha-fixed",
@@ -744,7 +752,8 @@
      "parameters": []
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "PETRA3 P23 4C": {
    "default": "bissector_vertical",
@@ -787,7 +796,8 @@
      ]
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "PETRA3 P23 6C": {
    "default": "bissector_vertical",
@@ -923,7 +933,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "SOLEIL CRISTAL K4C": {
    "default": "bissector",
@@ -998,7 +1009,8 @@
      ]
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "SOLEIL MARS": {
    "default": "bissector",
@@ -1076,7 +1088,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "SOLEIL NANOSCOPIUM ROBOT": {
    "default": "lifting detector rz",
@@ -1094,7 +1107,8 @@
      "parameters": []
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "SOLEIL SIRIUS KAPPA": {
    "default": "bissector_vertical",
@@ -1258,7 +1272,8 @@
       }
      ]
     }
-   ]
+   ],
+   "engine_list": []
   },
   "SOLEIL SIRIUS TURRET": {
    "default": "lifting_detector_thetah",
@@ -1268,7 +1283,8 @@
      "parameters": []
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "SOLEIL SIXS MED1+2": {
    "default": "pitch_fixed",
@@ -1282,7 +1298,8 @@
      "parameters": []
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "SOLEIL SIXS MED2+2": {
    "default": "mu_fixed",
@@ -1317,7 +1334,8 @@
      ]
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "SOLEIL SIXS MED2+3": {
    "default": "mu_fixed",
@@ -1352,7 +1370,8 @@
      ]
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "SOLEIL SIXS MED2+3 v2": {
    "default": "mu_fixed",
@@ -1387,12 +1406,20 @@
      ]
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": [
+    {
+     "name": "eta_a_rotation",
+     "angle": false,
+     "value": 0.0
+    }
+   ]
   },
   "TwoC": {
    "default": null,
    "modes": [],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   },
   "ZAXIS": {
    "default": "zaxis",
@@ -1406,7 +1433,8 @@
      "parameters": []
     }
    ],
-   "psi": null
+   "psi": null,
+   "engine_list": []
   }
  }
 }

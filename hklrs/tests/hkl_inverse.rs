@@ -22,7 +22,6 @@
 mod common;
 mod inverse_check;
 
-use hklrs::inverse::soleil_sixs_med;
 use hklrs::nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use hklrs::presets::preset;
 use hklrs::{Geometry, InverseError, InverseRequest, Mode, ModeSpec, Target, Wavelength};
@@ -45,14 +44,21 @@ fn angular_distance(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// The case's mode from the geometry's table, its parameters by hkl's names
-/// in hkl's user units; MED2+3 v2 with eta_a_rotation set adds the slit fit
-/// MED2+3's modes carry.
+/// in hkl's user units, the engine list's (MED2+3 v2's eta_a_rotation) with
+/// them.
 fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
     let name = case["mode"].as_str().unwrap();
     let names = case["parameter_names"].as_array().unwrap();
     let parameters = names.iter().zip(case["parameters"].as_array().unwrap());
     let parameters = parameters.map(|(n, v)| (n.as_str().unwrap().to_owned(), common::f(v)));
-    let mut spec = ModeSpec::from_degrees(geo, name, parameters).unwrap();
+    let list = case
+        .get("engine_list_parameters")
+        .and_then(Value::as_object);
+    let list = list
+        .into_iter()
+        .flatten()
+        .map(|(n, v)| (n.clone(), common::f(v)));
+    let mut spec = ModeSpec::from_degrees(geo, name, parameters.chain(list)).unwrap();
     // hkl's init takes the normal as a lab direction at the start
     // geometry, where the sample rotation carries the holder frame.
     if name == "constant_incidence" {
@@ -65,10 +71,6 @@ fn mode<'g>(geo: &'g Geometry, case: &Value) -> Mode<'g> {
             .with("z", normal.z);
     }
     let mode = spec.build(geo).unwrap();
-    let mode = match (case.get("fitted_axes"), mode.slits()) {
-        (Some(_), None) => soleil_sixs_med::slits(mode).unwrap(),
-        _ => mode,
-    };
     let fitted = mode
         .slits()
         .map(|s| serde_json::json!([geo.axes()[s.axis()].name()]));

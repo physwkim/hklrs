@@ -3,9 +3,11 @@ Run: python -I hkl_modes.py
 
 Per factory: the "hkl" engine's mode names in hkl's order, the mode it is
 in on a fresh engine list (hkl's default_mode), and per mode its parameter
-names, each flagged angle when hkl converts it to degrees for the user; and
-the "psi" engine's modes with theirs, where the list has that engine. TwoC's
-list has no engine; PYFAI and PETRA3 P08 LISA have no gi factory.
+names, each flagged angle when hkl converts it to degrees for the user; the
+"psi" engine's modes with theirs, where the list has that engine; and the
+engine list's own parameters, flagged so, with their value on a new list in
+user units. TwoC's list has no engine; PYFAI and PETRA3 P08 LISA have no gi
+factory.
 """
 import json
 import os
@@ -23,6 +25,17 @@ def parameters(engine):
     engine.parameters_values_set([1.0] * len(names), Hkl.UnitEnum.DEFAULT)
     user = engine.parameters_values_get(Hkl.UnitEnum.USER)
     return [{"name": n, "angle": v != 1.0} for n, v in zip(names, user)]
+
+
+def engine_list(engines):
+    out = []
+    for name in engines.parameters_names_get():
+        p = engines.parameter_get(name)
+        value = p.value_get(Hkl.UnitEnum.USER)
+        p.value_set(1.0, Hkl.UnitEnum.DEFAULT)
+        angle = p.value_get(Hkl.UnitEnum.USER) != 1.0
+        out.append({"name": name, "angle": angle, "value": value})
+    return out
 
 
 def modes(engine):
@@ -46,6 +59,7 @@ def main():
             "default": None if hkl is None else hkl.current_mode_get(),
             "modes": [] if hkl is None else modes(hkl),
             "psi": None if psi is None else modes(psi),
+            "engine_list": engine_list(engines),
         }
     with open(OUT, "w") as f:
         json.dump({"hkl_version": "5.1.9", "presets": presets}, f, indent=1)

@@ -381,22 +381,29 @@ impl ReflectionFile {
     }
 }
 
-/// hklpy2 keeps one value per parameter name across modes; mode `name` of
-/// `geometry`'s preset takes exactly those hkl declares for it.
+/// hklpy2 keeps one value per parameter name across modes and never sets
+/// hkl's engine-list parameters, which stay as a new engine list has them;
+/// mode `name` of `geometry`'s preset takes exactly those hkl declares.
 fn mode(
     geometry: &Geometry,
     name: &str,
     extras: &BTreeMap<String, f64>,
 ) -> Result<ModeConfig, DiffError> {
-    let declared = ModeTable::of(geometry.name())
-        .and_then(|table| table.parameters(name))
-        .map_err(|source| DiffError::Mode {
-            mode: name.to_owned(),
-            source,
-        })?;
+    let in_mode = |source| DiffError::Mode {
+        mode: name.to_owned(),
+        source,
+    };
+    let table = ModeTable::of(geometry.name()).map_err(in_mode)?;
+    let declared = table.parameters(name).map_err(in_mode)?;
     let parameters = declared.iter().map(|p| {
-        let value = extras.get(p.name).copied();
-        let value = value.ok_or_else(|| missing(format!("axes.extra_axes.{}", p.name)))?;
+        let value = match table.engine_list().iter().find(|(q, _)| q == p) {
+            Some(&(_, v)) if p.angle => v.to_degrees(),
+            Some(&(_, v)) => v,
+            None => {
+                let value = extras.get(p.name).copied();
+                value.ok_or_else(|| missing(format!("axes.extra_axes.{}", p.name)))?
+            }
+        };
         Ok((p.name.to_owned(), value))
     });
     Ok(ModeConfig {

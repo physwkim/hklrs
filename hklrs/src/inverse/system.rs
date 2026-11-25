@@ -2,7 +2,7 @@
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
-use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix3, Unit, UnitQuaternion, Vector3};
 
 use super::jet::{Scalar, Vec3};
 use super::kappa::{Branch, KappaAxes, restrict};
@@ -23,6 +23,13 @@ pub(super) enum Goal {
     /// R_sample·q = k̂f − k̂i, q the target Q in the sample frame in units
     /// of k: three rows.
     Q(Vector3<f64>),
+    /// k̂f = `kf`, where Q and k̂i stay fixed in the lab: two rows, k̂f's
+    /// stereographic image from −kf on the plane normal to it,
+    /// (k̂f·e₀, k̂f·e₁)/(1 + k̂f·kf) over `plane` = (e₀, e₁), null at kf alone.
+    Ray {
+        kf: Vector3<f64>,
+        plane: [Vector3<f64>; 2],
+    },
     /// No rows: the extra equations alone place the detector.
     Detector,
     /// The kappa arm's own rotation, komega·kappa·kphi, is `rotation`, that
@@ -31,6 +38,19 @@ pub(super) enum Goal {
         eulerians: [f64; 3],
         rotation: UnitQuaternion<f64>,
     },
+}
+
+impl Goal {
+    /// [`Goal::Ray`] to `kf`, its plane spanned off the lab axis least
+    /// along it.
+    pub fn ray(kf: Unit<Vector3<f64>>) -> Self {
+        let kf = kf.into_inner();
+        let e0 = kf.cross(&Vector3::ith(kf.iamin(), 1.0)).normalize();
+        Goal::Ray {
+            kf,
+            plane: [e0, kf.cross(&e0)],
+        }
+    }
 }
 
 pub(super) struct System<'a> {
@@ -311,6 +331,20 @@ impl<'a> System<'a> {
             Goal::Q(q) => {
                 let hkl = fr.sample(q).sub(&fr.kf.sub(&fr.ki));
                 (0..3).map(|i| hkl.component(i)).collect()
+            }
+            Goal::Ray { kf, plane } => {
+                let n = self.written.len();
+                let along = fr.kf.dot(&Vec3::constant(*kf, n));
+                // The chart's pole, k̂f = −kf.
+                if 1.0 + along.v <= NULL {
+                    return None;
+                }
+                let below = Scalar {
+                    v: 1.0 + along.v,
+                    d: along.d,
+                };
+                let row = |e: &Vector3<f64>| fr.kf.dot(&Vec3::constant(*e, n)).div(&below);
+                plane.iter().map(row).collect()
             }
             Goal::Detector => Vec::new(),
             // Mode::new_kappa is the only way to an Arm goal.
