@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use hklrs::absorption::xrt::Material;
 use hklrs::absorption::{Absorber, Attenuation, Beam, DetectorPath, Face, Layer, Masked, Slab};
+use hklrs::grid::CoordKind;
 use hklrs::nalgebra::{Matrix3, Point3, Unit, Vector3};
 use hklrs::{poni, xu};
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -20,11 +21,78 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+/// An angle in radians written in a message, in degrees: the shortest
+/// decimal of at most 15 significant digits, so degrees typed with up to
+/// ~13 come back as typed through radians. Text only; a number Python
+/// reads stays exact. `{}` and `{:?}` write it as they write an f64.
+pub(crate) struct Degrees(pub(crate) f64);
+
+impl Degrees {
+    /// 15 digits is f64's decimal precision, so the f64 nearest that
+    /// decimal is written as it, trailing zeros dropped.
+    fn shown(&self) -> f64 {
+        format!("{:.14e}", self.0.to_degrees()).parse().unwrap()
+    }
+}
+
+impl std::fmt::Display for Degrees {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.shown(), f)
+    }
+}
+
+impl std::fmt::Debug for Degrees {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.shown(), f)
+    }
+}
+
+/// `v`, of a coordinate of `kind`, as a Python literal in a message.
+pub(crate) fn literal(v: f64, kind: CoordKind) -> String {
+    match kind {
+        CoordKind::Angle => format!("{:?}", Degrees(v)),
+        CoordKind::Linear => format!("{v:?}"),
+    }
+}
+
+/// The one place a core error becomes a Python exception.
 fn err(e: hklrs::Error) -> PyErr {
-    PyValueError::new_err(match e {
-        hklrs::Error::GridMismatch { left, right } => frame_map::grid_mismatch(&left, &right),
+    PyValueError::new_err(message(e))
+}
+
+/// A core error's message with every angle in it in degrees.
+pub(crate) fn message(e: hklrs::Error) -> String {
+    use hklrs::Error::*;
+    let v = |v: f64, kind| match kind {
+        CoordKind::Angle => format!("{}°", Degrees(v)),
+        CoordKind::Linear => v.to_string(),
+    };
+    match e {
+        GridMismatch { left, right } => frame_map::grid_mismatch(&left, &right),
+        Width { what, value, kind } => {
+            format!("{what} must be finite and positive, got {}", v(value, kind))
+        }
+        NoBin { value, step, kind } => format!(
+            "coordinate {} has no bin of width {}",
+            v(value, kind),
+            v(step, kind)
+        ),
+        AxisLimits {
+            name,
+            min,
+            max,
+            kind,
+        } => format!(
+            "axis {name:?} limits [{}, {}] are not ordered numbers",
+            v(min, kind),
+            v(max, kind)
+        ),
+        LatticeAngle { name, value } => format!(
+            "lattice angle {name} = {} is outside (0°, 180°)",
+            v(value, CoordKind::Angle)
+        ),
         e => e.to_string(),
-    })
+    }
 }
 
 /// `a` as an image of its own shape, which the core compares with any
@@ -173,13 +241,7 @@ impl PyGeometry {
     fn set_limits(&mut self, name: &str, min: f64, max: f64) -> PyResult<()> {
         let axis = self.axis(name)?;
         let (lo, hi) = (internal_value(axis, min), internal_value(axis, max));
-        self.0.set_limits(name, lo, hi).map_err(|e| match e {
-            // in the caller's units, not radians
-            hklrs::Error::AxisLimits { name, .. } => {
-                err(hklrs::Error::AxisLimits { name, min, max })
-            }
-            e => err(e),
-        })
+        self.0.set_limits(name, lo, hi).map_err(err)
     }
 
     /// (min, max) of axis `name`, units as for `set_limits`; unbounded,

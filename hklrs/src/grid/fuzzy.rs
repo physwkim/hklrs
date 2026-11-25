@@ -2,7 +2,7 @@
 //! of a [`Binning`]. `Footprint::reach` is the one place a pixel's share
 //! of a bin is computed.
 
-use super::{Binning, Projected};
+use super::{Binning, Coord, CoordKind, Projected};
 use crate::Error;
 use crate::normalise::Normalised;
 
@@ -21,31 +21,40 @@ pub enum Footprint {
 }
 
 impl Footprint {
-    /// Refuses a width that is not positive and finite.
-    pub(crate) fn check(self) -> Result<Self, Error> {
+    /// Refuses a width that is not positive and finite, on a coordinate of
+    /// `kind`.
+    pub(crate) fn check(self, kind: CoordKind) -> Result<Self, Error> {
         match self {
-            Footprint::Width(w) if !(w.is_finite() && w > 0.0) => Err(Error::NotPositive {
+            Footprint::Width(w) if !(w.is_finite() && w > 0.0) => Err(Error::Width {
                 what: "footprint width",
                 value: w,
+                kind,
             }),
             _ => Ok(self),
         }
     }
 
-    /// The bins of `binning` a pixel at `v` reaches; `Err` when an end of
-    /// the footprint has no bin.
-    pub(crate) fn reach(self, binning: Binning, v: f64) -> Result<Reach, Error> {
+    /// The bins of `binning` a pixel at `v`, on a coordinate of `kind`,
+    /// reaches; `Err` when an end of the footprint has no bin.
+    pub(crate) fn reach(self, binning: Binning, kind: CoordKind, v: f64) -> Result<Reach, Error> {
         let (lo, hi, width) = match self {
             Footprint::Point => (v, v, 0.0),
             Footprint::Width(w) => (v - w / 2.0, v + w / 2.0, w),
+        };
+        let bin = |value: f64| {
+            binning.bin(value).ok_or(Error::NoBin {
+                value,
+                step: binning.step(),
+                kind,
+            })
         };
         Ok(Reach {
             binning,
             lo,
             hi,
             width,
-            k0: binning.bin(lo)?,
-            k1: binning.bin(hi)?,
+            k0: bin(lo)?,
+            k1: bin(hi)?,
         })
     }
 }
@@ -95,7 +104,8 @@ impl Projected {
         }
         self.footprints = footprints
             .into_iter()
-            .map(Footprint::check)
+            .zip(&self.coords)
+            .map(|(f, c)| f.check(c.kind()))
             .collect::<Result<_, _>>()?;
         Ok(self)
     }
@@ -136,12 +146,13 @@ impl Pieces {
         }
     }
 
-    /// Adds a pixel of value `n` at `coords`, one per axis, laid by
-    /// `footprints` on `binnings`. `Err`, and nothing added, when an end of
-    /// its footprint has no bin.
+    /// Adds a pixel of value `n` at `coords`, one per axis of `axes`, laid
+    /// by `footprints` on `binnings`. `Err`, and nothing added, when an end
+    /// of its footprint has no bin.
     pub(crate) fn push(
         &mut self,
         n: Normalised,
+        axes: &[Coord],
         footprints: &[Footprint],
         binnings: &[Binning],
         coords: impl IntoIterator<Item = f64>,
@@ -155,11 +166,11 @@ impl Pieces {
             axis,
             at,
         } = self;
-        debug_assert!(footprints.len() == *dims && binnings.len() == *dims);
-        let laid = footprints.iter().zip(binnings).zip(coords);
-        for (a, ((f, &b), v)) in axis.iter_mut().zip(laid) {
+        debug_assert!(axes.len() == *dims && footprints.len() == *dims && binnings.len() == *dims);
+        let laid = axes.iter().zip(footprints).zip(binnings).zip(coords);
+        for (a, (((c, f), &b), v)) in axis.iter_mut().zip(laid) {
             a.clear();
-            a.extend(f.reach(b, v)?.shares());
+            a.extend(f.reach(b, c.kind(), v)?.shares());
         }
         if axis.iter().all(|a| !a.is_empty()) {
             at.fill(0);
@@ -229,13 +240,14 @@ mod tests {
     }
 
     fn unit() -> Binning {
-        Binning::new(1.0, 0.0).unwrap()
+        Binning::new(CoordKind::Linear, 1.0, 0.0).unwrap()
     }
 
     fn pieces(footprints: &[Footprint], coords: &[f64]) -> Result<Vec<(Vec<i64>, f64)>, Error> {
+        let axes = vec![Coord::linear("x"); coords.len()];
         let binnings = vec![unit(); coords.len()];
         let mut p = Pieces::with_capacity(coords.len(), 1);
-        p.push(n(1.0), footprints, &binnings, coords.iter().copied())?;
+        p.push(n(1.0), &axes, footprints, &binnings, coords.iter().copied())?;
         let (_, ps) = p.pixels().next().unwrap();
         Ok(ps.map(|(k, f)| (k.to_vec(), f)).collect())
     }
@@ -269,12 +281,24 @@ mod tests {
 
     #[test]
     fn a_footprint_end_without_a_bin_adds_nothing() {
+        let axes = [Coord::linear("x"), Coord::angle("tth")];
         let binnings = [unit(); 2];
         let mut p = Pieces::with_capacity(2, 1);
         let w = [Footprint::Point, Footprint::Width(1.0)];
         for bad in [f64::NAN, f64::INFINITY, 1e300] {
-            let err = p.push(n(1.0), &w, &binnings, [0.5, bad]).unwrap_err();
-            assert!(matches!(err, Error::NoBin { .. }), "{err:?}");
+            let err = p
+                .push(n(1.0), &axes, &w, &binnings, [0.5, bad])
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::NoBin {
+                        kind: CoordKind::Angle,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
         }
         assert_eq!((p.pixels().count(), p.len(), p.bins().len()), (0, 0, 0));
     }
@@ -424,7 +448,10 @@ mod tests {
         );
         assert!(matches!(
             p.with_footprint(vec![Footprint::Point, Footprint::Width(-1.0)]),
-            Err(Error::NotPositive { .. })
+            Err(Error::Width {
+                kind: CoordKind::Linear,
+                ..
+            })
         ));
     }
 
@@ -432,11 +459,16 @@ mod tests {
     fn a_width_must_be_positive_and_finite() {
         for w in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(matches!(
-                Footprint::Width(w).check(),
-                Err(Error::NotPositive { .. })
+                Footprint::Width(w).check(CoordKind::Angle),
+                Err(Error::Width {
+                    what: "footprint width",
+                    kind: CoordKind::Angle,
+                    ..
+                })
             ));
         }
-        assert_eq!(Footprint::Point.check(), Ok(Footprint::Point));
-        assert_eq!(Footprint::Width(0.5).check(), Ok(Footprint::Width(0.5)));
+        let ok = |f: Footprint| f.check(CoordKind::Linear);
+        assert_eq!(ok(Footprint::Point), Ok(Footprint::Point));
+        assert_eq!(ok(Footprint::Width(0.5)), Ok(Footprint::Width(0.5)));
     }
 }

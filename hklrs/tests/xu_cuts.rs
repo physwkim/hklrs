@@ -91,12 +91,13 @@ fn cut(c: &Value, half_width: f64) -> Cut {
     } else {
         at3(k, &c["at"])
     };
+    let kind = kind(c);
     Cut::new(
-        kind(c),
+        kind,
         intdir(c["intdir"].as_str().unwrap()),
         at,
         half_width,
-        Binning::new(0.01, 0.0).unwrap(),
+        Binning::new(kind.coord().kind(), 0.01, 0.0).unwrap(),
     )
     .unwrap()
 }

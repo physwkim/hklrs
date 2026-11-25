@@ -270,6 +270,16 @@ def test_custom_planes_are_held_to_the_axes(returns, error, match):
     assert cube.axes == []
 
 
+def test_an_angle_without_a_bin_is_in_degrees():
+    geo, det, ang = custom_setup()
+    p = fm.Custom(lambda planes, context: (planes[0], np.full_like(planes[1], np.nan)),
+                  [("a", "linear"), ("b", "angle")])
+    m = fm.FrameMap(geo, det, [(DX, 0.0), (0.25, 0.0)], p)
+    with pytest.raises(ValueError) as e:
+        m.add(fm.Cube(), ang, WL, np.ones(det.shape))
+    assert str(e.value) == "coordinate NaN° has no bin of width 0.25°"
+
+
 def test_custom_setup_is_refused():
     geo, det, _ = custom_setup()
     f = lambda planes, context: planes  # noqa: E731

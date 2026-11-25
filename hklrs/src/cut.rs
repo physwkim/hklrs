@@ -19,7 +19,7 @@ use nalgebra::Vector3;
 
 use crate::absorption::Masked;
 pub use crate::grid::fuzzy::Footprint;
-use crate::grid::{Binning, Coord};
+use crate::grid::{Binning, Coord, CoordKind};
 use crate::normalise::Normalised;
 use crate::{Error, Wavelength};
 
@@ -54,12 +54,29 @@ pub enum IntDir {
     Radial,
 }
 
+impl IntDir {
+    /// What the distance from the cut in this direction measures, and so
+    /// the half-width: Å⁻¹ in Q, an angle in the others.
+    pub fn perp_kind(&self) -> CoordKind {
+        match self {
+            IntDir::Q => CoordKind::Linear,
+            IntDir::Omega | IntDir::TwoTheta | IntDir::Radial => CoordKind::Angle,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum CutError {
     #[error("a {kind} cut has no {intdir:?} integration direction")]
     IntDir { kind: &'static str, intdir: IntDir },
+    /// Footprints of results of one cut, whose coordinate along is of
+    /// `kind`.
     #[error("cut results have different footprints: {left:?} vs {right:?}")]
-    Footprint { left: Footprint, right: Footprint },
+    Footprint {
+        left: Footprint,
+        right: Footprint,
+        kind: CoordKind,
+    },
     #[error("cut results are of different cuts on one axis: {left:?} vs {right:?}")]
     Cut { left: Box<Cut>, right: Box<Cut> },
     /// |at|² of a cut that reads |at| (Omega, Radial, TwoTheta).
@@ -125,9 +142,10 @@ impl Cut {
         binning: Binning,
     ) -> Result<Self, CutError> {
         if !(half_width.is_finite() && half_width > 0.0) {
-            return Err(Error::NotPositive {
+            return Err(Error::Width {
                 what: "cut half-width",
                 value: half_width,
+                kind: intdir.perp_kind(),
             }
             .into());
         }
@@ -345,7 +363,11 @@ impl Cut {
         if !self.selects(cutting.perp) {
             return Ok(None);
         }
-        let bin = self.binning.bin(cutting.along)?;
+        let bin = self.binning.bin(cutting.along).ok_or(Error::NoBin {
+            value: cutting.along,
+            step: self.binning.step(),
+            kind: self.kind.coord().kind(),
+        })?;
         Ok(Some(Located { cutting, bin }))
     }
 }
@@ -493,6 +515,7 @@ impl CutResult {
             return Err(CutError::Footprint {
                 left: self.footprint,
                 right: other.footprint,
+                kind: self.cut.kind.coord().kind(),
             });
         }
         for (k, b) in other.bins {
@@ -526,7 +549,8 @@ impl Cut {
         footprint: Footprint,
         pixels: impl IntoIterator<Item = (Vector3<f64>, Result<Normalised, Masked>)>,
     ) -> Result<CutResult, Error> {
-        footprint.check()?;
+        let along = self.kind.coord().kind();
+        footprint.check(along)?;
         let mut out = CutResult {
             cut: self.clone(),
             footprint,
@@ -550,7 +574,7 @@ impl Cut {
                 out.skipped.outside += 1;
                 continue;
             }
-            match footprint.reach(self.binning, c.along) {
+            match footprint.reach(self.binning, along, c.along) {
                 Ok(reach) => {
                     for (k, f) in reach.shares() {
                         out.put(k, f, &n);
@@ -649,7 +673,7 @@ mod tests {
     }
 
     fn binning() -> Binning {
-        Binning::new(0.5, 0.0).unwrap()
+        Binning::new(CoordKind::Linear, 0.5, 0.0).unwrap()
     }
 
     #[test]
@@ -674,7 +698,7 @@ mod tests {
             IntDir::Q,
             [0.0; 3],
             1.0,
-            Binning::new(1.0, 0.0).unwrap(),
+            Binning::new(CoordKind::Linear, 1.0, 0.0).unwrap(),
         )
         .unwrap();
         let weight = Weight::new(5e-324, Masked::Opaque).unwrap();
@@ -699,7 +723,7 @@ mod tests {
             IntDir::Q,
             [0.0; 3],
             1.0,
-            Binning::new(1.0, 0.0).unwrap(),
+            Binning::new(CoordKind::Linear, 1.0, 0.0).unwrap(),
         )
         .unwrap();
         let one = Weight::new(1.0, Masked::Opaque);
@@ -769,7 +793,52 @@ mod tests {
     #[test]
     fn non_finite_coordinate_in_the_window_is_an_error() {
         let c = Cut::new(CutKind::Qz, IntDir::Q, [0.0; 3], 0.1, binning()).unwrap();
-        assert!(c.locate(&Vector3::new(0.0, 0.0, f64::NAN), lam()).is_err());
+        assert!(matches!(
+            c.locate(&Vector3::new(0.0, 0.0, f64::NAN), lam()),
+            Err(Error::NoBin {
+                kind: CoordKind::Linear,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_refused_width_carries_the_kind_of_its_coordinate() {
+        for (intdir, perp) in [
+            (IntDir::Q, CoordKind::Linear),
+            (IntDir::Omega, CoordKind::Angle),
+        ] {
+            assert!(matches!(
+                Cut::new(CutKind::Qz, intdir, [0.0; 3], 0.0, binning()),
+                Err(CutError::Value(Error::Width { what: "cut half-width", kind, .. })) if kind == perp
+            ));
+        }
+        let c = Cut::new(
+            CutKind::Omega,
+            IntDir::TwoTheta,
+            [0.0, 0.0, 2.0],
+            0.1,
+            binning(),
+        )
+        .unwrap();
+        let sum = |f| c.accumulate(lam(), f, std::iter::empty());
+        assert!(matches!(
+            sum(Footprint::Width(0.0)),
+            Err(Error::Width {
+                what: "footprint width",
+                kind: CoordKind::Angle,
+                ..
+            })
+        ));
+        let (point, wide) = (Footprint::Point, Footprint::Width(0.1));
+        assert_eq!(
+            sum(point).unwrap().merge(sum(wide).unwrap()).unwrap_err(),
+            CutError::Footprint {
+                left: point,
+                right: wide,
+                kind: CoordKind::Angle
+            }
+        );
     }
 
     #[test]

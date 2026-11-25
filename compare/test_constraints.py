@@ -279,3 +279,29 @@ def test_held_axis_in_its_limits_only_once_wrapped_differs_on_purpose(preset, mo
             assert p[i] == pytest.approx(v + 360.0, rel=0, abs=1e-9)
             assert match(p[:i] + [v] + p[i + 1:], everything) is not None, p
     assert found, "libhkl found no solution for any seed"
+
+
+def test_refused_limits_are_in_the_axis_units():
+    """Degrees for a rotation, metres for a translation."""
+    g = hklrs.Geometry.preset("PYFAI")
+    for name, limits, message in [("rot1", (10.0, 5.0), "[10°, 5°]"), ("rot1", (-359.7, -360.0), "[-359.7°, -360°]"),
+                                  ("sdd", (0.2, 0.1), "[0.2, 0.1]")]:
+        with pytest.raises(ValueError) as e:
+            g.set_limits(name, *limits)
+        assert str(e.value) == f'axis "{name}" limits {message} are not ordered numbers'
+
+
+def test_every_two_decimal_angle_in_a_message_comes_back_as_typed():
+    """All 72,001 of -360.00 .. 360.00, each through radians and back."""
+    g = hklrs.Geometry.preset("PYFAI")
+    wrong = []
+    for k in range(-36000, 36001):
+        typed = ("-" if k < 0 else "") + f"{abs(k) // 100}.{abs(k) % 100:02d}".rstrip("0").rstrip(".")
+        try:
+            g.set_limits("rot1", float(typed), math.nan)
+        except ValueError as e:
+            if str(e) != f'axis "rot1" limits [{typed}°, NaN°] are not ordered numbers':
+                wrong.append(str(e))
+        else:
+            wrong.append(typed)
+    assert wrong == []

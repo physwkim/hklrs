@@ -12,7 +12,7 @@ use common::{f, load};
 use hklrs::Image;
 use hklrs::absorption::{Masked, Weight};
 use hklrs::grid::fuzzy::Footprint;
-use hklrs::grid::{Binning, Bounds, Coord, Cube, Projected};
+use hklrs::grid::{Binning, Bounds, Coord, CoordKind, Cube, Projected};
 use hklrs::normalise::{Normalised, NormalisedFrame};
 use serde_json::Value;
 
@@ -56,7 +56,7 @@ fn binnings(bins: &[usize], ranges: &[(f64, f64)]) -> Vec<Binning> {
         .zip(ranges)
         .map(|(&n, &(lo, hi))| {
             let d = (hi - lo) / (n - 1) as f64;
-            Binning::new(d, lo - d / 2.0).unwrap()
+            Binning::new(CoordKind::Linear, d, lo - d / 2.0).unwrap()
         })
         .collect()
 }
@@ -277,7 +277,7 @@ fn xu_1d_takes_a_zero_width_as_half_a_step() {
     let points = Projected::new(coords(1), vec![Image::from_fn(shape, |_, _| 0.3)]).unwrap();
     assert!(matches!(
         points.with_footprint(vec![Footprint::Width(0.0)]),
-        Err(hklrs::Error::NotPositive { .. })
+        Err(hklrs::Error::Width { .. })
     ));
 
     let mut cube = xu_grid(&[5], &[R]);

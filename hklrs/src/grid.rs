@@ -31,11 +31,14 @@ pub struct Binning {
 }
 
 impl Binning {
-    pub fn new(step: f64, anchor: f64) -> Result<Self, Error> {
+    /// Bins of width `step` from `anchor` on a coordinate of `kind`, which
+    /// only names the unit of a refused step.
+    pub fn new(kind: CoordKind, step: f64, anchor: f64) -> Result<Self, Error> {
         if !(step.is_finite() && step > 0.0) {
-            return Err(Error::NotPositive {
+            return Err(Error::Width {
                 what: "bin step",
                 value: step,
+                kind,
             });
         }
         if !anchor.is_finite() {
@@ -55,19 +58,13 @@ impl Binning {
         self.anchor
     }
 
-    /// The bin rule: global bin ⌊(v − anchor)/step⌋.
-    pub fn bin(&self, v: f64) -> Result<i64, Error> {
+    /// The bin rule: global bin ⌊(v − anchor)/step⌋; `None` when that is
+    /// not an `i64` (NaN, or too far from the anchor).
+    pub fn bin(&self, v: f64) -> Option<i64> {
         let k = ((v - self.anchor) / self.step).floor();
         // 2⁶³ is exact in f64; NaN fails both comparisons
         const LIMIT: f64 = 9_223_372_036_854_775_808.0;
-        if (-LIMIT..LIMIT).contains(&k) {
-            Ok(k as i64)
-        } else {
-            Err(Error::NoBin {
-                value: v,
-                step: self.step,
-            })
-        }
+        (-LIMIT..LIMIT).contains(&k).then_some(k as i64)
     }
 
     /// Lower edge of global bin `k`.
@@ -76,9 +73,11 @@ impl Binning {
     }
 }
 
-/// What a projection coordinate measures, which fixes the unit it is
-/// shown in: an angle is radians in hklrs and degrees in Python; a linear
-/// coordinate (Å⁻¹, r.l.u., an index) is shown as it is.
+/// What a coordinate measures, which fixes the unit it is shown in: an
+/// angle is radians in hklrs and degrees in Python; a linear coordinate
+/// (Å⁻¹, r.l.u., an index, a translation in m) is shown as it is. An error
+/// that reports such a value carries its kind, so Python shows the value
+/// in its own unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoordKind {
     Angle,
@@ -283,7 +282,7 @@ fn binned(
     let mut pieces = Pieces::with_capacity(binnings.len(), taken.len());
     for (i, n) in taken {
         let coords = points.planes.iter().map(|p| p.data()[i]);
-        pieces.push(n, &points.footprints, binnings, coords)?;
+        pieces.push(n, &points.coords, &points.footprints, binnings, coords)?;
     }
     Ok(pieces)
 }
@@ -733,7 +732,7 @@ mod tests {
     const TWO: &[&str] = &["x", "y"];
 
     fn unit() -> Binning {
-        Binning::new(1.0, 0.0).unwrap()
+        Binning::new(CoordKind::Linear, 1.0, 0.0).unwrap()
     }
 
     fn linear(names: &[&'static str]) -> Vec<Coord> {
@@ -801,7 +800,7 @@ mod tests {
             assert_eq!(b.bin(edge - 1e-12).unwrap(), k - 1, "below {edge}");
             assert_eq!(b.edge(k), edge);
         }
-        let shifted = Binning::new(0.5, 0.25).unwrap();
+        let shifted = Binning::new(CoordKind::Linear, 0.5, 0.25).unwrap();
         assert_eq!(shifted.bin(0.25).unwrap(), 0);
         assert_eq!(shifted.bin(0.2499).unwrap(), -1);
         assert_eq!(shifted.bin(0.75).unwrap(), 1);
@@ -812,7 +811,7 @@ mod tests {
         // anchor −½ gives binoculars' bins centred on the integers; the two
         // rules then differ only on the edges, which rint sends to the even
         // neighbour (0.5 down, 1.5 up) and floor always up.
-        let centred = Binning::new(1.0, -0.5).unwrap();
+        let centred = Binning::new(CoordKind::Linear, 1.0, -0.5).unwrap();
         let mut differ = Vec::new();
         for v in [-1.5, -0.5, 0.5, 1.5, 2.5, 0.49, 1.51, -0.7, 3.0] {
             let (f, r) = (centred.bin(v).unwrap(), rint_bin(v, 1.0));
@@ -826,14 +825,22 @@ mod tests {
     }
 
     #[test]
-    fn values_without_a_bin_are_errors() {
+    fn values_without_a_bin_have_none() {
         let b = unit();
         for v in [f64::NAN, f64::INFINITY, -f64::INFINITY, 1e300] {
-            assert!(matches!(b.bin(v), Err(Error::NoBin { .. })), "{v}");
+            assert_eq!(b.bin(v), None, "{v}");
         }
-        assert!(Binning::new(0.0, 0.0).is_err());
-        assert!(Binning::new(f64::NAN, 0.0).is_err());
-        assert!(Binning::new(1.0, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn a_bin_step_is_refused_on_its_coordinate_kind() {
+        for (kind, step) in [(CoordKind::Angle, 0.0), (CoordKind::Linear, f64::NAN)] {
+            assert!(matches!(
+                Binning::new(kind, step, 0.0),
+                Err(Error::Width { what: "bin step", kind: k, .. }) if k == kind
+            ));
+        }
+        assert!(Binning::new(CoordKind::Linear, 1.0, f64::INFINITY).is_err());
     }
 
     #[test]
@@ -938,7 +945,7 @@ mod tests {
         let dims = cube(ONE, &[&[0.0]], &[1.0]);
         let mut step = Cube::default();
         step.add_growing(
-            &[unit(), Binning::new(0.5, 0.0).unwrap()],
+            &[unit(), Binning::new(CoordKind::Linear, 0.5, 0.0).unwrap()],
             &points(TWO, &[&[0.0, 0.0]]),
             &unweighted(&[1.0]),
         )
@@ -946,7 +953,7 @@ mod tests {
         let mut anchor = Cube::default();
         anchor
             .add_growing(
-                &[unit(), Binning::new(1.0, 0.5).unwrap()],
+                &[unit(), Binning::new(CoordKind::Linear, 1.0, 0.5).unwrap()],
                 &points(TWO, &[&[0.0, 0.0]]),
                 &unweighted(&[1.0]),
             )
@@ -1033,7 +1040,7 @@ mod tests {
             row(&[pixel(1.0, 0.5), Err(Masked::Unlit), pixel(3.0, 2.0)]),
             row(&[pixel(0.1, 0.5), Err(Masked::Unlit), pixel(0.3, 2.0)]),
         ];
-        let binnings = vec![Binning::new(0.75, 0.1).unwrap(), unit()];
+        let binnings = vec![Binning::new(CoordKind::Linear, 0.75, 0.1).unwrap(), unit()];
         let mut bounds = Bounds::new(binnings.clone());
         for (f, px) in frames.iter().zip(&pixels) {
             bounds.include(f, px).unwrap();

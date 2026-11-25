@@ -6,6 +6,8 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::Degrees;
+
 create_exception!(hklrs, InverseError, PyValueError, "The inverse failed.");
 create_exception!(
     hklrs,
@@ -164,7 +166,25 @@ create_exception!(
 /// `e` as the subclass named after its variant. `geometry` is the one the
 /// failing call solved on, for the units of `NoSolutionInLimits.solutions`.
 pub(crate) fn to_py(py: Python<'_>, geometry: &hklrs::Geometry, e: E) -> PyErr {
-    let msg = e.to_string();
+    // the message in degrees; the attributes stay exact
+    let msg = match &e {
+        E::Geometry(g) => crate::message(g.clone()),
+        E::EmergenceRange { emergence } => {
+            format!("emergence {}° is outside [-90°, 90°]", Degrees(*emergence))
+        }
+        E::KappaAlpha { alpha } => {
+            format!(
+                "kappa arm tilt alpha = {}° is outside (0°, 90°]",
+                Degrees(*alpha)
+            )
+        }
+        E::ChiOutOfReach { chi, reach } => format!(
+            "|chi| = {}° exceeds the kappa reach 2·alpha = {}°",
+            Degrees(chi.abs()),
+            Degrees(*reach)
+        ),
+        e => e.to_string(),
+    };
     // Plain values cannot fail to set on a fresh exception.
     macro_rules! raise {
         ($exc:ident $(, $k:literal => $v:expr)*) => {{

@@ -6,6 +6,7 @@ use std::f64::consts::{PI, TAU};
 
 use nalgebra::{Isometry3, Point3, Translation3, Unit, UnitQuaternion, Vector3};
 
+use crate::grid::CoordKind;
 use crate::{Error, units::Deg};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -336,6 +337,11 @@ impl Geometry {
                 name: name.to_owned(),
                 min,
                 max,
+                kind: if self.axes[i].is_rotation() {
+                    CoordKind::Angle
+                } else {
+                    CoordKind::Linear
+                },
             });
         }
         (self.axes[i].min, self.axes[i].max) = (min, max);

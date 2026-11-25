@@ -14,7 +14,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::{MASKED, err, masked_code};
+use crate::{Degrees, MASKED, err, literal, masked_code};
 
 fn cut_err(e: CutError) -> PyErr {
     match e {
@@ -24,6 +24,20 @@ fn cut_err(e: CutError) -> PyErr {
             cut_text(&left),
             cut_text(&right)
         )),
+        CutError::Footprint { left, right, kind } => {
+            let footprint = |f| match (f, kind) {
+                (Footprint::Width(w), CoordKind::Angle) => {
+                    format!("Footprint.width({})", Degrees(w))
+                }
+                (Footprint::Width(w), CoordKind::Linear) => PyFootprint::width(w).__repr__(),
+                (Footprint::Point, _) => PyFootprint::point().__repr__(),
+            };
+            PyValueError::new_err(format!(
+                "cut results have different footprints: {} vs {}",
+                footprint(left),
+                footprint(right)
+            ))
+        }
         e => PyValueError::new_err(e.to_string()),
     }
 }
@@ -31,18 +45,18 @@ fn cut_err(e: CutError) -> PyErr {
 /// `c` as the `Cut(...)` call that makes it.
 fn cut_text(c: &Cut) -> String {
     let (kind, b) = (c.kind(), c.binning());
-    let along = angular_along(&kind);
+    let along = kind.coord().kind();
     let place = match kind {
         CutKind::Line { point, dir } => format!("line=({point:?}, {dir:?})"),
         _ => format!("at={:?}", c.at()),
     };
     format!(
-        "Cut({:?}, {:?}, {:?}, ({:?}, {:?}), {place})",
+        "Cut({:?}, {:?}, {}, ({}, {}), {place})",
         kind_name(&kind),
         intdir_name(c.intdir()),
-        from_core(c.half_width(), angular_perp(c.intdir())),
-        from_core(b.step(), along),
-        from_core(b.anchor(), along),
+        literal(c.half_width(), c.intdir().perp_kind()),
+        literal(b.step(), along),
+        literal(b.anchor(), along),
     )
 }
 
@@ -70,7 +84,7 @@ fn angular_along(k: &CutKind) -> bool {
 }
 
 fn angular_perp(d: IntDir) -> bool {
-    d != IntDir::Q
+    d.perp_kind() == CoordKind::Angle
 }
 
 /// How a pixel's weight is laid on the cut axis: at its coordinate, or over
@@ -192,7 +206,8 @@ impl PyCut {
         let kind = parse_kind(kind, line)?;
         let intdir = parse_intdir(intdir)?;
         let (aa, ap) = (angular_along(&kind), angular_perp(intdir));
-        let binning = Binning::new(to_core(step, aa), to_core(anchor, aa)).map_err(err)?;
+        let binning = Binning::new(kind.coord().kind(), to_core(step, aa), to_core(anchor, aa))
+            .map_err(err)?;
         let cut = Cut::new(kind, intdir, at, to_core(half_width, ap), binning).map_err(cut_err)?;
         Ok(Self {
             cut,
@@ -282,11 +297,16 @@ impl PyCut {
     }
 
     fn __repr__(&self) -> String {
+        let w = self.cut.half_width();
+        let half_width = if self.angular_perp {
+            Degrees(w).to_string()
+        } else {
+            w.to_string()
+        };
         format!(
-            "Cut({:?}, {:?}, half_width={})",
+            "Cut({:?}, {:?}, half_width={half_width})",
             self.kind(),
             self.intdir(),
-            self.half_width()
         )
     }
 }
@@ -368,24 +388,11 @@ impl PyCutResult {
     /// The sum of two results of the same cut and footprint, for frames
     /// accumulated apart.
     fn merge(&self, other: &PyCutResult) -> PyResult<PyCutResult> {
-        let along = angular_along(&self.result.cut().kind());
-        let footprint = |f| match f {
-            Footprint::Point => PyFootprint::point(),
-            Footprint::Width(w) => PyFootprint::width(from_core(w, along)),
-        };
         let result = self
             .result
             .clone()
             .merge(other.result.clone())
-            .map_err(|e| match e {
-                // refused only between results of one cut, so in its units
-                CutError::Footprint { left, right } => PyValueError::new_err(format!(
-                    "cut results have different footprints: {} vs {}",
-                    footprint(left).__repr__(),
-                    footprint(right).__repr__()
-                )),
-                e => cut_err(e),
-            })?;
+            .map_err(cut_err)?;
         Ok(PyCutResult { result })
     }
 

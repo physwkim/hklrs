@@ -124,13 +124,14 @@ fn setup(doc: &Value, c: &Value) -> Setup {
     } else {
         at3(k, &c["at"])
     };
+    let kind = kind(c);
     Setup {
         cut: Cut::new(
-            kind(c),
+            kind,
             intdir(c["intdir"].as_str().unwrap()),
             at,
             dis,
-            Binning::new(dx, anchor).unwrap(),
+            Binning::new(kind.coord().kind(), dx, anchor).unwrap(),
         )
         .unwrap(),
         wl: Wavelength::new(f(&doc["wavelength"])).unwrap(),
@@ -388,7 +389,7 @@ fn merge_of_two_halves_is_the_whole_and_checks_the_cut() {
         s.cut.intdir(),
         at3("radial", &c["at"]),
         s.cut.half_width(),
-        Binning::new(2.0 * b.step(), b.anchor()).unwrap(),
+        Binning::new(s.cut.kind().coord().kind(), 2.0 * b.step(), b.anchor()).unwrap(),
     )
     .unwrap();
     let a = s

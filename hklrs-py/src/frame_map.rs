@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use super::normalise::{PyFrameScalars, PyPixelFields, PyRegion};
-use super::{PyGeometry, PyPixelDetector, PySample, err, image, unit, xu_options};
+use super::{PyGeometry, PyPixelDetector, PySample, err, image, literal, unit, xu_options};
 
 /// A value of a coordinate of `kind` from Python's units to the core's:
 /// degrees to radians for an angle.
@@ -41,11 +41,12 @@ pub(crate) fn grid_mismatch(left: &[(Coord, Binning)], right: &[(Coord, Binning)
                 CoordKind::Angle => "angle",
                 CoordKind::Linear => "linear",
             };
-            let (step, anchor) = (
-                from_core(b.step(), c.kind()),
-                from_core(b.anchor(), c.kind()),
-            );
-            format!("({:?}, {kind:?}, {step:?}, {anchor:?})", c.name())
+            format!(
+                "({:?}, {kind:?}, {}, {})",
+                c.name(),
+                literal(b.step(), c.kind()),
+                literal(b.anchor(), c.kind())
+            )
         };
         format!("[{}]", axes.iter().map(axis).collect::<Vec<_>>().join(", "))
     };
@@ -369,7 +370,7 @@ impl PyFrameMap {
                 // a binning past the projection's dimensions, which
                 // FrameMap::new refuses, has no kind to convert by
                 let kind = coords.get(i).map_or(CoordKind::Linear, Coord::kind);
-                Binning::new(to_core(step, kind), to_core(anchor, kind))
+                Binning::new(kind, to_core(step, kind), to_core(anchor, kind))
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(err)?;

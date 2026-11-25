@@ -268,6 +268,39 @@ def test_merge_refusals_of_an_omega_cut_are_in_degrees():
     assert widths and float(widths[1]) == pytest.approx(0.03), m
 
 
+def test_a_refused_width_of_an_omega_cut_is_in_degrees():
+    """The 2θ half-width, bin step and footprint width of an ω cut are
+    refused in the degrees they were given in."""
+    def refused(f):
+        with pytest.raises(ValueError) as e:
+            f()
+        return str(e.value)
+
+    def omega(half_width=0.5, step=0.05):
+        return hc.Cut("omega", "2theta", half_width, (step, 0.25), at=[0.0, 0.0, 2.0])
+
+    assert refused(lambda: omega(half_width=-0.5)) == "cut half-width must be finite and positive, got -0.5°"
+    assert refused(lambda: omega(step=-0.05)) == "bin step must be finite and positive, got -0.05°"
+    wide = hc.Footprint.width(-0.25)
+    assert (refused(lambda: accumulate(omega(), CLOUDS["peak"], INTEN["peak"], wide))
+            == "footprint width must be finite and positive, got -0.25°")
+
+
+def test_degrees_in_a_merge_refusal_come_back_as_typed():
+    """-359.7 goes into radians and back to -359.70000000000005."""
+    q, inten = CLOUDS["peak"], INTEN["peak"]
+
+    def omega(z):
+        return hc.Cut("omega", "2theta", 0.5, (0.05, -359.7), at=[0.0, 0.0, z])
+
+    with pytest.raises(ValueError) as e:
+        accumulate(omega(5.0), q, inten, hc.Footprint.point()).merge(
+            accumulate(omega(5.5), q, inten, hc.Footprint.point()))
+    assert str(e.value) == ('cut results are of different cuts on one axis: '
+                            'Cut("omega", "2theta", 0.5, (0.05, -359.7), at=[0.0, 0.0, 5.0]) vs '
+                            'Cut("omega", "2theta", 0.5, (0.05, -359.7), at=[0.0, 0.0, 5.5])')
+
+
 def test_reason_wins_and_a_bad_weight_is_opaque():
     q = CLOUDS["peak"]
     cut = hc.Cut("qz", "q", 10.0, (1.0, 0.0), at=[0.0, 2.0, 0.0])

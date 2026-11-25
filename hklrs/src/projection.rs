@@ -408,7 +408,11 @@ mod tests {
             assert_eq!(out.coords(), p.coords());
             assert_eq!(out.planes().len(), p.coords().len());
             let mut cube = Cube::default();
-            let binnings = vec![Binning::new(1e-3, 0.0).unwrap(); p.coords().len()];
+            let binnings: Vec<_> = p
+                .coords()
+                .iter()
+                .map(|c| Binning::new(c.kind(), 1e-3, 0.0).unwrap())
+                .collect();
             let one = Normalised::new(1.0, Weight::new(1.0, Masked::Opaque));
             cube.add_growing(&binnings, &out, &Image::from_fn(out.shape(), |_, _| one))
                 .unwrap();
@@ -481,7 +485,11 @@ mod tests {
             assert!((out.planes()[1].get(s, j) - tth).abs() < 1e-12, "{s} {j}");
         }
         let mut cube = Cube::default();
-        let binnings = vec![Binning::new(1e-3, 0.0).unwrap(); 2];
+        let binnings: Vec<_> = out
+            .coords()
+            .iter()
+            .map(|c| Binning::new(c.kind(), 1e-3, 0.0).unwrap())
+            .collect();
         let one = Normalised::new(1.0, Weight::new(1.0, Masked::Opaque));
         cube.add_growing(&binnings, &out, &Image::from_fn(out.shape(), |_, _| one))
             .unwrap();
@@ -579,7 +587,7 @@ mod tests {
             .project(&g, &values, wavelength, &d)
             .unwrap();
         let mut cube = Cube::default();
-        let binnings = [Binning::new(1e-3, 0.0).unwrap()];
+        let binnings = [Binning::new(out.coords()[0].kind(), 1e-3, 0.0).unwrap()];
         let one = Normalised::new(1.0, Weight::new(1.0, Masked::Opaque));
         let e = cube
             .add_growing(&binnings, &out, &Image::from_fn(out.shape(), |_, _| one))

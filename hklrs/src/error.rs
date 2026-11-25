@@ -1,12 +1,20 @@
 use thiserror::Error;
 
-use crate::grid::{Binning, Coord};
+use crate::grid::{Binning, Coord, CoordKind};
 use crate::projection::ProjectionError;
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum Error {
     #[error("{what} must be finite and positive, got {value}")]
     NotPositive { what: &'static str, value: f64 },
+    /// A width along a coordinate of `kind`: a bin step, a cut half-width
+    /// or a footprint width.
+    #[error("{what} must be finite and positive, got {value}")]
+    Width {
+        what: &'static str,
+        value: f64,
+        kind: CoordKind,
+    },
     #[error("lattice angle {name} = {value} rad is outside (0, pi)")]
     LatticeAngle { name: &'static str, value: f64 },
     #[error("lattice angles give a cell volume squared of {v2} <= 0")]
@@ -65,7 +73,12 @@ pub enum Error {
     #[error("unknown geometry preset {name:?}")]
     UnknownPreset { name: String },
     #[error("axis {name:?} limits [{min}, {max}] are not ordered numbers")]
-    AxisLimits { name: String, min: f64, max: f64 },
+    AxisLimits {
+        name: String,
+        min: f64,
+        max: f64,
+        kind: CoordKind,
+    },
     #[error("axis {name:?} cut point {cut} is not finite")]
     CutPoint { name: String, cut: f64 },
     #[error("axis {name:?} is not a rotation and has no cut point")]
@@ -91,7 +104,11 @@ pub enum Error {
     #[error("detector id {id} is not in the table of {count}")]
     UnknownDetector { id: u32, count: usize },
     #[error("coordinate {value} has no bin of width {step}")]
-    NoBin { value: f64, step: f64 },
+    NoBin {
+        value: f64,
+        step: f64,
+        kind: CoordKind,
+    },
     #[error("expected {expected} dimensions, one per projection axis, got {got}")]
     Dimensions { expected: usize, got: usize },
     #[error("{what} has {len} pixels, expected {expected}")]
