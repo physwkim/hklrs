@@ -33,7 +33,8 @@ LIBC = ctypes.CDLL(None)
 LATTICE = (5.431, 5.431, 5.431, 90.0, 90.0, 90.0)
 WL = 1.54
 SEEDS = range(6)
-# deg; libhkl's raw solutions are within 1e-4 deg of hklrs's
+# deg; libhkl's solutions lie within 2.2e-4 deg of hklrs's for the same U,
+# 8.4e-4 with the U drift hklpy2's inverse adds (see assert_hklpy2_filters_alike)
 TOL = 1e-3
 # deg between any solution value and a limit or cut point: above hklpy2's
 # ENDPOINT_TOLERANCE (1e-4) plus TOL
@@ -208,8 +209,10 @@ def test_kept_and_dropped_as_hklpy2(preset, mode):
 
 def assert_hklpy2_filters_alike(c, raw, everything, kept):
     """hklpy2's filter accepts exactly the libhkl solutions whose hklrs match
-    hklrs keeps, and its forward returns those. libhkl's solutions move by
-    about 1e-6 deg from one forward to the next, hence the matching."""
+    hklrs keeps, and its forward returns those. hklpy2's inverse puts UB back
+    through libhkl's UB_set, a simplex fit, at every motor move, so U drifts
+    by about 1e-7 each time and a repeated forward's solutions move by up to
+    1.0e-3 deg here; hence the matching."""
     for p in raw:
         assert c.accepted(p) == (everything[match(p, everything)] in kept), p
     by_hklpy2 = [match(p, kept) for p in c.hklpy2()]
