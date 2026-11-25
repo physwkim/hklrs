@@ -259,8 +259,10 @@ def test_merge_refusals_of_an_omega_cut_are_in_degrees():
     assert axes == [("Omega", "angle", pytest.approx(s), pytest.approx(0.25)) for s in (0.05, 0.1)], m
     m = refused(omega(0.4, 0.05), omega(0.3, 0.05))
     assert m.startswith("cut results are of different cuts"), m
-    cuts = re.findall(r'Cut\("omega", "2theta", ([^,]+), \(([^,]+), ([^)]+)\), at=\[0\.02, 2\.0, 5\.0\]\)', m)
-    assert [tuple(map(float, c)) for c in cuts] == [pytest.approx((w, 0.05, 0.25)) for w in (0.4, 0.3)], m
+    # an ω cut keeps |at| alone
+    cuts = re.findall(r'Cut\("omega", "2theta", ([^,]+), \(([^,]+), ([^)]+)\), at=\[0\.0, 0\.0, ([^\]]+)\]\)', m)
+    norm = np.linalg.norm([0.02, 2.0, 5.0])
+    assert [tuple(map(float, c)) for c in cuts] == [pytest.approx((w, 0.05, 0.25, norm)) for w in (0.4, 0.3)], m
     m = refused(omega(0.4, 0.05), omega(0.4, 0.05), hc.Footprint.width(0.03))
     widths = re.fullmatch(r"cut results have different footprints: Footprint\.width\(([^)]+)\) vs Footprint\.point\(\)", m)
     assert widths and float(widths[1]) == pytest.approx(0.03), m

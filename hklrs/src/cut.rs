@@ -35,6 +35,9 @@ pub enum CutKind {
     Radial,
     TwoTheta,
     /// Arbitrary line through `point` along `dir`; the coordinate is Q·d̂.
+    /// A [`Cut`] holds `dir` divided by its largest |component| (the first
+    /// on a tie) and `point` moved along the line to where that component
+    /// is zero, with no -0.0 in either.
     Line {
         point: [f64; 3],
         dir: [f64; 3],
@@ -59,6 +62,9 @@ pub enum CutError {
     Footprint { left: Footprint, right: Footprint },
     #[error("cut results are of different cuts on one axis: {left:?} vs {right:?}")]
     Cut { left: Box<Cut>, right: Box<Cut> },
+    /// |at|² of a cut that reads |at| (Omega, Radial, TwoTheta).
+    #[error("{kind} cut position has |at|² = {squared:e}: zero, subnormal or infinite")]
+    Position { kind: &'static str, squared: f64 },
     #[error(transparent)]
     Value(#[from] Error),
 }
@@ -101,10 +107,16 @@ pub struct Cut {
 }
 
 impl Cut {
-    /// A cut through `at`, a point in Q of which the kind uses the
-    /// components off its own axis: Qz (x, y), Qy (x, z), Qx (y, z);
-    /// Omega, Radial and TwoTheta use all three, through their ω and 2θ.
-    /// [`CutKind::Line`] carries its own point and ignores `at`.
+    /// A cut through `at`, a point in Q of which the kind reads the
+    /// components off its own axis: Qz (x, y), Qy (x, z), Qx (y, z), and
+    /// with an angular integration direction Qz y alone and Qy z alone;
+    /// Omega reads |at|, Radial and TwoTheta y and ρ = √(x² + z²).
+    /// [`CutKind::Line`] carries its own point and ignores `at`. The cut
+    /// stores what it reads, as the point [`Cut::at`] returns, and a line
+    /// as described on [`CutKind::Line`], so inputs that make one cut make
+    /// equal cuts. Equality is exact: a last-bit difference refuses a merge.
+    /// Omega, Radial and TwoTheta refuse an `at` whose |at|² is zero,
+    /// subnormal or infinite.
     pub fn new(
         kind: CutKind,
         intdir: IntDir,
@@ -135,7 +147,7 @@ impl Cut {
                 .into());
             }
             let d = Vector3::from(dir);
-            if !(d.iter().all(|v| v.is_finite()) && d.norm() > 0.0) {
+            if !(d.iter().all(|v| v.is_finite()) && d.amax() > 0.0) {
                 return Err(Error::ZeroVector {
                     what: "line direction".into(),
                 }
@@ -148,6 +160,57 @@ impl Cut {
                 intdir,
             });
         }
+        // √ of a normal fl(r²) is r again, so the stored |at| reads back
+        let reach = |squared: f64| {
+            if squared.is_normal() {
+                Ok(squared)
+            } else {
+                Err(CutError::Position {
+                    kind: kind.name(),
+                    squared,
+                })
+            }
+        };
+        let [x, y, z] = at;
+        let (kind, at) = match (kind, intdir) {
+            (CutKind::Qz, IntDir::Q) => (kind, [x, y, 0.0]),
+            (CutKind::Qz, _) => (kind, [0.0, y, 0.0]),
+            (CutKind::Qy, IntDir::Q) => (kind, [x, 0.0, z]),
+            (CutKind::Qy, _) => (kind, [0.0, 0.0, z]),
+            (CutKind::Qx, _) => (kind, [0.0, y, z]),
+            (CutKind::Line { point, dir }, _) => {
+                let (p, d) = (Vector3::from(point), Vector3::from(dir));
+                let m = (1..3).fold(0, |m, i| if d[i].abs() > d[m].abs() { i } else { m });
+                // d[m] becomes ±1 and p[m] 0 exactly, and no smaller |d[i]|
+                // rounds up to 1, so the form is its own canonical form;
+                // + 0.0 drops a -0.0, which remaking could turn into 0.0
+                let d = d / d[m].abs() + Vector3::zeros();
+                let point: [f64; 3] = (p - d * (p[m] / d[m]) + Vector3::zeros()).into();
+                if let Some(&value) = point.iter().find(|v| !v.is_finite()) {
+                    return Err(Error::NotFinite {
+                        what: "line point where the direction's largest component is zero",
+                        value,
+                    }
+                    .into());
+                }
+                (
+                    CutKind::Line {
+                        point,
+                        dir: d.into(),
+                    },
+                    [0.0; 3],
+                )
+            }
+            (CutKind::Omega, _) => {
+                let r = reach(Vector3::from(at).norm_squared())?.sqrt();
+                (kind, [0.0, 0.0, r])
+            }
+            (CutKind::Radial | CutKind::TwoTheta, _) => {
+                let rho = z.hypot(x);
+                reach(y * y + rho * rho)?;
+                (kind, [0.0, y, rho])
+            }
+        };
         Ok(Self {
             kind,
             intdir,
@@ -165,6 +228,8 @@ impl Cut {
         self.intdir
     }
 
+    /// What the cut reads of its position, as a point: zero where it reads
+    /// nothing, Omega's |at| as z, Radial's and TwoTheta's ρ as z.
     pub fn at(&self) -> [f64; 3] {
         self.at
     }
@@ -227,8 +292,7 @@ impl Cut {
             }
             (CutKind::Omega, dir) => {
                 let (om, tt) = coplanar_om_tt(q, wavelength);
-                let (_, ttcut) = coplanar_om_tt(&at, wavelength);
-                let d = tt - ttcut;
+                let d = tt - bragg_two_theta(az, wavelength);
                 if dir == IntDir::Radial {
                     (om - d / 2.0, d)
                 } else {
@@ -256,12 +320,8 @@ impl Cut {
                 }
             }
             (CutKind::Line { point, dir }, _) => {
-                let d = Vector3::from(dir);
-                let along = q.dot(&d.normalize());
-                (
-                    along,
-                    (q - Vector3::from(point)).cross(&d).norm() / d.norm(),
-                )
+                let d = Vector3::from(dir).normalize();
+                (q.dot(&d), (q - Vector3::from(point)).cross(&d).norm())
             }
         };
         Cutting { along, perp }
@@ -555,7 +615,11 @@ fn angle_to_z(q: &Vector3<f64>) -> f64 {
 }
 
 fn two_theta(q: &Vector3<f64>, wavelength: Wavelength) -> f64 {
-    2.0 * (q.norm() / 2.0 / wavelength.wavenumber()).asin()
+    bragg_two_theta(q.norm(), wavelength)
+}
+
+fn bragg_two_theta(q: f64, wavelength: Wavelength) -> f64 {
+    2.0 * (q / 2.0 / wavelength.wavenumber()).asin()
 }
 
 /// ω and 2θ of xu's coplanar `Q2Ang(geometry="realTilt")`:
@@ -760,6 +824,332 @@ mod tests {
         }
     }
 
+    /// Inputs that differ only in what the cut does not read make one cut,
+    /// whose results merge; what it reads still tells cuts apart.
+    #[test]
+    fn differently_written_inputs_of_one_cut_merge() {
+        let cut = |kind, intdir, at| Cut::new(kind, intdir, at, 0.1, binning()).unwrap();
+        let line = |point, dir| cut(CutKind::Line { point, dir }, IntDir::Q, [0.0; 3]);
+        let sums = |c: &Cut| {
+            let weight = Weight::new(1.0, Masked::Opaque).unwrap();
+            let px = [(
+                Vector3::new(1.02, 2.0, 0.6),
+                Normalised::new(3.0, Ok(weight)),
+            )];
+            let r = c.accumulate(lam(), Footprint::Point, px).unwrap();
+            assert_eq!((r.bins().count(), r.skipped().total()), (1, 0));
+            r
+        };
+        let one = |a: Cut, b: Cut| {
+            assert_eq!(a, b);
+            let (ra, rb) = (sums(&a), sums(&b));
+            let doubled: Vec<_> = ra.bins().map(|(k, b)| (k, 2.0 * b.counts)).collect();
+            let merged = ra.merge(rb).unwrap();
+            assert_eq!(
+                merged
+                    .bins()
+                    .map(|(k, b)| (k, b.counts))
+                    .collect::<Vec<_>>(),
+                doubled
+            );
+        };
+        // the line along z through (1, 2, ·), from any of its points and any
+        // positive length of its direction
+        let z = line([1.0, 2.0, 3.0], [0.0, 0.0, 1.0]);
+        assert_eq!(
+            z.kind(),
+            CutKind::Line {
+                point: [1.0, 2.0, 0.0],
+                dir: [0.0, 0.0, 1.0]
+            }
+        );
+        one(z, line([1.0, 2.0, -7.0], [0.0, 0.0, 2.5]));
+        // as d̂, 5·[1, 2, 3] was another direction in the last bit
+        for k in [3.0, 5.0] {
+            one(
+                line([1.0, 2.0, 0.6], [1.0, 2.0, 3.0]),
+                line([1.0, 2.0, 0.6], [k, 2.0 * k, 3.0 * k]),
+            );
+        }
+        // a Qz cut reads x and y of `at` with its window in Q, y alone with
+        // it in an angle
+        one(
+            cut(CutKind::Qz, IntDir::Q, [1.0, 2.0, 0.0]),
+            cut(CutKind::Qz, IntDir::Q, [1.0, 2.0, 5.0]),
+        );
+        one(
+            cut(CutKind::Qz, IntDir::Omega, [1.0, 2.0, 0.0]),
+            cut(CutKind::Qz, IntDir::Omega, [0.3, 2.0, 5.0]),
+        );
+        // Omega reads |at|, Radial and TwoTheta y and √(x² + z²)
+        for d in [IntDir::TwoTheta, IntDir::Radial] {
+            one(
+                cut(CutKind::Omega, d, [0.0, 0.0, 2.5]),
+                cut(CutKind::Omega, d, [1.5, 2.0, 0.0]),
+            );
+        }
+        for (kind, d) in [
+            (CutKind::Radial, IntDir::Omega),
+            (CutKind::Radial, IntDir::TwoTheta),
+            (CutKind::TwoTheta, IntDir::Omega),
+            (CutKind::TwoTheta, IntDir::Radial),
+        ] {
+            one(
+                cut(kind, d, [0.0, 2.0, 1.25]),
+                cut(kind, d, [0.75, 2.0, 1.0]),
+            );
+        }
+        let z = [0.0, 0.0, 1.0];
+        assert_ne!(line([1.0, 2.0, 3.0], z), line([1.0, 2.5, 3.0], z));
+        // the sign of the direction is the sign of the coordinate
+        assert_ne!(
+            line([1.0, 2.0, 3.0], z),
+            line([1.0, 2.0, 3.0], [0.0, 0.0, -1.0])
+        );
+        assert_ne!(
+            cut(CutKind::Qz, IntDir::Q, [1.0, 2.0, 0.0]),
+            cut(CutKind::Qz, IntDir::Q, [1.1, 2.0, 0.0])
+        );
+    }
+
+    /// xorshift64.
+    fn next(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// ±0, any finite f64 by its bits, or uniform in [-3, 3).
+    fn value(s: &mut u64) -> f64 {
+        match next(s) % 8 {
+            0 => [0.0, -0.0][(next(s) % 2) as usize],
+            1..=3 => Some(f64::from_bits(next(s)))
+                .filter(|v| v.is_finite())
+                .unwrap_or(0.0),
+            _ => (next(s) >> 11) as f64 / (1_u64 << 53) as f64 * 6.0 - 3.0,
+        }
+    }
+
+    /// Every f64 a cut stores, by its bits, so -0.0 and 0.0 differ.
+    fn bits(c: &Cut) -> Vec<u64> {
+        let line = match c.kind() {
+            CutKind::Line { point, dir } => [point, dir].concat(),
+            _ => vec![],
+        };
+        line.into_iter()
+            .chain(c.at())
+            .chain([c.half_width()])
+            .map(f64::to_bits)
+            .collect()
+    }
+
+    /// `c` made again from what it stores, asserted the same to the last bit.
+    fn remade(c: &Cut) -> Cut {
+        let again = Cut::new(c.kind(), c.intdir(), c.at(), c.half_width(), c.binning()).unwrap();
+        assert_eq!(bits(&again), bits(c), "{c:?}");
+        assert_eq!(&again, c);
+        again
+    }
+
+    /// The stored position is canonical: a cut made again from it is the
+    /// same cut, to the last bit, for positions from ±0 to near overflow.
+    /// The kinds that read |at| refuse one whose |at|² is not normal, and
+    /// every kind keeps cuts near both ends of the normal range.
+    #[test]
+    fn a_cut_made_from_its_own_position_is_the_same_cut() {
+        let combos = [
+            (CutKind::Qz, IntDir::Q),
+            (CutKind::Qz, IntDir::Omega),
+            (CutKind::Qy, IntDir::Q),
+            (CutKind::Qy, IntDir::TwoTheta),
+            (CutKind::Qx, IntDir::Q),
+            (CutKind::Omega, IntDir::TwoTheta),
+            (CutKind::Radial, IntDir::Omega),
+            (CutKind::TwoTheta, IntDir::Radial),
+        ];
+        let mut s = 0x9e37_79b9_7f4a_7c15_u64;
+        // per combo: refused, kept with |at|² below 2^-900, above 2^900,
+        // kept from an `at` with a -0.0
+        let mut seen = [[0; 4]; 8];
+        for _ in 0..10000 {
+            let at = [value(&mut s), value(&mut s), value(&mut s)];
+            for (k, &(kind, d)) in combos.iter().enumerate() {
+                match Cut::new(kind, d, at, 0.1, binning()) {
+                    Ok(c) => {
+                        remade(&c);
+                        let squared = Vector3::from(c.at()).norm_squared();
+                        seen[k][1] += usize::from(squared < 2f64.powi(-900));
+                        seen[k][2] += usize::from(squared > 2f64.powi(900));
+                        seen[k][3] +=
+                            usize::from(at.iter().any(|v| *v == 0.0 && v.is_sign_negative()));
+                    }
+                    Err(CutError::Position { squared, .. }) => {
+                        assert!(!squared.is_normal(), "{at:?}");
+                        seen[k][0] += 1;
+                    }
+                    Err(e) => panic!("{at:?}: {e}"),
+                }
+            }
+        }
+        for (&(kind, _), [refused, low, high, negative_zero]) in combos.iter().zip(seen) {
+            let reads_length = matches!(kind, CutKind::Omega | CutKind::Radial | CutKind::TwoTheta);
+            assert_eq!(refused > 0, reads_length, "{kind:?}");
+            assert!(
+                low > 0 && high > 0 && negative_zero > 0,
+                "{kind:?} {low} {high} {negative_zero}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cut_that_reads_its_length_refuses_one_whose_square_is_not_normal() {
+        // low² is f64::MIN_POSITIVE; high² rounds below f64::MAX
+        let (low, high) = (2f64.powi(-511), 2f64.powi(512).next_down());
+        for (kind, d) in [
+            (CutKind::Omega, IntDir::TwoTheta),
+            (CutKind::Omega, IntDir::Radial),
+            (CutKind::Radial, IntDir::Omega),
+            (CutKind::Radial, IntDir::TwoTheta),
+            (CutKind::TwoTheta, IntDir::Omega),
+            (CutKind::TwoTheta, IntDir::Radial),
+        ] {
+            for axis in 0..3 {
+                let at = |v| {
+                    let mut at = [0.0; 3];
+                    at[axis] = v;
+                    at
+                };
+                for v in [low, high, -high] {
+                    let c = Cut::new(kind, d, at(v), 0.1, binning()).unwrap();
+                    assert_eq!(Vector3::from(c.at()).amax(), v.abs(), "{kind:?} {axis} {v}");
+                    remade(&c);
+                }
+                for (v, squared) in [
+                    (0.0, 0.0),
+                    (-0.0, 0.0),
+                    (low.next_down(), f64::MIN_POSITIVE.next_down()),
+                    (2f64.powi(512), f64::INFINITY),
+                ] {
+                    assert_eq!(
+                        Cut::new(kind, d, at(v), 0.1, binning()),
+                        Err(CutError::Position {
+                            kind: kind.name(),
+                            squared
+                        }),
+                        "{kind:?} {axis} {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// As above for a line, whichever component of the direction is the
+    /// largest, of either sign, tied or not, with ±0 components, and with
+    /// magnitudes from subnormal to near overflow.
+    #[test]
+    fn a_line_cut_made_from_its_own_line_is_the_same_cut() {
+        let largest =
+            |d: [f64; 3]| (1..3).fold(0, |m, i| if d[i].abs() > d[m].abs() { i } else { m });
+        let line = |point, dir| {
+            Cut::new(
+                CutKind::Line { point, dir },
+                IntDir::Q,
+                [0.0; 3],
+                0.1,
+                binning(),
+            )
+        };
+        let mut s = 0x2545_f491_4f6c_dd1d_u64;
+        // [largest][negative][tied with a later component]
+        let mut seen = [[[0; 2]; 2]; 3];
+        let (mut zero, mut negative_zero, mut subnormal, mut huge) = (0, 0, 0, 0);
+        for _ in 0..20000 {
+            let mut d = [value(&mut s), value(&mut s), value(&mut s)];
+            if next(&mut s).is_multiple_of(3) {
+                let m = largest(d);
+                let j = (m + 1 + (next(&mut s) % 2) as usize) % 3;
+                d[j] = if next(&mut s).is_multiple_of(2) {
+                    d[m]
+                } else {
+                    -d[m]
+                };
+            }
+            let scale = match next(&mut s) % 8 {
+                0 => f64::MIN_POSITIVE * 2f64.powi(-40),
+                1 => 2f64.powi(1020),
+                _ => 1.0,
+            };
+            let d = d.map(|v| v * scale);
+            let p = [value(&mut s), value(&mut s), value(&mut s)];
+            let c = match line(p, d) {
+                Ok(c) => c,
+                Err(CutError::Value(Error::ZeroVector { .. } | Error::NotFinite { .. })) => {
+                    continue;
+                }
+                Err(e) => panic!("{p:?} {d:?}: {e}"),
+            };
+            let CutKind::Line { point, dir } = c.kind() else {
+                unreachable!()
+            };
+            let m = largest(d);
+            assert_eq!(largest(dir), m, "{d:?}");
+            assert_eq!(dir[m], d[m].signum(), "{d:?}");
+            assert_eq!(point[m], 0.0, "{p:?} {d:?}");
+            assert!(
+                point
+                    .iter()
+                    .chain(&dir)
+                    .all(|v| v.to_bits() != (-0.0f64).to_bits()),
+                "{p:?} {d:?}"
+            );
+            remade(&c);
+            let tie = (m + 1..3).any(|j| d[j].abs() == d[m].abs());
+            seen[m][usize::from(d[m] < 0.0)][usize::from(tie)] += 1;
+            zero += usize::from(d.contains(&0.0));
+            negative_zero += usize::from(
+                p.iter()
+                    .chain(&d)
+                    .any(|v| v.to_bits() == (-0.0f64).to_bits()),
+            );
+            subnormal += usize::from(d[m].is_subnormal());
+            huge += usize::from(
+                d[m].abs() > 2f64.powi(1000) || p.iter().any(|v| v.abs() > 2f64.powi(1000)),
+            );
+        }
+        for (m, by_sign) in seen.iter().enumerate() {
+            for (negative, by_tie) in by_sign.iter().enumerate() {
+                // the first of tied components is the largest, so the last never ties
+                let cases = if m == 2 { &by_tie[..1] } else { &by_tie[..] };
+                assert!(cases.iter().all(|&n| n > 0), "{m} {negative} {by_tie:?}");
+            }
+        }
+        assert!(
+            zero > 0 && negative_zero > 0 && subnormal > 0 && huge > 0,
+            "{zero} {negative_zero} {subnormal} {huge}"
+        );
+        // a -0.0 the move along the line keeps would come back as 0.0
+        let c = line([-0.0, 0.0, -5.0], [-0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(
+            bits(&remade(&c))[..6],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0].map(f64::to_bits)
+        );
+        // a direction too short or too long for |d| to be finite and positive
+        for (d, held) in [
+            ([1e-200, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1e308, -1e308, 0.0], [1.0, -1.0, 0.0]),
+        ] {
+            let c = line([0.0, 2.0, 3.0], d).unwrap();
+            assert_eq!(
+                c.kind(),
+                CutKind::Line {
+                    point: [0.0, 2.0, 3.0],
+                    dir: held
+                }
+            );
+        }
+    }
+
     #[test]
     fn construction_rejects_what_xu_has_no_branch_for() {
         let at = [0.0; 3];
@@ -783,6 +1173,15 @@ mod tests {
         assert!(matches!(
             bad(line([0.0; 3]), IntDir::Q),
             CutError::Value(Error::ZeroVector { .. })
+        ));
+        // a finite point whose move along the line overflows
+        let far = CutKind::Line {
+            point: [1e308, 0.0, 1e308],
+            dir: [-1.0, 0.0, 1.0],
+        };
+        assert!(matches!(
+            Cut::new(far, IntDir::Q, at, 0.1, binning()),
+            Err(CutError::Value(Error::NotFinite { value, .. })) if value == f64::INFINITY
         ));
         for w in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(Cut::new(CutKind::Qz, IntDir::Q, at, w, binning()).is_err());
