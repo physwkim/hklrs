@@ -451,7 +451,9 @@ fn a_frame_never_written_fails_at_the_deadline() {
     for doc in run(image_resource(&dir), 4) {
         rsm.document(&doc);
     }
+    let paired = Instant::now();
     let map = rsm.finish().unwrap();
+    assert!(fed.elapsed() >= deadline, "{:?}", fed.elapsed());
     writer.close();
     assert_eq!(
         map.failed,
@@ -465,13 +467,13 @@ fn a_frame_never_written_fails_at_the_deadline() {
     assert_eq!(map.mapped, [1, 2, 3]);
     assert_eq!(map.cube, direct(3));
     let failed: Vec<Read> = reads.try_iter().collect();
-    assert!(failed.len() >= 2, "{} reads", failed.len());
     assert!(
         failed
             .iter()
             .all(|&(index, _, waiting)| index == 3 && waiting)
     );
-    assert!(failed[failed.len() - 1].1 - fed >= deadline);
+    let (_, again) = failed.split_last().expect("frame 3 not read");
+    assert!(again.iter().all(|&(_, at, _)| at < paired + deadline));
 }
 
 /// The superblock read while its writer rewrites it, made here by

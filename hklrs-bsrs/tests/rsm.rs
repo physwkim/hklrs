@@ -423,6 +423,11 @@ async fn a_permanent_reader_failure_fails_its_frame_unretried() {
 /// Frame 1 is never written: it is read again until the deadline after
 /// it was paired, then fails with the reader's reason; frame 2 maps after
 /// it.
+///
+/// Only bounds that hold however late the worker runs are asserted: the
+/// failure comes no earlier than the deadline after the earliest pairing
+/// time, and a read is followed by another only before the deadline after
+/// the latest. How many reads fit in between is the scheduler's.
 #[test]
 fn a_frame_never_readable_fails_at_the_deadline() {
     let deadline = Duration::from_millis(150);
@@ -448,7 +453,9 @@ fn a_frame_never_readable_fails_at_the_deadline() {
         .chain((1..=3).map(|seq| event(seq, true)))
         .chain([stop()]),
     );
+    let paired = Instant::now();
     let map = rsm.finish().unwrap();
+    assert!(fed.elapsed() >= deadline, "{:?}", fed.elapsed());
     assert_eq!(
         map.failed,
         [FailedFrame {
@@ -465,8 +472,8 @@ fn a_frame_never_readable_fails_at_the_deadline() {
         .filter(|&&(i, _)| i == 1)
         .map(|&(_, at)| at)
         .collect();
-    assert!(late.len() >= 2, "{} reads", late.len());
-    assert!(late[late.len() - 1] - fed >= deadline);
+    let (_, again) = late.split_last().expect("frame 1 not read");
+    assert!(again.iter().all(|&at| at < paired + deadline));
 }
 
 /// A dead IOC: frames 0 to 3 are never written. Events 1 and 2 pair as
@@ -474,7 +481,9 @@ fn a_frame_never_readable_fails_at_the_deadline() {
 /// theirs, which comes 100 ms later. Each frame's deadline runs from its
 /// pairing, also while it waits behind the others, so all four fail
 /// within one deadline of the last pairing, not one deadline after
-/// another.
+/// another: no frame is read again past the deadline after its own
+/// pairing, which a deadline counted from the worker's first read breaks
+/// for every frame behind frame 0.
 #[test]
 fn frames_never_readable_fail_within_one_deadline_of_the_last_pairing() {
     let deadline = Duration::from_millis(400);
@@ -497,14 +506,15 @@ fn frames_never_readable_fail_within_one_deadline_of_the_last_pairing() {
         ],
     );
     let gap = deadline / 4;
-    let first = Instant::now();
     rsm.document(&event(1, true));
+    let first = Instant::now();
     std::thread::sleep(gap);
-    let second = Instant::now();
     feed(&rsm, [event(2, true), event(3, true), event(4, true)]);
+    let second = Instant::now();
     std::thread::sleep(gap);
     let last = Instant::now();
     feed(&rsm, [datum(3..5, 2), stop()]);
+    let paired = Instant::now();
     let map = rsm.finish().unwrap();
     let done = last.elapsed();
     let failed: Vec<FailedFrame> = (0..4)
@@ -516,17 +526,19 @@ fn frames_never_readable_fail_within_one_deadline_of_the_last_pairing() {
     assert_eq!(map.failed, failed);
     assert!(map.mapped.is_empty(), "{:?}", map.mapped);
     let reads = reads.lock().unwrap();
-    for (index, paired) in [(0, first), (1, second), (2, last), (3, last)] {
+    for (index, paired_by) in [(0, first), (1, second), (2, paired), (3, paired)] {
         let at: Vec<Instant> = reads
             .iter()
             .filter(|&&(i, _)| i == index)
             .map(|&(_, at)| at)
             .collect();
-        assert!(!at.is_empty(), "frame {index} not read");
-        assert!(at[at.len() - 1] - paired >= deadline, "frame {index}");
+        let (_, again) = at.split_last().expect("frame not read");
+        assert!(
+            again.iter().all(|&t| t < paired_by + deadline),
+            "frame {index}"
+        );
     }
     assert!(done >= deadline, "{done:?}");
-    assert!(done < deadline * 3 / 2, "{done:?}");
 }
 
 /// Frame 1 is written only after the worker has read it twice: meanwhile
